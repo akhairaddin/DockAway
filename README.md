@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Assets.xcassets/AppIcon.appiconset/DockAutoHideIcon.png" alt="App Icon" width="128" height="128">
+  <img src="DockAutoHide/Assets.xcassets/AppIcon.appiconset/DockAutoHideIcon.png" alt="App Icon" width="128" height="128">
 </p>
 
 <h1 align="center">DockAutoHide</h1>
