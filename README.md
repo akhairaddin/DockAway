@@ -2,7 +2,7 @@
 
 A tiny macOS menu bar utility that keeps your Dock out of the way. It appears only when you're actually looking at the desktop, and disappears the instant any app has a window on screen.
 
-## What it does
+## What it Does
 | Desktop visible, no window from any app on screen | Shown |
 
 | Any app's window is on screen | Hidden |
@@ -24,28 +24,17 @@ It works by activating the system shortcut **⌥⌘D** (Command+Option+D), the s
 - Standard macOS About panel
 - On quit, it explicitly turns Dock auto-hide back off and restarts the Dock, so closing the app visibly hands control back to you
 
+## Menu bar
+
+- **Status**: Live text showing what triggered the last action
+- **Launch at Login**: Toggles via `SMAppService`, no System Settings round-trip needed
+- **About DockAutoHide**: The standard macOS about panel
+- **Quit**: Also resets `autohide` to off and restarts the Dock, so quitting visibly restores normal behavior
+
 ## Requirements
 
 - macOS 13 (Ventura) or later
-- Xcode 15+
 - **Accessibility permission**: required because the app sends a synthetic ⌥⌘D keystroke via `CGEvent`. Grant under **System Settings → Privacy & Security → Accessibility**.
-- **App Sandbox must stay OFF**: a sandboxed app can't post synthetic keyboard events to other processes.
-
-## Project structure
-
-```
-DockAutoHide/
-├── main.swift           # Manual entry point, instantiates AppDelegate directly
-├── AppDelegate.swift     # Menu bar UI, Accessibility flow, Launch at Login, quit/restore logic
-├── DockWatcher.swift     # All the actual watching and decision-making logic
-├── Info.plist            # LSUIElement = YES keeps it out of the Dock
-└── Assets.xcassets/
-    ├── AppIcon           # Main app icon (1024x1024, blue, chevrons over a mini dock)
-    └── Imageset          # Menu bar icon, set as a Template Image so it auto-adapts
-                           # to light/dark menu bars
-```
-
-> `main.swift` exists because Xcode's modern "macOS App" template defaults to the SwiftUI app lifecycle. To get a plain AppKit `NSApplicationDelegate` working cleanly, the entry point is wired up manually rather than relying on `@main` directly on `AppDelegate`.
 
 ## How the detection actually works
 
@@ -57,19 +46,6 @@ The core logic lives in `DockWatcher.swift`:
 4. Space changes get a check at 150ms (to let the window list settle after the swipe) and a second check at 300ms, anchored to that exact swipe rather than to the separate safety timer. This was the fix for occasional random-feeling lag, since waiting on an independent, out-of-phase timer meant some swipes got lucky timing and some didn't.
 5. A repeating safety check, decoupled from any notification, catches anything notifications alone might miss, like minimizing a window with a trackpad gesture, which doesn't fire a notification at all.
 
-## Menu bar
+## Known Technical Limitations
 
-- **Status**: Live text showing what triggered the last action
-- **Launch at Login**: Toggles via `SMAppService`, no System Settings round-trip needed
-- **About DockAutoHide**: The standard macOS about panel
-- **Quit**: Also resets `autohide` to off and restarts the Dock, so quitting visibly restores normal behavior
-
-## Building & running
-
-1. Open the project in Xcode and confirm **App Sandbox** is removed under Signing & Capabilities.
-2. Run (⌘R). On first launch it requests Accessibility permission and shows a one-time welcome message once granted.
-3. To ship a standalone copy: **Product → Archive → Distribute App → Custom → Copy App**, then re-grant Accessibility to that exact built `.app`. A fresh export is a distinct build as far as permissions are concerned.
-
-## Known limitations
-
-- Relies on `CGWindowListCopyWindowInfo`, which Apple has signaled may eventually need to move to `SCShareableContent` on a future macOS version, will push new code when that does happen.
+- Relies on `CGWindowListCopyWindowInfo`, which Apple has signaled may eventually need to move to `SCShareableContent` on a future macOS version, will push new code whenever that happens.
