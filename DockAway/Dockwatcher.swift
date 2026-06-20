@@ -32,7 +32,7 @@ final class DockWatcher {
             self.evaluateFrontmostApp(quiet: true)
         }
 
-        print("✅ DockWatcher started")
+        print("✅ DockStatus started")
     }
 
     deinit {
