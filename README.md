@@ -36,6 +36,7 @@ It works by activating the system shortcut **⌥⌘D** (Command+Option+D), the s
 - **Quit**: Also resets `autohide` to off and restarts the Dock, so quitting visibly restores normal behavior
 
 ##Unsigned App Warning
+
 Since I don't want to pay Apple $100 a year just for the pleasure of having my simple app "signed and notarized", You will get a pop-up saying ""DockAutoHide" Not Opened".
 1. Click "Done" on the pop up
 2. Go to System Settings> Privacy and Security and scroll all the way down
