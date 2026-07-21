@@ -117,7 +117,7 @@ import Sparkle
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
         
-        let creditsText = "Copyright (C) 2026 Abdullah Khairaddin\n\nHides the Dock when apps are on screen and it reappears on an empty desktop ."
+        let creditsText = "Copyright © Abdullah Khairaddin 2026 All rights reserved.\n\nHides the Dock when apps are on screen and it reappears on an empty desktop."
         
         let attributedCredits = NSAttributedString(
             string: creditsText,
@@ -126,7 +126,6 @@ import Sparkle
         
         NSApp.orderFrontStandardAboutPanel(options: [
             NSApplication.AboutPanelOptionKey.applicationName: "DockAway",
-            NSApplication.AboutPanelOptionKey.version: "1.0",
             NSApplication.AboutPanelOptionKey.credits: attributedCredits
         ])
     }
