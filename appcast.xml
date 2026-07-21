@@ -2,6 +2,8 @@
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>DockAway</title>
+        
+        <!-- 1.1 RELEASE -->
         <item>
             <title>1.1</title>
             <pubDate>Tue, 21 Jul 2026 04:43:59 -0400</pubDate>
@@ -13,11 +15,7 @@
     </channel>
 </rss>
 
-
-<?xml version="1.0" standalone="yes"?>
-<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
-    <channel>
-        <title>DockAway</title>
+<!-- 1.0 RELEASE -->
         <item>
             <title>1.0</title>
             <pubDate>Sat, 21 Jun 2026 01:45:03 -0400</pubDate>
