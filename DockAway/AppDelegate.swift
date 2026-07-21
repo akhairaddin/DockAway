@@ -7,6 +7,9 @@ import Sparkle
     private var statusItem: NSStatusItem!
     private var dockWatcher: DockWatcher!
     private var updaterController: SPUStandardUpdaterController!
+    
+    // The Unix signal trapper
+    private var sigtermSource: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🚀 APP LAUNCHED")
@@ -16,6 +19,9 @@ import Sparkle
         updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
         setupMenuBar()
         requestAccessibilityPermission()
+        
+        // Arm the signal trapper
+        setupSignalHandler()
     }
 
     // MARK: - Menu Bar
@@ -48,26 +54,25 @@ import Sparkle
         menu.addItem(.separator())
         
         // --- SPARKLE UPDATE MENU ITEM  ---
-                let updateMenuItem = NSMenuItem(
-                    title: "Check for Updates...",
-                    action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
-                    keyEquivalent: ""
-                )
+        let updateMenuItem = NSMenuItem(
+            title: "Check for Updates...",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
         
         // Safety check to ensure we have a controller
-                if let controller = self.updaterController {
-                    updateMenuItem.target = controller
-                    updateMenuItem.isEnabled = true
-                } else {
-                    // If it's nil, we initialize it right here as a fallback
-                    self.updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
-                    updateMenuItem.target = self.updaterController
-                    updateMenuItem.isEnabled = true
-                }
-                
-                menu.addItem(updateMenuItem)
-
+        if let controller = self.updaterController {
+            updateMenuItem.target = controller
+            updateMenuItem.isEnabled = true
+        } else {
+            // If it's nil, we initialize it right here as a fallback
+            self.updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+            updateMenuItem.target = self.updaterController
+            updateMenuItem.isEnabled = true
+        }
         
+        menu.addItem(updateMenuItem)
+
         menu.addItem(NSMenuItem(title: "About DockAway", action: #selector(showAbout), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
 
@@ -109,20 +114,16 @@ import Sparkle
     @objc private func showAbout() {
         NSApp.activate(ignoringOtherApps: true)
         
-        // 1. Create a paragraph style and set it to center alignment
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
         
-        // 2. Create the string with an extra newline (\n\n) for spacing
         let creditsText = "Copyright (C) 2026 Abdullah Khairaddin\n\nHides the Dock when apps are on screen and it reappears on an empty desktop ."
         
-        // 3. Apply the paragraph style to the attributed string
         let attributedCredits = NSAttributedString(
             string: creditsText,
             attributes: [.paragraphStyle: paragraphStyle]
         )
         
-        // 4. Pass the updated attributed string to the options panel
         NSApp.orderFrontStandardAboutPanel(options: [
             NSApplication.AboutPanelOptionKey.applicationName: "DockAway",
             NSApplication.AboutPanelOptionKey.version: "1.0",
@@ -169,22 +170,14 @@ import Sparkle
             showWelcomeIfNeeded()
         } else {
             let alert = NSAlert()
-            
-            // 1. Keep the main header clean
             alert.messageText = "But First ☝️"
-            
-            // 2. Put both the subtitle and body in the informative text to bypass the layout gap
             alert.informativeText = "Accessibility Permission is Required:\nDockAway is requesting accessibility permission from system settings in order to detect desktop app occupancy status."
             alert.alertStyle = .informational
             
-            // Buttons populate right-to-left
             alert.addButton(withTitle: "Allow Access")
             alert.addButton(withTitle: "Quit")
-            
-            // 3. Force layout generation so we can style the subview text fields directly
             alert.layout()
             
-            // 4. Find the informative text field and make the first line bold with tight spacing
             if let contentView = alert.window.contentView {
                 func findTextField(in view: NSView, matching text: String) -> NSTextField? {
                     if let textField = view as? NSTextField, textField.stringValue.contains(text) {
@@ -206,15 +199,11 @@ import Sparkle
                     
                     let attributedString = NSMutableAttributedString(string: informativeTextField.stringValue)
                     
-                    // Styling the subtitle line (Bold & Dark)
                     attributedString.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 11), range: firstLineRange)
                     attributedString.addAttribute(.foregroundColor, value: NSColor.labelColor, range: firstLineRange)
-                    
-                    // Styling the body text line (Regular & Muted)
                     attributedString.addAttribute(.font, value: NSFont.systemFont(ofSize: 11), range: remainingRange)
                     attributedString.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: remainingRange)
                     
-                    // Adjust paragraph system settings for clean line-heights
                     let paragraphStyle = NSMutableParagraphStyle()
                     paragraphStyle.lineSpacing = 2
                     paragraphStyle.paragraphSpacing = 4
@@ -224,7 +213,6 @@ import Sparkle
                 }
             }
             
-            // Handle button response
             if alert.runModal() == .alertFirstButtonReturn {
                 let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true]
                 AXIsProcessTrustedWithOptions(options)
@@ -238,7 +226,7 @@ import Sparkle
     private func waitForAccessibility() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             if AXIsProcessTrusted() {
-                print("✅ Accessibility granted — starting detector")
+                print("✅ Accessibility granted - starting detector")
                 self.dockWatcher = DockWatcher()
                 self.ensureDockAwayIsOn()
                 self.dockWatcher.start()
@@ -249,26 +237,47 @@ import Sparkle
         }
     }
 
-    // MARK: - Quit
+    // MARK: - Unix Signal & Cleanup
+
+    private func setupSignalHandler() {
+        // 1. Ignore the default sudden-death SIGTERM so we can handle it ourselves
+        signal(SIGTERM, SIG_IGN)
+        
+        // 2. Set up a listener for the Unix signal
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { [weak self] in
+            print("  ⚠️ Caught Unix SIGTERM (Activity Monitor)")
+            self?.isQuitting = true
+            self?.restoreDockState()
+            
+            // 3. Manually exit after our cleanup is finished
+            exit(0)
+        }
+        source.resume()
+        sigtermSource = source
+    }
+
+    private func restoreDockState() {
+        let defaults = UserDefaults(suiteName: "com.apple.dock")
+        defaults?.synchronize()
+        let isHidden = defaults?.bool(forKey: "autohide") ?? false
+        
+        if isHidden, let watcher = dockWatcher {
+            print("  ⚡ Restoring Dock visibility before termination")
+            watcher.simulateOptionCommandDPublic()
+            
+            // The Life Support Hold: Keep the app alive just long enough for the keystroke to register
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+    }
 
     @objc private func quit() {
-        isQuitting = true
-        let defaults = UserDefaults(suiteName: "com.apple.dock")
-        defaults?.set(false, forKey: "autohide")
-        defaults?.synchronize()
-
-        Thread.sleep(forTimeInterval: 0.3)
-
-        let task = Process()
-        task.launchPath = "/usr/bin/killall"
-        task.arguments = ["Dock"]
-        try? task.run()
-
-        Thread.sleep(forTimeInterval: 0.5)
+        // Polite exit (triggers applicationWillTerminate)
         NSApp.terminate(nil)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Cleanup already handled in quit()
+        isQuitting = true
+        restoreDockState()
     }
 }

@@ -6,26 +6,23 @@
 
 A tiny macOS menu bar utility that keeps your Dock out of the way. It appears only when you're actually looking at an empty desktop and disappears the instant any app has a window on screen.
 
-## What it Does
--Desktop visible, no window from any app on screen |Shown|
-
--Any app's window is on screen |Hidden|
-
--You minimize the only window on screen |Shown|
-
--Two windows open, you minimize one |Hidden|
+## When it's hidden and when it's visible
+- Desktop visible, no window from any app on screen | DockShown|
+- Any app's window is on screen |Dock Hidden|
+- You minimize the only window on screen |Dock Shown|
+- Two windows open, you minimize one |Dock Hidden|
 
 It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the same one you'd press manually to toggle Dock auto-hide, so it's never fighting macOS, just pressing the button for you at the right moments.
 
 ## Features
 
-- Menu bar only, no Dock icon, no clutter
+- Lightweight, Menu bar app that can be hidden via Settings > Menu Bar > Toggle DockAway (To show or hide menu bar icon)
 - Detects every app switch and every Space/desktop swipe in real time
 - Detects the true desktop state system-wide rather than just checking Finder, so it correctly handles minimizing any app's last window, tiled/split-screen layouts, trackpad gesture minimizing, and so on
 - Self-correcting: instead of trusting its own memory of "is the Dock shown?" it reads the live `com.apple.dock autohide` value before acting, so it can't quietly drift out of sync
-- A lightweight, repeating safety check as a backstop, plus a check anchored to the exact moment of each Space change, so there's never a long window where it's silently wrong
+- Features a safety check as a backstop, plus a check anchored to the exact moment of each Space change, so there's never a long window where it's silently wrong
 - "Launch at Login" toggle built right into the menu, no detour through System Settings
-- Standard macOS About panel
+- Automatic updates via Sparkle
 - On quit, it explicitly turns Dock auto-hide back off and restarts the Dock, so closing the app visibly hands control back to you
 
 ## Menu bar
@@ -33,7 +30,7 @@ It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the s
 - **Status**: Live text showing what triggered the last action
 - **Launch at Login**: Toggles via `SMAppService`, no System Settings round-trip needed
 - **About DockAway**: The standard macOS about panel
-- **Quit**: Also resets `autohide` to off and restarts the Dock, so quitting visibly restores normal behavior
+- **Quit**: Also resets `autohide` to off and restarts the Dock, Quitting visibly restores normal behavior
 
 ## Unsigned App Warning
 
@@ -47,7 +44,7 @@ Since I don't want to pay Apple $100 a year just for the pleasure of having my s
 
 ## Requirements
 
-- macOS 13 (Ventura) or newer
+- macOS 14 (Sonoma) or newer
 - **Accessibility permission**: Required because the app sends a synthetic ⌘⌥D keystroke via `CGEvent`. Grant under **System Settings → Privacy & Security → Accessibility**.
 
 ## How the detection actually works

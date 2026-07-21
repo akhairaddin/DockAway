@@ -6,6 +6,7 @@ final class DockWatcher {
     private var pendingSpaceCheck: DispatchWorkItem?
     private var dockIsShown = false
     private var safetyTimer: Timer?
+    private var lastToggleTime = Date.distantPast
 
     // MARK: - Lifecycle
 
@@ -83,7 +84,7 @@ final class DockWatcher {
     }
 
     /// Shows the Dock only when NO standard window from ANY app is visible
-    /// on the current screen,  i.e. the true desktop. Checking system-wide
+    /// on the current screen, i.e. the true desktop. Checking system-wide
     /// (rather than just the reported "frontmost" app) is what correctly
     /// handles cases like two tiled apps where minimizing one still leaves
     /// the other covering the screen.
@@ -101,7 +102,7 @@ final class DockWatcher {
 
         if !quiet {
             let label = app.localizedName ?? bundleID
-            postStatus(onDesktop ? "Desktop — Dock shown" : "\(label) active")
+            postStatus(onDesktop ? "Desktop - Dock shown" : "\(label) active")
         }
     }
 
@@ -120,10 +121,16 @@ final class DockWatcher {
         for info in list {
             guard
                 let layer = info[kCGWindowLayer as String] as? Int,
-                let bounds = info[kCGWindowBounds as String] as? [String: CGFloat]
+                let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                let ownerName = info[kCGWindowOwnerName as String] as? String
             else { continue }
 
-            guard layer == kCGNormalWindowLevel else { continue }
+            // FIX: Added "Dock" so it stops seeing itself and triggering a bounce
+            if ownerName == "DockAway" || ownerName == "Window Server" || ownerName == "Dock" { continue }
+
+            // FIX: Accept standard layer (0) AND elevated Mission Control layers (1 to 25)
+            // so active windows are properly recognized during gestures and space switches.
+            guard layer == kCGNormalWindowLevel || (layer > 0 && layer < 25) else { continue }
 
             let width = bounds["Width"] ?? 0
             let height = bounds["Height"] ?? 0
@@ -170,15 +177,21 @@ final class DockWatcher {
 
     private func setDockVisible(_ shouldShow: Bool) {
         guard (NSApp.delegate as? AppDelegate)?.isQuitting != true else { return }
+        
+        // FIX: Stop the 0.15s and 0.3s timers from double-tapping while UserDefaults updates
+        if Date().timeIntervalSince(lastToggleTime) < 1.0 { return }
+        
         let actuallyShown = !(UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false)
 
         if shouldShow && !actuallyShown {
             print("  ⚡ Forcing Dock SHOW")
             dockIsShown = true
+            lastToggleTime = Date()
             simulateOptionCommandD()
         } else if !shouldShow && actuallyShown {
             print("  ⚡ Forcing Dock HIDE")
             dockIsShown = false
+            lastToggleTime = Date()
             simulateOptionCommandD()
         } else {
             dockIsShown = shouldShow
