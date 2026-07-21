@@ -7,9 +7,9 @@
 A tiny macOS menu bar utility that keeps your Dock out of the way. It appears only when you're actually looking at an empty desktop and disappears the instant any app has a window on screen.
 
 ## When it's hidden and when it's visible
-- Desktop visible, no window from any app on screen | DockShown|
-- Any app's window is on screen |Dock Hidden|
-- You minimize the only window on screen |Dock Shown|
+- Desktop is visible, no app window on screen | Dock Shown|
+- Any app window is on screen |Dock Hidden|
+- You minimize the only/last window on screen |Dock Shown|
 - Two windows open, you minimize one |Dock Hidden|
 
 It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the same one you'd press manually to toggle Dock auto-hide, so it's never fighting macOS, just pressing the button for you at the right moments.
