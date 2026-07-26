@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="DockAway/Assets.xcassets/AppIcon.appiconset/DockAwayIcon.png" alt="App Icon" width="128" height="128">
+  <img src="DockAway/docs/DockAwayIcon.png" alt="App Icon" width="256" height="256">
 </p>
 
 <h1 align="center">DockAway</h1>
