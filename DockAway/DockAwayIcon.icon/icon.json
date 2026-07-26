@@ -1,0 +1,147 @@
+{
+  "features" : [
+    "refractivity",
+    "specular-location"
+  ],
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.36133,0.62305,0.95898,1.00000",
+      "display-p3:0.09863,0.26587,0.54102,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "04-Mark-A.svg",
+          "name" : "04-Mark-A",
+          "opacity" : 0.75,
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -54.330937500000005,
+              -3.3899999999999864
+            ]
+          }
+        },
+        {
+          "image-name" : "05-Mark-V.svg",
+          "name" : "05-Mark-V",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              27.86499999999978,
+              -2.259999999999991
+            ]
+          }
+        }
+      ],
+      "name" : "Down V arrow",
+      "refractivity" : {
+        "depth" : 0.0297265625,
+        "enabled" : true,
+        "strength" : -0.359140625
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 1.25
+      },
+      "specular" : "outside",
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.3
+      }
+    },
+    {
+      "blur-material" : null,
+      "hidden" : false,
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : "automatic",
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "03-Dock-Apps.svg",
+          "name" : "03-Dock-Apps",
+          "position" : {
+            "scale" : 0.9,
+            "translation-in-points" : [
+              0,
+              28.092000000000212
+            ]
+          }
+        }
+      ],
+      "name" : "Apps",
+      "refractivity" : {
+        "depth" : 0.25359375,
+        "enabled" : false,
+        "strength" : 0.2727734375
+      },
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0.5
+      },
+      "specular" : "inside",
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    },
+    {
+      "blur-material" : null,
+      "layers" : [
+        {
+          "glass" : true,
+          "hidden" : false,
+          "image-name" : "02-Dock-Tray.svg",
+          "name" : "02-Dock-Tray",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              -0.004999999999768079
+            ]
+          }
+        }
+      ],
+      "name" : "Dock",
+      "refractivity" : {
+        "depth" : 0.3301171875,
+        "enabled" : true,
+        "strength" : 0.851640625
+      },
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 1
+      }
+    },
+    {
+      "layers" : [
+        {
+          "hidden" : false,
+          "image-name" : "01-Background 2.svg",
+          "name" : "01-Background 2"
+        }
+      ],
+      "name" : "Background",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}
