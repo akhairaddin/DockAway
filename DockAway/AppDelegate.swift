@@ -117,7 +117,7 @@ import Sparkle
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
         
-        let creditsText = "Copyright © Abdullah Khairaddin 2026 All rights reserved.\n\nHides the Dock when apps are on screen and it reappears on an empty desktop."
+        let creditsText = "Copyright © 2026 Abdullah Khairaddin All rights reserved.\n\nHides the Dock when apps are on screen and it reappears on an empty desktop."
         
         let attributedCredits = NSAttributedString(
             string: creditsText,
