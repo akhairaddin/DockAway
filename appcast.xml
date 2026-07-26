@@ -3,6 +3,17 @@
     <channel>
         <title>DockAway</title>
         
+        <!-- 1.1.1 RELEASE -->
+        <item>
+        <title>1.1.1</title>
+        <pubDate>Sun, 26 Jul 2026 05:41:11 -0400</pubDate>
+        <sparkle:version>3</sparkle:version>
+        <sparkle:shortVersionString>1.1.1</sparkle:shortVersionString>
+        <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+        <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1.1/DockAway.dmg" length="3154432" type="application/octet-stream" sparkle:edSignature="Zfvei5PhynmcrMHzD0FrKmll1nhBxPxaGEZ8/cCjP+c0WBXD+0e0i2+rYquFQqkXAhWd/ZLsCKwO93rj99sdDA=="/>
+        <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
+        </item>
+        
         <!-- 1.1 RELEASE -->
         <item>
             <title>1.1</title>
@@ -10,10 +21,8 @@
             <sparkle:version>1.1</sparkle:version>
             <sparkle:shortVersionString>1.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            
-            <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
-            
             <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1/DockAway.dmg" length="1181696" type="application/octet-stream" sparkle:edSignature="dtE+4CJT8UgGqeiMAYjtMBwh9TXMEqMQAbDZJb0zEs4Z+p/YJpqsbIhBO16PE+KJgFS5gl0uKZ2lvZ67TuBABw=="/>
+            <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
         </item>
 
 <!-- 1.0 RELEASE -->
@@ -24,6 +33,7 @@
             <sparkle:shortVersionString>1.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.0/DockAway.dmg" length="1287605" type="application/octet-stream" sparkle:edSignature="MKdjh99NssFN8XtZ6+iplR5UNu1EVhTkn3BDHhVAGSy8YmYSzh3nuo3AKa3bpS1uKjHTpbMpAvJ+a17E6jEsCw=="/>
+            <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
         </item>
 
     </channel>
