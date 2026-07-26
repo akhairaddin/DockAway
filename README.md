@@ -16,14 +16,15 @@ It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the s
 
 ## Features
 
-- Lightweight, Menu bar app that can be hidden via Settings > Menu Bar > Toggle DockAway (To show or hide menu bar icon)
+- A lightweight, Dynamic Menu bar app that indicates when the dock is shown or hidden via an up and down arrow. 
 - Detects every app switch and every Space/desktop swipe in real time
 - Detects the true desktop state system-wide rather than just checking Finder, so it correctly handles minimizing any app's last window, tiled/split-screen layouts, trackpad gesture minimizing, and so on
 - Self-correcting: instead of trusting its own memory of "is the Dock shown?" it reads the live `com.apple.dock autohide` value before acting, so it can't quietly drift out of sync
 - Features a safety check as a backstop, plus a check anchored to the exact moment of each Space change, so there's never a long window where it's silently wrong
 - "Launch at Login" toggle built right into the menu, no detour through System Settings
 - Automatic updates via Sparkle
-- On quit, it explicitly turns Dock auto-hide back off and restarts the Dock, so closing the app visibly hands control back to you
+- Dynamic menu bar
+- When quitting the app, it explicitly turns the Dock auto-hide setting off and shows the displays the dock which indicates the app has closed and that everything is back to normal.
 
 ## Menu bar
 
@@ -40,7 +41,7 @@ Since I don't want to pay Apple $100 a year just for the pleasure of having my s
 3. You'll see "DockAway was blocked to protect your mac", click "Open Anyway" 
 4. Click "Open Anyway" again on the pop-up
 5. Confirm with fingerprint/Password
-6. Done! Enjoy.
+6. Open DockAway again and grant accessibility permission. You're done! Enjoy your extra space.
 
 ## Requirements
 
@@ -56,7 +57,3 @@ The core logic lives in `DockWatcher.swift`:
 3. It only sends ⌘⌥D if the Dock's actual current state, read live from `UserDefaults(suiteName: "com.apple.dock")`, doesn't already match what it should be, so it never double-fires or fights itself.
 4. Space changes get a check at 150ms (to let the window list settle after the swipe) and a second check at 300ms, anchored to that exact swipe rather than to the separate safety timer. This was the fix for occasional random-feeling lag, since waiting on an independent, out-of-phase timer meant some swipes got lucky timing and some didn't.
 5. A repeating safety check, decoupled from any notification, catches anything notifications alone might miss, like minimizing a window with a trackpad gesture, which doesn't fire a notification at all.
-
-## Known Technical Limitations
-
-- Relies on `CGWindowListCopyWindowInfo`, which Apple has signaled may eventually need to move to `SCShareableContent` on a future macOS version, will push an update whenever that happens.

@@ -8,6 +8,13 @@ final class DockWatcher {
     private var safetyTimer: Timer?
     private var lastToggleTime = Date.distantPast
 
+    // Cached: setDockVisible now reads this ~3x a second via the safety timer.
+    private let dockDefaults = UserDefaults(suiteName: "com.apple.dock")
+
+    // Last state pushed to the menu bar, so we only touch the status item
+    // when it genuinely flips. nil = unknown, force the next update through.
+    private var lastIconState: Bool?
+
     // MARK: - Lifecycle
 
     func start() {
@@ -145,6 +152,7 @@ final class DockWatcher {
 
     func resetState() {
         dockIsShown = false
+        lastIconState = nil          // force the glyph to refresh on the next pass
         evaluateFrontmostApp(quiet: false)
     }
 
@@ -177,11 +185,16 @@ final class DockWatcher {
 
     private func setDockVisible(_ shouldShow: Bool) {
         guard (NSApp.delegate as? AppDelegate)?.isQuitting != true else { return }
-        
+
+        // Read the live Dock state FIRST, before the debounce below can bail out.
+        // The glyph tracks what the Dock is actually doing rather than what we
+        // intended, so it stays correct during the debounce window and also
+        // self-corrects if the user presses ⌥⌘D themselves.
+        let actuallyShown = !(dockDefaults?.bool(forKey: "autohide") ?? false)
+        syncStatusIcon(dockShown: actuallyShown)
+
         // FIX: Stop the 0.15s and 0.3s timers from double-tapping while UserDefaults updates
         if Date().timeIntervalSince(lastToggleTime) < 1.0 { return }
-        
-        let actuallyShown = !(UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false)
 
         if shouldShow && !actuallyShown {
             print("  ⚡ Forcing Dock SHOW")
@@ -200,7 +213,16 @@ final class DockWatcher {
 
     // MARK: - Status Helpers
 
+    /// Only pushes to the menu bar on a real transition — this is called
+    /// roughly three times a second by the safety timer.
+    private func syncStatusIcon(dockShown: Bool) {
+        guard lastIconState != dockShown else { return }
+        lastIconState = dockShown
+        (NSApp.delegate as? AppDelegate)?.setStatusIcon(dockShown: dockShown)
+    }
+
     private func postStatus(_ text: String) {
         (NSApp.delegate as? AppDelegate)?.updateStatus(text)
     }
 }
+

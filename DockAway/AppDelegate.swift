@@ -27,11 +27,41 @@ import Sparkle
     // MARK: - Menu Bar
 
     private func setupMenuBar() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = statusItem.button {
-            button.image = NSImage(named: "Imageset")
-        }
+        // variableLength, not squareLength: the glyph is 22×16pt, so a square
+        // status item would clip the wider chevron lockup.
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+
+        // Seed the glyph from the live Dock state so the very first frame is
+        // already correct, before DockWatcher has run its first evaluation.
+        let autohide = UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false
+        applyStatusIcon(dockShown: !autohide)
+
         buildMenu()
+    }
+
+    /// Swaps the menu bar glyph. Safe to call from any thread; DockWatcher
+    /// already filters out no-op transitions before calling this.
+    func setStatusIcon(dockShown: Bool) {
+        if Thread.isMainThread {
+            applyStatusIcon(dockShown: dockShown)
+        } else {
+            DispatchQueue.main.async { self.applyStatusIcon(dockShown: dockShown) }
+        }
+    }
+
+    private func applyStatusIcon(dockShown: Bool) {
+        // Dock up (visible)  -> up chevron at full strength
+        // Dock down (hidden) -> down chevron at full strength
+        let name = dockShown ? "DockAwayStatus-Up" : "DockAwayStatus-Down"
+
+        guard let image = NSImage(named: name) else {
+            print("⚠️ Missing menu bar image asset: \(name)")
+            return
+        }
+
+        image.isTemplate = true
+        image.accessibilityDescription = dockShown ? "Dock visible" : "Dock hidden"
+        statusItem.button?.image = image
     }
 
     private func buildMenu() {
@@ -88,14 +118,10 @@ import Sparkle
     // MARK: - Launch at Login
 
     private func isLaunchAtLoginEnabled() -> Bool {
-        if #available(macOS 13.0, *) {
-            return SMAppService.mainApp.status == .enabled
-        }
-        return false
+        SMAppService.mainApp.status == .enabled
     }
 
     @objc private func toggleLaunchAtLogin() {
-        guard #available(macOS 13.0, *) else { return }
         let service = SMAppService.mainApp
         do {
             if service.status == .enabled {
@@ -280,3 +306,4 @@ import Sparkle
         restoreDockState()
     }
 }
+
