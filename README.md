@@ -46,8 +46,8 @@ Since I don't want to pay Apple $100 a year just for the pleasure of having my s
 ## Requirements
 
 - macOS 14 (Sonoma) or newer
-- **Accessibility permission**: Required because the app sends a synthetic ⌘⌥D keystroke via `CGEvent`. Grant under **System Settings → Privacy & Security → Accessibility**.
-
+- **Accessibility permission**: Required because the app sends a synthetic ⌘⌥D keystroke via `CGEvent`. Granted under **System Settings → Privacy & Security → Accessibility**.
+- I**nput monitoring permission (Activated automatically when granting Accessibility)**: Required to detect 4 fingers on the trackpad in order to hide the dock pre 4 finger swipe for smoothness via `NMultitouchWatcher` . macOS is quirky when it comes to hiding the dock while swiping, prehiding on 4 fingers tap prevents bouncing and artifactin``g.
 ## How the detection actually works
 
 The core logic lives in `DockWatcher.swift`:

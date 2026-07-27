@@ -8,12 +8,24 @@ final class DockWatcher {
     private var safetyTimer: Timer?
     private var lastToggleTime = Date.distantPast
 
-    // Cached: setDockVisible now reads this ~3x a second via the safety timer.
-    private let dockDefaults = UserDefaults(suiteName: "com.apple.dock")
+    // ── SPEED TUNING ─────────────────────────────────────────────────────────
+    // Raise any of these if the Dock starts double-toggling.
+    private let spaceCheckDelay: TimeInterval  = 0.0    // was 0.15
+    private let spaceRecheckDelay: TimeInterval = 0.12  // was 0.15
+    private let safetyInterval: TimeInterval   = 0.12   // was 0.30
+    private let toggleDebounce: TimeInterval   = 0.45   // was 1.00
 
-    // Last state pushed to the menu bar, so we only touch the status item
-    // when it genuinely flips. nil = unknown, force the next update through.
-    private var lastIconState: Bool?
+    // Set by the pre-hide trigger. While a hold is active the Dock may be hidden
+    // but never shown — the empty-desktop verdict is ignored entirely, so a tap
+    // on the bare desktop will not yank it back up mid-gesture.
+    private var holdLatched = false
+    private var holdLatchExpiry = Date.distantPast   // safety cap, see below
+    private var holdReleaseAt = Date.distantPast
+
+    private var isHoldingHidden: Bool {
+        if holdLatched && Date() < holdLatchExpiry { return true }
+        return Date() < holdReleaseAt
+    }
 
     // MARK: - Lifecycle
 
@@ -34,11 +46,16 @@ final class DockWatcher {
 
         // Safety net: Catches cases where NO notification fires at all,
         // e.g. minimizing the last window of an app via a trackpad gesture.
-        safetyTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+        // .common, not the default mode: a scheduledTimer is parked in .default,
+        // which the run loop suspends while it tracks a trackpad gesture — so
+        // this net was asleep for the entire duration of every swipe.
+        let timer = Timer(timeInterval: safetyInterval, repeats: true) { [weak self] _ in
             guard let self else { return }
             guard (NSApp.delegate as? AppDelegate)?.isQuitting != true else { return }
             self.evaluateFrontmostApp(quiet: true)
         }
+        RunLoop.main.add(timer, forMode: .common)
+        safetyTimer = timer
 
         print("✅ DockStatus started")
     }
@@ -61,13 +78,17 @@ final class DockWatcher {
             // rather than the independent safety timer, so the worst case
             // is always the same fixed delay instead of depending on timer
             // phase luck. No-ops instantly if the first check was correct.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + self.spaceRecheckDelay) {
                 self.evaluateFrontmostApp(quiet: true)
             }
         }
 
         pendingSpaceCheck = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+        if spaceCheckDelay <= 0 {
+            DispatchQueue.main.async(execute: work)     // same run loop turn
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + spaceCheckDelay, execute: work)
+        }
     }
 
     // MARK: - Notification Handler
@@ -152,12 +173,28 @@ final class DockWatcher {
 
     func resetState() {
         dockIsShown = false
-        lastIconState = nil          // force the glyph to refresh on the next pass
         evaluateFrontmostApp(quiet: false)
     }
 
     func simulateOptionCommandDPublic() {
         simulateOptionCommandD()
+    }
+
+    /// Latch the Dock down: SHOW is ignored until released. Hiding is unaffected.
+    ///
+    /// `maximum` is a dead-man's switch. If the release callback never arrives —
+    /// the trackpad device stops, a finger-lift frame is dropped — the latch
+    /// expires on its own rather than leaving the Dock permanently stuck hidden.
+    func beginHoldHidden(maximum: TimeInterval = 5.0) {
+        holdLatched = true
+        holdLatchExpiry = Date().addingTimeInterval(maximum)
+    }
+
+    /// Release the latch, keeping SHOW suppressed for a grace period so a swipe
+    /// that is still landing isn't undone the instant fingers lift.
+    func endHoldHidden(after seconds: TimeInterval) {
+        holdLatched = false
+        holdReleaseAt = Date().addingTimeInterval(seconds)
     }
 
     private func simulateOptionCommandD() {
@@ -185,18 +222,16 @@ final class DockWatcher {
 
     private func setDockVisible(_ shouldShow: Bool) {
         guard (NSApp.delegate as? AppDelegate)?.isQuitting != true else { return }
-
-        // Read the live Dock state FIRST, before the debounce below can bail out.
-        // The glyph tracks what the Dock is actually doing rather than what we
-        // intended, so it stays correct during the debounce window and also
-        // self-corrects if the user presses ⌥⌘D themselves.
-        let actuallyShown = !(dockDefaults?.bool(forKey: "autohide") ?? false)
-        syncStatusIcon(dockShown: actuallyShown)
-
-        // FIX: Stop the 0.15s and 0.3s timers from double-tapping while UserDefaults updates
-        if Date().timeIntervalSince(lastToggleTime) < 1.0 { return }
+        
+        // Stop the timers double-tapping while com.apple.dock's value catches up.
+        if Date().timeIntervalSince(lastToggleTime) < toggleDebounce { return }
+        
+        let actuallyShown = !(UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false)
 
         if shouldShow && !actuallyShown {
+            // Fingers are down, or a swipe is still landing. Stay hidden.
+            if isHoldingHidden { return }
+
             print("  ⚡ Forcing Dock SHOW")
             dockIsShown = true
             lastToggleTime = Date()
@@ -213,16 +248,7 @@ final class DockWatcher {
 
     // MARK: - Status Helpers
 
-    /// Only pushes to the menu bar on a real transition — this is called
-    /// roughly three times a second by the safety timer.
-    private func syncStatusIcon(dockShown: Bool) {
-        guard lastIconState != dockShown else { return }
-        lastIconState = dockShown
-        (NSApp.delegate as? AppDelegate)?.setStatusIcon(dockShown: dockShown)
-    }
-
     private func postStatus(_ text: String) {
         (NSApp.delegate as? AppDelegate)?.updateStatus(text)
     }
 }
-

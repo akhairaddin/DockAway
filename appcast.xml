@@ -3,6 +3,17 @@
     <channel>
         <title>DockAway</title>
         
+        <!-- 1.1.2 RELEASE -->
+        <item>
+            <title>1.1.2</title>
+            <pubDate>Sun, 26 Jul 2026 21:38:08 -0400</pubDate>
+            <sparkle:version>4</sparkle:version>
+            <sparkle:shortVersionString>1.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1.2/DockAway.dmg" length="3156992" type="application/octet-stream" sparkle:edSignature="sDt4Q8iXRtT9kYRJU/FHjE9A5VI7lzFj92CNZr4XYmZNwIYStW5OKlg9L23uBpzo3FFxjs0NwZhjeD07oZndDg=="/>
+            <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
+        </item>
+        
         <!-- 1.1.1 RELEASE -->
         <item>
         <title>1.1.1</title>
