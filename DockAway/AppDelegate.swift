@@ -223,7 +223,6 @@ import Sparkle
         
         NSApp.orderFrontStandardAboutPanel(options: [
             NSApplication.AboutPanelOptionKey.applicationName: "DockAway",
-            NSApplication.AboutPanelOptionKey.version: "1.0",
             NSApplication.AboutPanelOptionKey.credits: attributedCredits
         ])
     }
@@ -268,7 +267,7 @@ import Sparkle
         } else {
             let alert = NSAlert()
             alert.messageText = "But First ☝️"
-            alert.informativeText = "Accessibility Permission is Required:\nDockAway is requesting accessibility permission from system settings in order to detect desktop app occupancy status.Input monitoring (Automatically enabled after accessibility permission is granted) is required to detect when the Dock should be shown or hidden on a 4 finger press."
+            alert.informativeText = "Accessibility Permission is Required:\nDockAway is requesting accessibility permission from system settings in order to detect desktop app occupancy status. Input monitoring (Automatically enabled after accessibility permission is granted) is required to detect when the Dock should be shown or hidden on a 4 finger press."
             alert.alertStyle = .informational
             
             alert.addButton(withTitle: "Allow Access")
