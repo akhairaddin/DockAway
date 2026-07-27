@@ -253,6 +253,16 @@ import Sparkle
             alert.alertStyle = .informational
             alert.addButton(withTitle: "Let's Go!")
             alert.runModal()
+            
+            // An .accessory app is never frontmost, so a modal can open behind
+                        // whatever the user is actually looking at.
+                        NSApp.activate(ignoringOtherApps: true)
+                        alert.runModal()
+            
+            // Mark it seen only once it HAS been seen. Setting the flag up front
+                        // loses the welcome permanently if the app dies in the meantime —
+                        // which is exactly what macOS does right after an Accessibility grant.
+                        UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
         }
     }
 
@@ -273,6 +283,8 @@ import Sparkle
             alert.addButton(withTitle: "Allow Access")
             alert.addButton(withTitle: "Quit")
             alert.layout()
+            
+            NSApp.activate(ignoringOtherApps: true)
             
             if let contentView = alert.window.contentView {
                 func findTextField(in view: NSView, matching text: String) -> NSTextField? {
