@@ -16,26 +16,27 @@ It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the s
 
 ## Features
 
-- A lightweight, Dynamic Menu bar app that indicates when the dock is shown or hidden via an up and down arrow. 
+- A lightweight, Dynamic Menu bar app that's fully Native and built with Swift.
+- Works excellently with window management apps like "Rectangle" by Ryan Hanson or "Swish" by Christian Renninger (Highly Recommended, Life changer)
 - Detects every app switch and every Space/desktop swipe in real time
 - Detects the true desktop state system-wide rather than just checking Finder, so it correctly handles minimizing any app's last window, tiled/split-screen layouts, trackpad gesture minimizing, and so on
 - Self-correcting: instead of trusting its own memory of "is the Dock shown?" it reads the live `com.apple.dock autohide` value before acting, so it can't quietly drift out of sync
 - Features a safety check as a backstop, plus a check anchored to the exact moment of each Space change, so there's never a long window where it's silently wrong
 - "Launch at Login" toggle built right into the menu, no detour through System Settings
-- Automatic updates via Sparkle
-- Dynamic menu bar
-- When quitting the app, it explicitly turns the Dock auto-hide setting off and shows the displays the dock which indicates the app has closed and that everything is back to normal.
+- When quitting the app, it explicitly turns the Dock auto-hide setting off and shows the displays the dock which indicates the app has closed and that everything is back to normal. 
+- Dynamic menu bar, Indicates dock status (Hidden or Shown) via up and down chevrons
+- Automatic updates and changelogs via Sparkle
 
 ## Menu bar
 
 - **Status**: Live text showing what triggered the last action
-- **Launch at Login**: Toggles via `SMAppService`, no System Settings round-trip needed
+- **Launch at Login Toggle**: Activates via `SMAppService`, no System Settings round-trip needed
 - **About DockAway**: The standard macOS about panel
-- **Quit**: Also resets `autohide` to off and restarts the Dock, Quitting visibly restores normal behavior
+- **Quit**: Also resets `autohide` to off and restarts the Dock. Quitting the app will bring the dock back up and visibly restore normal behavior
 
 ## Unsigned App Warning
 
-Since I don't want to pay Apple $100 a year just for the pleasure of having my simple app "signed and notarized", You will get a pop-up saying ""DockAway" Not Opened".
+Since I don't want to pay Apple $100 a year just for the pleasure of having my simple app "signed and notarized", You may get a pop-up saying " "DockAway" Not Opened ". In that case:
 1. Click "Done" on the pop up
 2. Go to System Settings> Privacy and Security and scroll all the way down
 3. You'll see "DockAway was blocked to protect your mac", click "Open Anyway" 
@@ -45,7 +46,7 @@ Since I don't want to pay Apple $100 a year just for the pleasure of having my s
 
 ## Requirements
 
-- macOS 14 (Sonoma) or newer
+- **macOS 14 (Sonoma) or newer**
 - **Accessibility permission**: Required because the app sends a synthetic ⌘⌥D keystroke via `CGEvent`. Granted under **System Settings → Privacy & Security → Accessibility**.
 - I**nput monitoring permission (Activated automatically when granting Accessibility)**: Required to detect 4 fingers on the trackpad in order to hide the dock pre 4 finger swipe for smoothness via `NMultitouchWatcher` . macOS is quirky when it comes to hiding the dock while swiping, prehiding on 4 fingers tap prevents bouncing and artifactin``g.
 ## How the detection actually works
@@ -57,3 +58,5 @@ The core logic lives in `DockWatcher.swift`:
 3. It only sends ⌘⌥D if the Dock's actual current state, read live from `UserDefaults(suiteName: "com.apple.dock")`, doesn't already match what it should be, so it never double-fires or fights itself.
 4. Space changes get a check at 150ms (to let the window list settle after the swipe) and a second check at 300ms, anchored to that exact swipe rather than to the separate safety timer. This was the fix for occasional random-feeling lag, since waiting on an independent, out-of-phase timer meant some swipes got lucky timing and some didn't.
 5. A repeating safety check, decoupled from any notification, catches anything notifications alone might miss, like minimizing a window with a trackpad gesture, which doesn't fire a notification at all.
+## Note:
+- If you have the "Supercharge" app by Sindre Horus, Please set the "Delay before showing the Dock when hidden" option to "None". By default in the app, it is set to "0.2 seconds". Doing this prevents the 0.2s delay before the dock comes back up on empty desktops.
