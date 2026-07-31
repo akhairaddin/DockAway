@@ -16,8 +16,8 @@ It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the s
 
 ## Features
 
-- A lightweight, Dynamic Menu bar app that's fully Native and built with Swift.
-- Works excellently with window management apps like "Rectangle" by Ryan Hanson or "Swish" by Christian Renninger (Highly Recommended, Life changer)
+- A lightweight, Dynamic Menu bar app that's 100% Native, built with Swift.
+- Works excellently with window management apps like "Rectangle" by Ryan Hanson or "Swish" by Christian Renninger (Highly Recommended, Incredible app.)
 - Detects every app switch and every Space/desktop swipe in real time
 - Detects the true desktop state system-wide rather than just checking Finder, so it correctly handles minimizing any app's last window, tiled/split-screen layouts, trackpad gesture minimizing, and so on
 - Self-correcting: instead of trusting its own memory of "is the Dock shown?" it reads the live `com.apple.dock autohide` value before acting, so it can't quietly drift out of sync
@@ -48,7 +48,7 @@ Since I don't want to pay Apple $100 a year just for the pleasure of having my s
 
 - **macOS 14 (Sonoma) or newer**
 - **Accessibility permission**: Required because the app sends a synthetic ⌘⌥D keystroke via `CGEvent`. Granted under **System Settings → Privacy & Security → Accessibility**.
-- I**nput monitoring permission (Activated automatically when granting Accessibility)**: Required to detect 4 fingers on the trackpad in order to hide the dock pre 4 finger swipe for smoothness via `NMultitouchWatcher` . macOS is quirky when it comes to hiding the dock while swiping, prehiding on 4 fingers tap prevents bouncing and artifactin``g.
+- I**nput monitoring permission (Activated automatically when granting Accessibility)**: Required to detect 4 fingers on the trackpad in order to hide the dock pre 4-finger swipe for smoothness via `NMultitouchWatcher` . macOS is quirky when it comes to hiding the dock while swiping, pre-hiding on a 4-fingers tap ensures a smooth swipe animation and prevents app window bouncing and artifacting.
 ## How the detection actually works
 
 The core logic lives in `DockWatcher.swift`:
@@ -59,4 +59,4 @@ The core logic lives in `DockWatcher.swift`:
 4. Space changes get a check at 150ms (to let the window list settle after the swipe) and a second check at 300ms, anchored to that exact swipe rather than to the separate safety timer. This was the fix for occasional random-feeling lag, since waiting on an independent, out-of-phase timer meant some swipes got lucky timing and some didn't.
 5. A repeating safety check, decoupled from any notification, catches anything notifications alone might miss, like minimizing a window with a trackpad gesture, which doesn't fire a notification at all.
 ## Note:
-- If you have the "Supercharge" app by Sindre Horus, Please set the "Delay before showing the Dock when hidden" option to "None". By default in the app, it is set to "0.2 seconds". Doing this prevents the 0.2s delay before the dock comes back up on empty desktops.
+- If you have the **"Supercharge" app** by Sindre Horus, Please **set the "Delay before showing the Dock when hidden" option to "None"**. By default in the app, it is set to "0.2 seconds". Doing this prevents the annoying and slow 0.2s delay before the dock comes back up on empty desktops.
