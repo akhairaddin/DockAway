@@ -1,10 +1,18 @@
 # Build artifacts
 dist/
 build/
+DerivedData/
 
-# Sparkle cache and local build files
+# Xcode and SPM cache
 *.xcuserstate
+xcuserdata/
+.swiftpm/
+
+# macOS generated files
 .DS_Store
+.AppleDouble
+.LSOverride
 
 # Other junk
 *.swp
+
