@@ -34,6 +34,12 @@ It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the s
 - **About DockAway**: The standard macOS about panel
 - **Quit**: Also resets `autohide` to off and restarts the Dock. Quitting the app will bring the dock back up and visibly restore normal behavior
 
+## Requirements
+
+- **macOS 14 (Sonoma) or newer**
+- **Accessibility permission**: Required because the app sends a synthetic ⌘⌥D keystroke via `CGEvent`. Granted under **System Settings → Privacy & Security → Accessibility**.
+- I**nput monitoring permission (Activated automatically when granting Accessibility)**: Required to detect 4 fingers on the trackpad in order to hide the dock pre 4-finger swipe for smoothness via `NMultitouchWatcher` . macOS is quirky when it comes to hiding the dock while swiping, pre-hiding on a 4-fingers tap ensures a smooth swipe animation and prevents app window bouncing and artifacting.
+
 ## Unsigned App Warning
 
 Since I don't want to pay Apple $100 a year just for the pleasure of having my simple app "signed and notarized", You may get a pop-up saying " "DockAway" Not Opened ". In that case:
@@ -44,11 +50,6 @@ Since I don't want to pay Apple $100 a year just for the pleasure of having my s
 5. Confirm with fingerprint/Password
 6. Open DockAway again and grant accessibility permission. You're done! Enjoy your extra space.
 
-## Requirements
-
-- **macOS 14 (Sonoma) or newer**
-- **Accessibility permission**: Required because the app sends a synthetic ⌘⌥D keystroke via `CGEvent`. Granted under **System Settings → Privacy & Security → Accessibility**.
-- I**nput monitoring permission (Activated automatically when granting Accessibility)**: Required to detect 4 fingers on the trackpad in order to hide the dock pre 4-finger swipe for smoothness via `NMultitouchWatcher` . macOS is quirky when it comes to hiding the dock while swiping, pre-hiding on a 4-fingers tap ensures a smooth swipe animation and prevents app window bouncing and artifacting.
 ## How the detection actually works
 
 The core logic lives in `DockWatcher.swift`:
