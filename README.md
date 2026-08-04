@@ -6,7 +6,7 @@
 
 A tiny macOS menu bar utility that keeps your Dock out of the way. It appears only when you're actually looking at an empty desktop and disappears the instant any app has a window on screen.
 
-## When it's hidden and when it's visible
+## When it's hidden and when it's shown
 - Desktop is visible, no app window on screen | Dock Shown|
 - Any app window is on screen |Dock Hidden|
 - You minimize the only/last window on screen |Dock Shown|
@@ -38,7 +38,18 @@ It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the s
 
 - **macOS 14 (Sonoma) or newer**
 - **Accessibility permission**: Required because the app sends a synthetic ⌘⌥D keystroke via `CGEvent`. Granted under **System Settings → Privacy & Security → Accessibility**.
-- I**nput monitoring permission (Activated automatically when granting Accessibility)**: Required to detect 4 fingers on the trackpad in order to hide the dock pre 4-finger swipe for smoothness via `NMultitouchWatcher` . macOS is quirky when it comes to hiding the dock while swiping, pre-hiding on a 4-fingers tap ensures a smooth swipe animation and prevents app window bouncing and artifacting.
+- I**nput monitoring permission (Activated automatically when granting Accessibility)**: Required to detect 4 fingers on the trackpad in order to hide the dock pre 4-finger swipe for smoothness via `MultitouchWatcher` . MacOS is quirky when it comes to hiding the dock mid-swipe, pre-hiding on a 4-fingers tap ensures a smooth swipe animation and prevents app artifacts and window bouncing.
+
+## How the detection actually works
+
+The core logic is distributed across `DockWatcher.swift`, `MultitouchWatcher.swift`, and `AppDelegate.swift`, combining window list scanning, raw trackpad detection, and system state polling.
+
+1. **Event Triggers:** The app listens for `NSWorkspace.didActivateApplicationNotification` (app switches) and `NSWorkspace.activeSpaceDidChangeNotification` (Space/desktop swipes).
+2. **Trackpad Pre-Hiding:** To ensure perfectly smooth swipe animations, a custom `MultitouchWatcher` hooks into the private MultitouchSupport framework to read raw trackpad contacts before macOS even recognizes a gesture. If it detects four fingers landing, it instantly pre-hides the Dock and "latches" this hidden state so subsequent checks do not accidentally show the Dock mid-swipe.
+3. **Smart Window Detection:** When evaluating the screen, it checks the whole system via `CGWindowListCopyWindowInfo`. It looks for any normal-sized window on the standard layer (0) or elevated Mission Control layers (1 to 24). It explicitly ignores "Window Server", "Dock", and "DockAway" so it does not trigger a bounce on itself. Finding zero qualifying windows means you are on the desktop.
+4. **State Verification:** Before sending the ⌘⌥D keystroke, it reads the live `com.apple.dock autohide` value directly from `UserDefaults`. It only fires if the actual state differs from the desired state, preventing the app from fighting itself or double-firing.
+5. **Timings & Safety Nets:** Space changes trigger an immediate check, followed by a re-check 0.12 seconds later to allow the macOS window list to settle. A separate safety timer also runs continuously every 0.12 seconds to catch events that do not fire notifications, such as minimizing a window using a trackpad gesture.
+6. **Dynamic UI & Graceful Exits:** A dedicated 0.25-second timer constantly updates the menu bar chevron (Up or Down) based on the Dock's actual visibility. If the app is quit naturally or force-closed via Activity Monitor, a `SIGTERM` Unix signal trapper catches the termination, resetting the Dock to its default visible state before completely exiting.
 
 ## Unsigned App Warning
 
@@ -50,14 +61,5 @@ Since I don't want to pay Apple $100 a year just for the pleasure of having my s
 5. Confirm with fingerprint/Password
 6. Open DockAway again and grant accessibility permission. You're done! Enjoy your extra space.
 
-## How the detection actually works
-
-The core logic lives in `DockWatcher.swift`:
-
-1. It listens for `NSWorkspace.didActivateApplicationNotification` (app switches) and `NSWorkspace.activeSpaceDidChangeNotification` (Space/desktop swipes).
-2. On either, it checks the whole screen via `CGWindowListCopyWindowInfo` for any normal-sized, normal-level window owned by any app. None found means you're on the desktop. One found means you're not. This is what makes it correctly ignore a minimized window when another app is still visible.
-3. It only sends ⌘⌥D if the Dock's actual current state, read live from `UserDefaults(suiteName: "com.apple.dock")`, doesn't already match what it should be, so it never double-fires or fights itself.
-4. Space changes get a check at 150ms (to let the window list settle after the swipe) and a second check at 300ms, anchored to that exact swipe rather than to the separate safety timer. This was the fix for occasional random-feeling lag, since waiting on an independent, out-of-phase timer meant some swipes got lucky timing and some didn't.
-5. A repeating safety check, decoupled from any notification, catches anything notifications alone might miss, like minimizing a window with a trackpad gesture, which doesn't fire a notification at all.
 ## Note:
 - If you have the **"Supercharge" app** by Sindre Horus, Please **set the "Delay before showing the Dock when hidden" option to "None"**. By default in the app, it is set to "0.2 seconds". Doing this prevents the annoying and slow 0.2s delay before the dock comes back up on empty desktops.
