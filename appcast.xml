@@ -3,6 +3,17 @@
     <channel>
         <title>DockAway</title>
         
+        <!-- 1.1.3 RELEASE -->
+        <item>
+            <title>1.1.3</title>
+            <pubDate>Sun, 10 Aug 2026 07:19:09 +0000</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>1.1.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1.3/DockAway-1.1.3.dmg" length="3377858" type="application/octet-stream" sparkle:edSignature="2jpMUEgG7FPfOe5Fl3PqeITPyzaiYFkWIHtlPAoESLRGExwMA34US16DUhRP7ICKdywgmttGgHT3nAg7De7qBA=="/>
+            <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
+        </item>
+        
         <!-- 1.1.2 RELEASE -->
         <item>
             <title>1.1.2</title>
@@ -10,7 +21,7 @@
             <sparkle:version>4</sparkle:version>
             <sparkle:shortVersionString>1.1.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1.2/DockAway.dmg" length="3156992" type="application/octet-stream" sparkle:edSignature="sDt4Q8iXRtT9kYRJU/FHjE9A5VI7lzFj92CNZr4XYmZNwIYStW5OKlg9L23uBpzo3FFxjs0NwZhjeD07oZndDg=="/>
+            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1.2/DockAway-1.1.2.dmg" length="3156992" type="application/octet-stream" sparkle:edSignature="sDt4Q8iXRtT9kYRJU/FHjE9A5VI7lzFj92CNZr4XYmZNwIYStW5OKlg9L23uBpzo3FFxjs0NwZhjeD07oZndDg=="/>
             <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
         </item>
         
@@ -21,7 +32,7 @@
         <sparkle:version>3</sparkle:version>
         <sparkle:shortVersionString>1.1.1</sparkle:shortVersionString>
         <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-        <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1.1/DockAway.dmg" length="3154432" type="application/octet-stream" sparkle:edSignature="Zfvei5PhynmcrMHzD0FrKmll1nhBxPxaGEZ8/cCjP+c0WBXD+0e0i2+rYquFQqkXAhWd/ZLsCKwO93rj99sdDA=="/>
+        <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1.1/DockAway-1.1.1.dmg" length="3154432" type="application/octet-stream" sparkle:edSignature="Zfvei5PhynmcrMHzD0FrKmll1nhBxPxaGEZ8/cCjP+c0WBXD+0e0i2+rYquFQqkXAhWd/ZLsCKwO93rj99sdDA=="/>
         <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
         </item>
         
@@ -32,7 +43,7 @@
             <sparkle:version>1.1</sparkle:version>
             <sparkle:shortVersionString>1.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1/DockAway.dmg" length="1181696" type="application/octet-stream" sparkle:edSignature="dtE+4CJT8UgGqeiMAYjtMBwh9TXMEqMQAbDZJb0zEs4Z+p/YJpqsbIhBO16PE+KJgFS5gl0uKZ2lvZ67TuBABw=="/>
+            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.1/DockAway-1.1.dmg" length="1181696" type="application/octet-stream" sparkle:edSignature="dtE+4CJT8UgGqeiMAYjtMBwh9TXMEqMQAbDZJb0zEs4Z+p/YJpqsbIhBO16PE+KJgFS5gl0uKZ2lvZ67TuBABw=="/>
             <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
         </item>
 
@@ -43,7 +54,7 @@
             <sparkle:version>1</sparkle:version>
             <sparkle:shortVersionString>1.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.0/DockAway.dmg" length="1287605" type="application/octet-stream" sparkle:edSignature="MKdjh99NssFN8XtZ6+iplR5UNu1EVhTkn3BDHhVAGSy8YmYSzh3nuo3AKa3bpS1uKjHTpbMpAvJ+a17E6jEsCw=="/>
+            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.0/DockAway-1.0.dmg" length="1287605" type="application/octet-stream" sparkle:edSignature="MKdjh99NssFN8XtZ6+iplR5UNu1EVhTkn3BDHhVAGSy8YmYSzh3nuo3AKa3bpS1uKjHTpbMpAvJ+a17E6jEsCw=="/>
             <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
         </item>
 
