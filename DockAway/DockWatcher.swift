@@ -3,8 +3,9 @@ import ApplicationServices
 
 final class DockWatcher {
 
+    private static let ignoredWindowBundleIdentifiersKey = "IgnoredWindowBundleIdentifiers"
+
     private var pendingSpaceCheck: DispatchWorkItem?
-    private var dockIsShown = false
     private var safetyTimer: Timer?
     private var lastToggleTime = Date.distantPast
 
@@ -142,6 +143,13 @@ final class DockWatcher {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return false }
 
+        // Power-user configuration. An empty set is the normal behavior.
+        let ignoredBundleIdentifiers = Set(
+            UserDefaults.standard.stringArray(forKey: Self.ignoredWindowBundleIdentifiersKey) ?? []
+        )
+        var bundleIdentifiersByPID = [Int32: String]()
+        var unresolvedPIDs = Set<Int32>()
+
         for info in list {
             guard
                 let layer = info[kCGWindowLayer as String] as? Int,
@@ -152,6 +160,26 @@ final class DockWatcher {
             // WindowManager owns the invisible "Click to reveal desktop" overlay in macOS 14+.
             let ignoredApps = ["DockAway", "Window Server", "Dock", "WindowManager", "Control Center"]
             if ignoredApps.contains(ownerName) { continue }
+
+            if !ignoredBundleIdentifiers.isEmpty,
+               let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value {
+                let bundleIdentifier: String?
+                if let cached = bundleIdentifiersByPID[ownerPID] {
+                    bundleIdentifier = cached
+                } else if unresolvedPIDs.contains(ownerPID) {
+                    bundleIdentifier = nil
+                } else if let resolved = NSRunningApplication(processIdentifier: ownerPID)?.bundleIdentifier {
+                    bundleIdentifiersByPID[ownerPID] = resolved
+                    bundleIdentifier = resolved
+                } else {
+                    unresolvedPIDs.insert(ownerPID)
+                    bundleIdentifier = nil
+                }
+
+                if let bundleIdentifier, ignoredBundleIdentifiers.contains(bundleIdentifier) {
+                    continue
+                }
+            }
 
             let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1.0
             if alpha < 0.05 { continue }
@@ -201,7 +229,6 @@ final class DockWatcher {
     // MARK: - Public Helpers
 
     func resetState() {
-        dockIsShown = false
         evaluateFrontmostApp(quiet: false)
     }
 
@@ -262,16 +289,12 @@ final class DockWatcher {
             if isHoldingHidden { return }
 
             print("  ⚡ Forcing Dock SHOW")
-            dockIsShown = true
             lastToggleTime = Date()
             simulateOptionCommandD()
         } else if !shouldShow && actuallyShown {
             print("  ⚡ Forcing Dock HIDE")
-            dockIsShown = false
             lastToggleTime = Date()
             simulateOptionCommandD()
-        } else {
-            dockIsShown = shouldShow
         }
     }
 

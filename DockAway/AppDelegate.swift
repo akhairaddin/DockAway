@@ -245,24 +245,23 @@ import Sparkle
     private func showWelcomeIfNeeded() {
         let hasLaunchedBefore = UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
         guard !hasLaunchedBefore else { return }
-        UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             let alert = NSAlert()
             alert.messageText = "Welcome to DockAway 👋"
             alert.informativeText = "Your Dock will now automatically appear when you are on an empty desktop and hides when an app occupies the screen.\n\n• Toggle Launch at Login from the menu bar.\n• The app runs silently and efficiently in the background.\n\nEnjoy your Extra Real Estate!"
             alert.alertStyle = .informational
             alert.addButton(withTitle: "Let's Go!")
-            alert.runModal()
-            
+
             // An .accessory app is never frontmost, so a modal can open behind
-                        // whatever the user is actually looking at.
-                        NSApp.activate(ignoringOtherApps: true)
-                        alert.runModal()
-            
+            // whatever the user is actually looking at.
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+
             // Mark it seen only once it HAS been seen. Setting the flag up front
-                        // loses the welcome permanently if the app dies in the meantime —
-                        // which is exactly what macOS does right after an Accessibility grant.
-                        UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+            // loses the welcome permanently if the app dies in the meantime —
+            // which is exactly what macOS does right after an Accessibility grant.
+            UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
         }
     }
 

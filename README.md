@@ -19,7 +19,7 @@ It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the s
 - A lightweight, Dynamic Menu bar app that's 100% Native, built with Swift.
 - Works excellently with window management apps like "Rectangle" by Ryan Hanson or "Swish" by Christian Renninger (Highly Recommended, Incredible app.)
 - Detects every app switch and every Space/desktop swipe in real time
-- Detects the true desktop state system-wide rather than just checking Finder, so it correctly handles minimizing any app's last window, tiled/split-screen layouts, trackpad gesture minimizing, and so on
+- Detects the desktop state on the display under your pointer, rather than just checking Finder. This correctly handles minimizing an app's last window, tiled/split-screen layouts, trackpad gesture minimizing, and multi-display setups.
 - Self-correcting: instead of trusting its own memory of "is the Dock shown?" it reads the live `com.apple.dock autohide` value before acting, so it can't quietly drift out of sync
 - Features a safety check as a backstop, plus a check anchored to the exact moment of each Space change, so there's never a long window where it's silently wrong
 - "Launch at Login" toggle built right into the menu, no detour through System Settings
@@ -34,6 +34,15 @@ It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the s
 - **About DockAway**: The standard macOS about panel
 - **Quit**: Also resets `autohide` to off and restarts the Dock. Quitting the app will bring the dock back up and visibly restore normal behavior
 
+## Hidden Whitelist
+
+By default, every standard app window counts as an occupied display. Users can configure a hidden bundle-ID whitelist so that DockAway can ignore selected apps. If only an ignored app is visible, DockAway treats that display as empty and keeps the Dock shown. 
+
+- To get the Bundle-ID of an app you would like to whitelist such as Xcode: Enter in Terminal `osascript -e 'id of app "Xcode"'`
+- To add an app to the whitelist like Xcode and Terminal for example (You can input multiple Bundle-ID's): Enter in the terminal `defaults write AK.DockAway IgnoredWindowBundleIdentifiers -array com.apple.dt.Xcode com.apple.Terminal`then restart DockAway to apply the changes.
+- To inspect the current list: Enter in terminal `defaults read AK.DockAway IgnoredWindowBundleIdentifiers`
+- To remove all apps from the whitelist (You can't remove just one unfortunately): Enter in the terminal `defaults delete AK.DockAway IgnoredWindowBundleIdentifiers` then restart DockAway to apply the changes.
+  
 ## Requirements
 
 - **macOS 14 (Sonoma) or newer**
