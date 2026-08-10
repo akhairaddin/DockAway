@@ -111,19 +111,18 @@ final class DockWatcher {
         evaluate(app: app, quiet: quiet)
     }
 
-    /// Shows the Dock only when NO standard window from ANY app is visible
-    /// on the current screen, i.e. the true desktop. Checking system-wide
-    /// (rather than just the reported "frontmost" app) is what correctly
-    /// handles cases like two tiled apps where minimizing one still leaves
-    /// the other covering the screen.
+    /// Shows the Dock only when the display under the pointer has no standard
+    /// app window. That is the display whose Space the user is interacting
+    /// with during a multi-monitor desktop swipe.
     private func evaluate(app: NSRunningApplication, quiet: Bool) {
         let bundleID = app.bundleIdentifier ?? ""
-        let onDesktop = !anyStandardWindowVisible()
+        let activeDisplay = activeDisplayBounds()
+        let onDesktop = !anyStandardWindowVisible(on: activeDisplay)
 
         if !quiet {
             print(onDesktop
-                  ? "  → No windows visible anywhere → desktop → showing Dock"
-                  : "  → A window is still visible → hiding Dock")
+                  ? "  → Active display is empty → desktop → showing Dock"
+                  : "  → Active display has a window → hiding Dock")
         }
 
         setDockVisible(onDesktop)
@@ -136,38 +135,68 @@ final class DockWatcher {
 
     // MARK: - Window Detection
 
-    /// True if at least one normal, reasonably sized window from any app
-    /// is currently on screen. Minimized windows are excluded by macOS
-    /// from this list automatically, so this also naturally detects
-    /// "the only/last window on screen was just minimized."
-    private func anyStandardWindowVisible() -> Bool {
+    /// True if at least one normal app window is visibly occupying the active
+    /// display. A small edge overlap is ignored so window shadows across a
+    /// monitor boundary cannot hide the Dock.
+    private func anyStandardWindowVisible(on displayBounds: CGRect) -> Bool {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard
-            let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
-        else { return false }
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return false }
 
         for info in list {
             guard
                 let layer = info[kCGWindowLayer as String] as? Int,
-                let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
-                let ownerName = info[kCGWindowOwnerName as String] as? String
+                let ownerName = info[kCGWindowOwnerName as String] as? String,
+                let boundsDict = info[kCGWindowBounds as String] as? NSDictionary
             else { continue }
 
-            // FIX: Added "Dock" so it stops seeing itself and triggering a bounce
-            if ownerName == "DockAway" || ownerName == "Window Server" || ownerName == "Dock" { continue }
+            // WindowManager owns the invisible "Click to reveal desktop" overlay in macOS 14+.
+            let ignoredApps = ["DockAway", "Window Server", "Dock", "WindowManager", "Control Center"]
+            if ignoredApps.contains(ownerName) { continue }
 
-            // FIX: Accept standard layer (0) AND elevated Mission Control layers (1 to 25)
-            // so active windows are properly recognized during gestures and space switches.
+            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1.0
+            if alpha < 0.05 { continue }
+
+            // Standard windows, plus transient layers reported while Spaces settles.
             guard layer == kCGNormalWindowLevel || (layer > 0 && layer < 25) else { continue }
 
-            let width = bounds["Width"] ?? 0
-            let height = bounds["Height"] ?? 0
-            guard width > 50, height > 50 else { continue }
+            var windowRect = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(boundsDict, &windowRect) else { continue }
+            guard windowRect.width > 50, windowRect.height > 50 else { continue }
 
-            return true
+            let overlap = windowRect.intersection(displayBounds)
+            if overlap.width >= 50, overlap.height >= 50 {
+                return true
+            }
         }
+
         return false
     }
+
+    /// Determines the display under the pointer. Unlike a Dock-window lookup,
+    /// this remains reliable while the Dock is hidden.
+    private func activeDisplayBounds() -> CGRect {
+        // CGEvent(source: nil)?.location is in global display coordinates.
+        guard let mouseLoc = CGEvent(source: nil)?.location else {
+            return CGDisplayBounds(CGMainDisplayID())
+        }
+
+        var displayCount: UInt32 = 0
+        var activeDisplays = [CGDirectDisplayID](repeating: 0, count: 10)
+        let err = CGGetActiveDisplayList(10, &activeDisplays, &displayCount)
+
+        if err == .success {
+            for i in 0..<Int(displayCount) {
+                let display = activeDisplays[i]
+                let bounds = CGDisplayBounds(display)
+                if bounds.contains(mouseLoc) {
+                    return bounds
+                }
+            }
+        }
+
+        return CGDisplayBounds(CGMainDisplayID())
+    }
+
 
     // MARK: - Public Helpers
 
@@ -222,10 +251,10 @@ final class DockWatcher {
 
     private func setDockVisible(_ shouldShow: Bool) {
         guard (NSApp.delegate as? AppDelegate)?.isQuitting != true else { return }
-        
+
         // Stop the timers double-tapping while com.apple.dock's value catches up.
         if Date().timeIntervalSince(lastToggleTime) < toggleDebounce { return }
-        
+
         let actuallyShown = !(UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false)
 
         if shouldShow && !actuallyShown {
