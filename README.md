@@ -29,20 +29,17 @@ It works by activating the system shortcut **⌘⌥D** (Command+Option+D), the s
 
 ## Menu bar
 
-- **Status**: Live text showing what triggered the last action
+- **Status**: Shows the active app and whether DockAway is currently running
+- **Stop / Resume**: Temporarily pauses DockAway and restores normal Dock visibility, then resumes monitoring from the same media-style control
 - **Launch at Login Toggle**: Activates via `SMAppService`, no System Settings round-trip needed
+- **Blacklist**: Check running apps directly, or choose installed apps from Finder, so their windows do not hide the Dock
 - **About DockAway**: The standard macOS about panel
 - **Quit**: Also resets `autohide` to off and restarts the Dock. Quitting the app will bring the dock back up and visibly restore normal behavior
 
-## Hidden Whitelist
+## Application Blacklist
 
-By default, every standard app window counts as an occupied display. Users can configure a hidden bundle-ID whitelist so that DockAway can ignore selected apps. If only an ignored app is visible, DockAway treats that display as empty and keeps the Dock shown. 
+By default, every standard app window counts as an occupied display. Open **Blacklist** from DockAway's menu-bar menu and check any running app that should keep the Dock shown while it is in front. Use **Choose Application…** to select an app that is not currently open. Blacklisted apps remain listed with a checkmark and can be removed individually, or all at once with **Remove All**. When another app is brought in front of a blacklisted app, DockAway resumes its normal hiding behavior.
 
-- To get the Bundle-ID of an app you would like to whitelist such as Xcode: Enter in Terminal `osascript -e 'id of app "Xcode"'`
-- To add an app to the whitelist like Xcode and Terminal for example (You can input multiple Bundle-ID's): Enter in the terminal `defaults write AK.DockAway IgnoredWindowBundleIdentifiers -array com.apple.dt.Xcode com.apple.Terminal`then restart DockAway to apply the changes.
-- To inspect the current list: Enter in terminal `defaults read AK.DockAway IgnoredWindowBundleIdentifiers`
-- To remove all apps from the whitelist (You can't remove just one unfortunately): Enter in the terminal `defaults delete AK.DockAway IgnoredWindowBundleIdentifiers` then restart DockAway to apply the changes.
-  
 ## Requirements
 
 - **macOS 14 (Sonoma) or newer**

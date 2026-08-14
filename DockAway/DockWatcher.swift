@@ -5,9 +5,16 @@ final class DockWatcher {
 
     private static let ignoredWindowBundleIdentifiersKey = "IgnoredWindowBundleIdentifiers"
 
+    private enum DisplayWindowState {
+        case empty
+        case occupied
+        case blacklisted
+    }
+
     private var pendingSpaceCheck: DispatchWorkItem?
     private var safetyTimer: Timer?
     private var lastToggleTime = Date.distantPast
+    private(set) var isRunning = false
 
     // ── SPEED TUNING ─────────────────────────────────────────────────────────
     // Raise any of these if the Dock starts double-toggling.
@@ -31,6 +38,9 @@ final class DockWatcher {
     // MARK: - Lifecycle
 
     func start() {
+        guard !isRunning else { return }
+        isRunning = true
+
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(activeAppDidChange(_:)),
@@ -61,10 +71,21 @@ final class DockWatcher {
         print("✅ DockStatus started")
     }
 
-    deinit {
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+
+        pendingSpaceCheck?.cancel()
+        pendingSpaceCheck = nil
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         safetyTimer?.invalidate()
+        safetyTimer = nil
+        holdLatched = false
+        holdReleaseAt = .distantPast
+        print("⏸️ DockStatus stopped")
     }
+
+    deinit { stop() }
 
     // MARK: - Space Detection
 
@@ -113,42 +134,67 @@ final class DockWatcher {
     }
 
     /// Shows the Dock only when the display under the pointer has no standard
-    /// app window. That is the display whose Space the user is interacting
-    /// with during a multi-monitor desktop swipe.
+    /// app window, or when a blacklisted app is visible there. That is the
+    /// display whose Space the user is interacting with during a multi-monitor
+    /// desktop swipe.
     private func evaluate(app: NSRunningApplication, quiet: Bool) {
+        guard isRunning else { return }
+
         let bundleID = app.bundleIdentifier ?? ""
         let activeDisplay = activeDisplayBounds()
-        let onDesktop = !anyStandardWindowVisible(on: activeDisplay)
+        let windowState = displayWindowState(on: activeDisplay)
+        let shouldShowDock = windowState != .occupied
 
         if !quiet {
-            print(onDesktop
-                  ? "  → Active display is empty → desktop → showing Dock"
-                  : "  → Active display has a window → hiding Dock")
+            switch windowState {
+            case .empty:
+                print("  → Active display is empty → showing Dock")
+            case .blacklisted:
+                print("  → Active display has a blacklisted app → showing Dock")
+            case .occupied:
+                print("  → Active display has a window → hiding Dock")
+            }
         }
 
-        setDockVisible(onDesktop)
+        setDockVisible(shouldShowDock)
 
         if !quiet {
             let label = app.localizedName ?? bundleID
-            postStatus(onDesktop ? "Desktop - Dock shown" : "\(label) active")
+            switch windowState {
+            case .empty:
+                postStatus("Desktop")
+            case .blacklisted:
+                postStatus(label)
+            case .occupied:
+                postStatus(label)
+            }
         }
     }
 
     // MARK: - Window Detection
 
-    /// True if at least one normal app window is visibly occupying the active
-    /// display. A small edge overlap is ignored so window shadows across a
-    /// monitor boundary cannot hide the Dock.
-    private func anyStandardWindowVisible(on displayBounds: CGRect) -> Bool {
+    /// Classifies the foremost normal app window on the active display. The
+    /// Core Graphics window list is ordered front-to-back, so a covered
+    /// blacklisted window cannot override the app actually in front of it. A
+    /// small edge overlap is ignored so window shadows across a monitor boundary
+    /// cannot hide the Dock.
+    private func displayWindowState(on displayBounds: CGRect) -> DisplayWindowState {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return false }
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return .empty
+        }
 
         // Power-user configuration. An empty set is the normal behavior.
         let ignoredBundleIdentifiers = Set(
             UserDefaults.standard.stringArray(forKey: Self.ignoredWindowBundleIdentifiersKey) ?? []
         )
+
         var bundleIdentifiersByPID = [Int32: String]()
-        var unresolvedPIDs = Set<Int32>()
+        for application in NSWorkspace.shared.runningApplications {
+            if let bundleIdentifier = application.bundleIdentifier {
+                bundleIdentifiersByPID[application.processIdentifier] = bundleIdentifier
+            }
+        }
 
         for info in list {
             guard
@@ -160,26 +206,6 @@ final class DockWatcher {
             // WindowManager owns the invisible "Click to reveal desktop" overlay in macOS 14+.
             let ignoredApps = ["DockAway", "Window Server", "Dock", "WindowManager", "Control Center"]
             if ignoredApps.contains(ownerName) { continue }
-
-            if !ignoredBundleIdentifiers.isEmpty,
-               let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value {
-                let bundleIdentifier: String?
-                if let cached = bundleIdentifiersByPID[ownerPID] {
-                    bundleIdentifier = cached
-                } else if unresolvedPIDs.contains(ownerPID) {
-                    bundleIdentifier = nil
-                } else if let resolved = NSRunningApplication(processIdentifier: ownerPID)?.bundleIdentifier {
-                    bundleIdentifiersByPID[ownerPID] = resolved
-                    bundleIdentifier = resolved
-                } else {
-                    unresolvedPIDs.insert(ownerPID)
-                    bundleIdentifier = nil
-                }
-
-                if let bundleIdentifier, ignoredBundleIdentifiers.contains(bundleIdentifier) {
-                    continue
-                }
-            }
 
             let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1.0
             if alpha < 0.05 { continue }
@@ -193,11 +219,25 @@ final class DockWatcher {
 
             let overlap = windowRect.intersection(displayBounds)
             if overlap.width >= 50, overlap.height >= 50 {
-                return true
+                if let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                   let bundleIdentifier = bundleIdentifiersByPID[ownerPID],
+                   isBlacklisted(bundleIdentifier, in: ignoredBundleIdentifiers) {
+                    return .blacklisted
+                }
+
+                return .occupied
             }
         }
 
-        return false
+        return .empty
+    }
+
+    /// Helper processes commonly append a suffix to their parent app's bundle
+    /// identifier. Treat those as part of the selected app as well.
+    private func isBlacklisted(_ bundleIdentifier: String, in identifiers: Set<String>) -> Bool {
+        identifiers.contains {
+            bundleIdentifier == $0 || bundleIdentifier.hasPrefix($0 + ".")
+        }
     }
 
     /// Determines the display under the pointer. Unlike a Dock-window lookup,
