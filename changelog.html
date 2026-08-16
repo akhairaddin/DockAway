@@ -9,32 +9,46 @@
     </style>
 </head>
 <body>
+    <h3>Version 1.1.5 <span style="font-weight: normal;">(8-16-26)</span></h3>
+    <ul>
+        <li><b>94% Idle-Scan Efficiency Improvement:</b> DockAway now uses the event-driven AXObserver notifications instead of continuously performing a full window scan every 0.12 seconds. A lightweight 2-second safety check remains for unusual apps, reducing routine idle scans from about 8.3 per second to 0.5 while retaining fast reactions.</li>
+        <li><b>Seamless Mission Control:</b> DockAway recognizes when Mission Control is open and temporarily freezes its own Dock decisions so macOS can handle the animation naturally. Downward exits now choose the correct landing behavior: the Dock stays hidden when entering an app and remains continuously visible when returning to an empty or blacklisted desktop.</li>
+        <li><b>Smarter Desktop Swipes:</b> Direction-aware four-finger tracking and read-only adjacent-Space detection allow empty-to-empty swipes to keep the Dock visible throughout the entire animation. When the destination contains an app, DockAway pre-hides before the Space begins moving, eliminating late Dock slides and greatly reducing Chrome web-app toolbar flicker.</li>
+        <li><b>Improved Multi-Display Accuracy:</b> Window occupancy is evaluated on the display under the pointer, with fast corrections when the pointer changes displays, a Space changes, or an app's final window is minimized, closed, hidden, restored, or moved.</li>
+        <li><b>More Efficient Finger Tracking:</b> The main app is notified only when contact crosses into or out of four-finger mode. Once swipe direction is known, unnecessary contact-frame processing stops until the finger count changes, and the old 1/2/3-finger console spam is gone.</li>
+        <li><b>Sleep, Lock, and Session Awareness:</b> Monitoring timers, trackpad observation, and accessibility observers now stop while the Mac is asleep, the display is asleep, the screen is locked, or the user session is inactive, then rebuild cleanly on wake or unlock.</li>
+        <li><b>Gentler Sparkle Updates:</b> Automatic update checks now run every six hours, and the menu changes from "Check for Updates" to "Update Available" when a new release is ready without interrupting the user with a background alert.</li>
+        <li><b>Refined Menu Bar Design:</b> The menu is slimmer and more polished, with a compact glass-style status island, animated pause/resume control, smoothly transitioning green and red status indicators, active-app details, and clearer update and quit icons. When on a desktop, Menu bar will say "Desktop" instead of "App:Desktop". Swiping into an app from mission control now shows the correct app name in the menu bar.</li>
+        <li><b>Safer Dock Commands:</b> Live Dock-state verification, command tracking, debounce correction, and gesture-specific visibility holds prevent overlapping events from double-toggling the Dock or leaving it in the wrong state.</li>
+    </ul>
+    <hr>
+
     <h3>Version 1.1.4 <span style="font-weight: normal;">(8-14-26)</span></h3>
     <ul>
         <li><b>Application Blacklist:</b> A menubar option that allows you to select apps that you want DockAway to ignore and show the dock on.</li>
         <li><b>Stop/Resume Button and Visual Improvements:</b> The menubar has recieved a revised appearance with a green pulsating dot that indicates the app is running, as well as a Stop/Resume button that eliminates the need to quit DockAway to stop it.</li>
     </ul>
     <hr>
-    
+
     <h3>Version 1.1.3 <span style="font-weight: normal;">(8-10-26)</span></h3>
     <ul>
         <li><b>Better Multi-Screen Detection:</b> Improved dock behavior when using two or more screens.</li>
     </ul>
     <hr>
-    
+
     <h3>Version 1.1.2 <span style="font-weight: normal;">(7-26-26)</span></h3>
     <ul>
         <li><b>Faster dock hiding, Less dock bouncing:</b> Added Multi-touch detection, which hides the dock as soon the touchpad detects 4 fingers.</li>
     </ul>
     <hr>
-    
+
     <h3>Version 1.1.1 <span style="font-weight: normal;">(7-26-26)</span></h3>
     <ul>
         <li><b>Redesigned icon:</b> Created in Icon Composer and fully compliments macOS 27 Golden Gate</li>
         <li><b>Dynamic Menu Bar:</b> Changes arrows to indicate whether dock is shown or hidden</li>
     </ul>
     <hr>
-    
+
     <h3>Version 1.1 <span style="font-weight: normal;">(7-21-26)</span></h3>
     <ul>
         <li><b>macOS 27 Golden Gate Ready 🌉✅</b></li>
@@ -43,7 +57,7 @@
         <li>macOS version minimum bump to macOS 14 Sonoma</li>
         </ul>
     <hr>
-        
+
         <h3>Version 1.0 Official Release <span style="font-weight: normal;">(6-21-26)</span></h3>
         <ul>
             <li><b>macOS 13 Ventura minimum, Up to macOS 26 Tahoe</b></li>

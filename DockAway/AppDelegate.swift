@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 private final class PulsingStatusDotView: NSView {
     private let coreLayer = CALayer()
     private let pulseLayers = (0..<3).map { _ in CALayer() }
+    private let animationDurationScale: CFTimeInterval = 1.25
     private var isActive = true
 
     override init(frame frameRect: NSRect) {
@@ -30,7 +31,7 @@ private final class PulsingStatusDotView: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: 24, height: 24)
+        NSSize(width: 22, height: 22)
     }
 
     override func layout() {
@@ -60,11 +61,21 @@ private final class PulsingStatusDotView: NSView {
         }
 
         isActive = active
-        updateAppearance()
+        updateAppearance(animated: window != nil)
     }
 
-    private func updateAppearance() {
+    private func updateAppearance(animated: Bool = false) {
         let color = isActive ? NSColor.systemGreen : NSColor.systemRed
+        let pulseColor = color.withAlphaComponent(0.65)
+        let animationDuration: CFTimeInterval = 0.32 * animationDurationScale
+
+        let previousBackgroundColor = coreLayer.presentation()?.backgroundColor ?? coreLayer.backgroundColor
+        let previousShadowColor = coreLayer.presentation()?.shadowColor ?? coreLayer.shadowColor
+        let previousShadowOpacity = coreLayer.presentation()?.shadowOpacity ?? coreLayer.shadowOpacity
+        let previousShadowRadius = coreLayer.presentation()?.shadowRadius ?? coreLayer.shadowRadius
+        let previousPulseColors = pulseLayers.map {
+            $0.presentation()?.borderColor ?? $0.borderColor
+        }
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -74,21 +85,66 @@ private final class PulsingStatusDotView: NSView {
         coreLayer.shadowRadius = isActive ? 4 : 2
         coreLayer.shadowOffset = .zero
         for pulseLayer in pulseLayers {
-            pulseLayer.borderColor = color.withAlphaComponent(0.65).cgColor
+            pulseLayer.borderColor = pulseColor.cgColor
         }
         CATransaction.commit()
 
-        updatePulseAnimation()
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            animate(
+                coreLayer,
+                keyPath: "backgroundColor",
+                from: previousBackgroundColor,
+                to: color.cgColor,
+                duration: animationDuration
+            )
+            animate(
+                coreLayer,
+                keyPath: "shadowColor",
+                from: previousShadowColor,
+                to: color.cgColor,
+                duration: animationDuration
+            )
+            animate(
+                coreLayer,
+                keyPath: "shadowOpacity",
+                from: previousShadowOpacity,
+                to: isActive ? Float(0.9) : Float(0.45),
+                duration: animationDuration
+            )
+            animate(
+                coreLayer,
+                keyPath: "shadowRadius",
+                from: previousShadowRadius,
+                to: isActive ? CGFloat(4) : CGFloat(2),
+                duration: animationDuration
+            )
+            for (pulseLayer, previousColor) in zip(pulseLayers, previousPulseColors) {
+                animate(
+                    pulseLayer,
+                    keyPath: "borderColor",
+                    from: previousColor,
+                    to: pulseColor.cgColor,
+                    duration: animationDuration
+                )
+            }
+        }
+
+        updatePulseAnimation(animated: animated)
     }
 
-    private func updatePulseAnimation() {
+    private func updatePulseAnimation(animated: Bool = false) {
+        if !isActive {
+            stopPulseAnimation(animated: animated)
+            return
+        }
+
         for pulseLayer in pulseLayers {
             pulseLayer.removeAnimation(forKey: "outwardPulse")
+            pulseLayer.removeAnimation(forKey: "pulseStop")
             pulseLayer.opacity = 0
         }
 
         guard
-            isActive,
             window != nil,
             !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         else { return }
@@ -104,12 +160,68 @@ private final class PulsingStatusDotView: NSView {
 
             let pulse = CAAnimationGroup()
             pulse.animations = [scale, fade]
-            pulse.duration = 2.1
-            pulse.beginTime = CACurrentMediaTime() + (Double(index) * 0.62)
+            pulse.duration = 2.1 * animationDurationScale
+            pulse.beginTime = CACurrentMediaTime()
+                + (Double(index) * 0.62 * animationDurationScale)
             pulse.repeatCount = .infinity
             pulse.timingFunction = CAMediaTimingFunction(name: .easeOut)
             pulseLayer.add(pulse, forKey: "outwardPulse")
         }
+    }
+
+    private func stopPulseAnimation(animated: Bool) {
+        let shouldAnimate = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+        for pulseLayer in pulseLayers {
+            let visibleOpacity = pulseLayer.presentation()?.opacity ?? pulseLayer.opacity
+            let visibleTransform = pulseLayer.presentation()?.transform ?? pulseLayer.transform
+
+            pulseLayer.removeAnimation(forKey: "outwardPulse")
+            pulseLayer.removeAnimation(forKey: "pulseStop")
+
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            pulseLayer.opacity = 0
+            pulseLayer.transform = CATransform3DIdentity
+            CATransaction.commit()
+
+            guard shouldAnimate, visibleOpacity > 0.01 else { continue }
+
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = visibleOpacity
+            fade.toValue = 0
+
+            let finishExpanding = CABasicAnimation(keyPath: "transform")
+            finishExpanding.fromValue = visibleTransform
+            finishExpanding.toValue = CATransform3DScale(visibleTransform, 1.12, 1.12, 1)
+
+            let stop = CAAnimationGroup()
+            stop.animations = [fade, finishExpanding]
+            stop.duration = 0.24 * animationDurationScale
+            stop.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            pulseLayer.add(stop, forKey: "pulseStop")
+        }
+    }
+
+    private func animate(
+        _ layer: CALayer,
+        keyPath: String,
+        from: Any?,
+        to: Any,
+        duration: CFTimeInterval
+    ) {
+        let transition = CABasicAnimation(keyPath: keyPath)
+        transition.fromValue = from
+        transition.toValue = to
+        transition.duration = duration
+        transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(transition, forKey: "statusTransition.\(keyPath)")
+    }
+}
+
+private final class NonHitTestingImageView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
     }
 }
 
@@ -118,6 +230,8 @@ private final class DockAwayStatusView: NSVisualEffectView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let labelStack = NSStackView()
+    private let pauseResumeImageView = NonHitTestingImageView()
+    private var displayedActiveState: Bool?
     let pauseResumeButton = NSButton()
 
     override init(frame frameRect: NSRect) {
@@ -127,16 +241,20 @@ private final class DockAwayStatusView: NSVisualEffectView {
         blendingMode = .withinWindow
         state = .active
         wantsLayer = true
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = 8
         layer?.borderWidth = 0.5
         layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.3
+        layer?.shadowRadius = 4
+        layer?.shadowOffset = .zero
 
         statusDot.translatesAutoresizingMaskIntoConstraints = false
 
-        titleLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 11.5, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
 
-        detailLabel.font = .systemFont(ofSize: 10.5, weight: .regular)
+        detailLabel.font = .systemFont(ofSize: 10, weight: .regular)
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.lineBreakMode = .byTruncatingTail
 
@@ -154,24 +272,33 @@ private final class DockAwayStatusView: NSVisualEffectView {
         pauseResumeButton.bezelStyle = .circular
         pauseResumeButton.setButtonType(.momentaryPushIn)
 
+        pauseResumeImageView.translatesAutoresizingMaskIntoConstraints = false
+        pauseResumeImageView.imageScaling = .scaleProportionallyDown
+
         addSubview(statusDot)
         addSubview(labelStack)
         addSubview(pauseResumeButton)
+        addSubview(pauseResumeImageView)
 
         NSLayoutConstraint.activate([
-            statusDot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            statusDot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             statusDot.centerYAnchor.constraint(equalTo: centerYAnchor),
-            statusDot.widthAnchor.constraint(equalToConstant: 24),
-            statusDot.heightAnchor.constraint(equalToConstant: 24),
+            statusDot.widthAnchor.constraint(equalToConstant: 22),
+            statusDot.heightAnchor.constraint(equalToConstant: 22),
 
-            labelStack.leadingAnchor.constraint(equalTo: statusDot.trailingAnchor, constant: 3),
+            labelStack.leadingAnchor.constraint(equalTo: statusDot.trailingAnchor, constant: 2),
             labelStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            labelStack.trailingAnchor.constraint(lessThanOrEqualTo: pauseResumeButton.leadingAnchor, constant: -8),
+            labelStack.trailingAnchor.constraint(lessThanOrEqualTo: pauseResumeButton.leadingAnchor, constant: -6),
 
-            pauseResumeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            pauseResumeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             pauseResumeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            pauseResumeButton.widthAnchor.constraint(equalToConstant: 24),
-            pauseResumeButton.heightAnchor.constraint(equalToConstant: 24)
+            pauseResumeButton.widthAnchor.constraint(equalToConstant: 22),
+            pauseResumeButton.heightAnchor.constraint(equalToConstant: 22),
+
+            pauseResumeImageView.centerXAnchor.constraint(equalTo: pauseResumeButton.centerXAnchor),
+            pauseResumeImageView.centerYAnchor.constraint(equalTo: pauseResumeButton.centerYAnchor),
+            pauseResumeImageView.widthAnchor.constraint(equalToConstant: 12),
+            pauseResumeImageView.heightAnchor.constraint(equalToConstant: 12)
         ])
     }
 
@@ -179,19 +306,35 @@ private final class DockAwayStatusView: NSVisualEffectView {
         nil
     }
 
-    func update(active: Bool, status: String) {
+    func update(
+        active: Bool,
+        status: String,
+        inactiveDetail: String = " App detection paused"
+    ) {
         statusDot.setActive(active)
-        titleLabel.stringValue = active ? "DockAway Active" : "DockAway Stopped"
+        titleLabel.stringValue = active ? "DockAway: Active" : "DockAway: Stopped"
         titleLabel.textColor = active ? .labelColor : .secondaryLabelColor
-        detailLabel.stringValue = active ? "App: \(status)" : "Detection paused"
+        detailLabel.stringValue = active
+            ? (status == "Desktop" ? "Desktop" : "App: \(status)")
+            : inactiveDetail
 
         let symbolName = active ? "pause.fill" : "play.fill"
-        let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-        pauseResumeButton.image = NSImage(
+        let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+        let symbolImage = NSImage(
             systemSymbolName: symbolName,
             accessibilityDescription: active ? "Stop DockAway" : "Resume DockAway"
         )?.withSymbolConfiguration(symbolConfiguration)
-        pauseResumeButton.contentTintColor = active ? .secondaryLabelColor : .systemGreen
+
+        if let symbolImage {
+            let shouldAnimate = displayedActiveState.map { $0 != active } ?? false
+            if shouldAnimate && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                pauseResumeImageView.setSymbolImage(symbolImage, contentTransition: .replace)
+            } else {
+                pauseResumeImageView.image = symbolImage
+            }
+        }
+        displayedActiveState = active
+        pauseResumeImageView.contentTintColor = active ? .secondaryLabelColor : .systemGreen
         pauseResumeButton.toolTip = active ? "Stop DockAway" : "Resume DockAway"
         pauseResumeButton.setAccessibilityLabel(pauseResumeButton.toolTip ?? "Toggle DockAway")
     }
@@ -200,6 +343,13 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
 @objc class AppDelegate: NSObject, NSApplicationDelegate {
     private static let ignoredWindowBundleIdentifiersKey = "IgnoredWindowBundleIdentifiers"
+
+    private enum AutomaticSuspensionReason: Hashable {
+        case screenLocked
+        case displayAsleep
+        case systemAsleep
+        case sessionInactive
+    }
 
     private struct BlacklistApplication {
         let bundleIdentifier: String
@@ -211,10 +361,15 @@ private final class DockAwayStatusView: NSVisualEffectView {
     private var statusItem: NSStatusItem!
     private var dockWatcher: DockWatcher!
     private var updaterController: SPUStandardUpdaterController!
+    private var updateMenuItem: NSMenuItem!
+    private var availableUpdateVersion: String?
     private var blacklistMenu: NSMenu!
     private var dockAwayStatusView: DockAwayStatusView!
     private var dockAwayEnabled = true
     private var activeStatusText = "Detecting…"
+    private var automaticSuspensionReasons = Set<AutomaticSuspensionReason>()
+    private var isWaitingForAccessibility = false
+    private var accessibilityWaitWorkItem: DispatchWorkItem?
     
     // The Unix signal trapper
     private var sigtermSource: DispatchSourceSignal?
@@ -228,26 +383,232 @@ private final class DockAwayStatusView: NSVisualEffectView {
     // Set to false to keep the finger-count logging without acting on it.
     private let hideOnFourFingerTouch = true
     private let fourFingerThreshold = 4
-    // Grace period after the fingers lift, so a swipe that is still landing
-    // isn't undone. The Dock stays down for as long as the fingers are on the
-    // trackpad regardless of what's on screen.
-    private let preHideRelease: TimeInterval = 0.6
+    // Keep SHOW suppressed while the destination Space finishes landing.
+    private let preHideRelease: TimeInterval = 0.60
     private var fourFingersDown = false
+    private var fourFingerStartedInMissionControl = false
     private let multitouch = MultitouchWatcher()
 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("🚀 APP LAUNCHED")
         NSApp.setActivationPolicy(.accessory)
+
+        setupSleepAndLockAwareness()
         
-        //Initialize Sparkle
-        updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        // Sparkle keeps scheduled checks gentle: background discoveries are
+        // surfaced in DockAway's menu instead of opening a surprise window.
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: self
+        )
         setupMenuBar()
         startMultitouchPreHide()
         requestAccessibilityPermission()
         
         // Arm the signal trapper
         setupSignalHandler()
+    }
+
+    // MARK: - Sleep & Session Awareness
+
+    private var monitoringShouldRun: Bool {
+        dockAwayEnabled && automaticSuspensionReasons.isEmpty && !isQuitting
+    }
+
+    private var automaticSuspensionDetail: String {
+        if automaticSuspensionReasons.contains(.screenLocked)
+            || automaticSuspensionReasons.contains(.sessionInactive) {
+            return "Screen locked"
+        }
+        if automaticSuspensionReasons.contains(.systemAsleep) {
+            return "Mac sleeping"
+        }
+        if automaticSuspensionReasons.contains(.displayAsleep) {
+            return "Display asleep"
+        }
+        return "App detection paused"
+    }
+
+    /// Stops all of DockAway's active monitoring while nobody can interact
+    /// with the desktop. Reasons are tracked independently because a Mac often
+    /// wakes while its display is still asleep or its user session is locked.
+    private func setupSleepAndLockAwareness() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(macWillSleep(_:)),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(macDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(displayDidSleep(_:)),
+            name: NSWorkspace.screensDidSleepNotification,
+            object: nil
+        )
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(displayDidWake(_:)),
+            name: NSWorkspace.screensDidWakeNotification,
+            object: nil
+        )
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(sessionDidResignActive(_:)),
+            name: NSWorkspace.sessionDidResignActiveNotification,
+            object: nil
+        )
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(sessionDidBecomeActive(_:)),
+            name: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil
+        )
+
+        // macOS has public sleep and user-session notifications, but no public
+        // notification dedicated specifically to Lock Screen. loginwindow's
+        // distributed notifications provide the immediate lock/unlock edge.
+        let distributedCenter = DistributedNotificationCenter.default()
+        distributedCenter.addObserver(
+            self,
+            selector: #selector(screenDidLock(_:)),
+            name: Notification.Name("com.apple.screenIsLocked"),
+            object: nil
+        )
+        distributedCenter.addObserver(
+            self,
+            selector: #selector(screenDidUnlock(_:)),
+            name: Notification.Name("com.apple.screenIsUnlocked"),
+            object: nil
+        )
+
+        // Cover an app launch that occurs while this user session is already
+        // locked or switched out, before a fresh notification can arrive.
+        refreshCurrentSessionState()
+    }
+
+    private func refreshCurrentSessionState() {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return }
+
+        if session["CGSSessionScreenIsLocked"] as? Bool == true {
+            automaticSuspensionReasons.insert(.screenLocked)
+        }
+        if session[kCGSessionOnConsoleKey as String] as? Bool == false {
+            automaticSuspensionReasons.insert(.sessionInactive)
+        }
+    }
+
+    @objc private func macWillSleep(_ notification: Notification) {
+        suspendMonitoring(for: .systemAsleep)
+    }
+
+    @objc private func macDidWake(_ notification: Notification) {
+        clearAutomaticSuspension(.systemAsleep)
+    }
+
+    @objc private func displayDidSleep(_ notification: Notification) {
+        suspendMonitoring(for: .displayAsleep)
+    }
+
+    @objc private func displayDidWake(_ notification: Notification) {
+        clearAutomaticSuspension(.displayAsleep)
+    }
+
+    @objc private func sessionDidResignActive(_ notification: Notification) {
+        suspendMonitoring(for: .sessionInactive)
+    }
+
+    @objc private func sessionDidBecomeActive(_ notification: Notification) {
+        clearAutomaticSuspension(.sessionInactive)
+    }
+
+    @objc private func screenDidLock(_ notification: Notification) {
+        suspendMonitoring(for: .screenLocked)
+    }
+
+    @objc private func screenDidUnlock(_ notification: Notification) {
+        clearAutomaticSuspension(.screenLocked)
+    }
+
+    private func suspendMonitoring(for reason: AutomaticSuspensionReason) {
+        let wasMonitoringAllowed = automaticSuspensionReasons.isEmpty
+        automaticSuspensionReasons.insert(reason)
+
+        guard wasMonitoringAllowed else {
+            updateDockAwayMenuState()
+            return
+        }
+
+        fourFingersDown = false
+        fourFingerStartedInMissionControl = false
+        dockWatcher?.stop()
+        multitouch.stop()
+        stopGlyphTimer()
+        accessibilityWaitWorkItem?.cancel()
+        accessibilityWaitWorkItem = nil
+        updateDockAwayMenuState()
+        print("🌙 DockAway monitoring suspended: \(automaticSuspensionDetail)")
+    }
+
+    private func clearAutomaticSuspension(_ reason: AutomaticSuspensionReason) {
+        guard automaticSuspensionReasons.remove(reason) != nil else { return }
+
+        // A wake event can arrive while loginwindow is still presenting the
+        // Lock Screen. Re-read the session for wake events, but trust explicit
+        // unlock/session-active notifications: the session dictionary can lag
+        // those notifications briefly and would otherwise re-suspend forever.
+        if reason != .screenLocked, reason != .sessionInactive {
+            refreshCurrentSessionState()
+        }
+        guard automaticSuspensionReasons.isEmpty else {
+            updateDockAwayMenuState()
+            return
+        }
+
+        guard dockAwayEnabled, !isQuitting else {
+            updateDockAwayMenuState()
+            return
+        }
+
+        if isWaitingForAccessibility, !AXIsProcessTrusted() {
+            waitForAccessibility()
+            updateDockAwayMenuState()
+            return
+        }
+
+        startMonitoringIfAllowed(resetState: true)
+
+        // Window Server can still be settling immediately after unlock. The
+        // first check is instant; this quiet second pass corrects a stale list.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, self.monitoringShouldRun else { return }
+            self.dockWatcher?.resetState()
+        }
+        print("☀️ DockAway monitoring resumed")
+    }
+
+    private func startMonitoringIfAllowed(resetState: Bool = false) {
+        guard monitoringShouldRun, AXIsProcessTrusted() else { return }
+
+        if dockWatcher == nil {
+            dockWatcher = DockWatcher()
+        }
+        dockWatcher.start()
+        startMultitouchPreHide()
+        startGlyphTimer()
+        updateDockAwayMenuState()
+
+        if resetState {
+            dockWatcher.resetState()
+        }
     }
 
     // MARK: - Menu Bar
@@ -263,36 +624,110 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
     // MARK: - Four-Finger Pre-Hide
 
-    /// Hides the Dock the moment four fingers land, before the swipe begins.
+    /// Uses raw contact motion to distinguish horizontal desktop swipes,
+    /// upward Mission Control entry, and downward Mission Control exit.
     /// Degrades to a no-op if MultitouchSupport can't be loaded.
     private func startMultitouchPreHide() {
-        multitouch.start { [weak self] fingers in
-            guard let self, !self.isQuitting, self.dockAwayEnabled else { return }
-            print("👆 fingers=\(fingers)")
+        guard monitoringShouldRun else { return }
 
-            guard self.hideOnFourFingerTouch, let watcher = self.dockWatcher else { return }
+        multitouch.start(
+            onFingerCountChange: { [weak self] fingers in
+                guard let self, self.monitoringShouldRun else { return }
 
-            if fingers >= self.fourFingerThreshold {
-                guard !self.fourFingersDown else { return }   // already handled
-                self.fourFingersDown = true
+                guard
+                    self.hideOnFourFingerTouch,
+                    let watcher = self.dockWatcher
+                else { return }
 
-                // Latch first: otherwise the 0.12s safety timer can see an empty
-                // desktop and re-show the Dock before the keystroke lands.
-                watcher.beginHoldHidden()
+                if fingers >= self.fourFingerThreshold {
+                    guard !self.fourFingersDown else { return }
+                    self.fourFingersDown = true
+                    self.fourFingerStartedInMissionControl =
+                        watcher.missionControlActiveAtGestureStart()
+                    print(
+                        self.fourFingerStartedInMissionControl
+                            ? "  🧭 Four-finger gesture began in Mission Control"
+                            : "  🧭 Four-finger gesture began on Desktop"
+                    )
+                    if !self.fourFingerStartedInMissionControl {
+                        watcher.prepareHorizontalSpacePredictionAtGestureStart()
+                    }
+                } else if self.fourFingersDown {
+                    self.fourFingersDown = false
+                    self.fourFingerStartedInMissionControl = false
+                    watcher.endHorizontalSpacePredictionAtGestureEnd()
+                    let releasingPreHide = watcher.endHoldHidden(
+                        after: self.preHideRelease
+                    )
+                    let releasingVisibleHold = watcher.endHoldVisible(
+                        after: self.preHideRelease
+                    )
+                    print(
+                        releasingPreHide
+                            ? "  ✋ Fingers lifted → hidden hold releases in \(self.preHideRelease)s"
+                            : releasingVisibleHold
+                                ? "  ✋ Fingers lifted → visible hold releases in \(self.preHideRelease)s"
+                                : "  ✋ Fingers lifted → no Dock hold to release"
+                    )
+                }
+            },
+            onFourFingerMotion: { [weak self] motion in
+                guard
+                    let self,
+                    self.monitoringShouldRun,
+                    self.hideOnFourFingerTouch,
+                    self.fourFingersDown,
+                    let watcher = self.dockWatcher
+                else { return }
 
-                if self.isDockCurrentlyVisible() {
-                    print("  ⚡ \(fingers) fingers down → pre-hiding Dock")
-                    watcher.simulateOptionCommandDPublic()
-                } else {
-                    print("  · \(fingers) fingers down → already hidden, holding")
+                let shouldPreHide: Bool
+                let movingToNextSpace: Bool?
+                switch motion {
+                case .horizontalLeft:
+                    shouldPreHide = !self.fourFingerStartedInMissionControl
+                    movingToNextSpace = true
+                case .horizontalRight:
+                    shouldPreHide = !self.fourFingerStartedInMissionControl
+                    movingToNextSpace = false
+                case .upward:
+                    shouldPreHide = false
+                    movingToNextSpace = nil
+                case .downward:
+                    shouldPreHide = self.fourFingerStartedInMissionControl
+                    movingToNextSpace = nil
                 }
 
-            } else if self.fourFingersDown {
-                self.fourFingersDown = false
-                watcher.endHoldHidden(after: self.preHideRelease)
-                print("  ✋ fingers lifted → hold releases in \(self.preHideRelease)s")
+                print("  🧭 Four-finger motion=\(motion)")
+
+                if let movingToNextSpace,
+                   !self.fourFingerStartedInMissionControl,
+                   watcher.beginVisibleHoldForHorizontalSwipeIfNeeded(
+                        movingToNextSpace: movingToNextSpace
+                   ) {
+                    print("  ✨ Dock-visible source confirmed → visible hold armed")
+                    return
+                }
+
+                if motion == .downward,
+                   self.fourFingerStartedInMissionControl,
+                   watcher.beginVisibleHoldForMissionControlExitIfNeeded() {
+                    print("  ✨ Empty Mission Control destination → visible hold armed")
+                    return
+                }
+
+                guard shouldPreHide else { return }
+
+                let armedPreHide = watcher.beginHoldHidden(
+                    missionControlWasActiveAtContact:
+                        self.fourFingerStartedInMissionControl
+                )
+                print(
+                    armedPreHide
+                        ? "  ⚡ Motion confirmed → hidden hold armed"
+                        : "  ⚡ Motion confirmed → pre-hide suppressed"
+                )
             }
-        }
+        )
     }
 
     // MARK: - Dynamic Glyph
@@ -312,13 +747,20 @@ private final class DockAwayStatusView: NSVisualEffectView {
     /// do is show the wrong chevron for a fraction of a second. It cannot move
     /// the Dock.
     private func startGlyphTimer() {
+        guard monitoringShouldRun, glyphTimer == nil else { return }
+
         let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self, !self.isQuitting else { return }
+            guard let self, self.monitoringShouldRun else { return }
             self.applyStatusIcon(dockVisible: self.isDockCurrentlyVisible())
         }
         // .common so the glyph keeps updating while a menu is open.
         RunLoop.main.add(timer, forMode: .common)
         glyphTimer = timer
+    }
+
+    private func stopGlyphTimer() {
+        glyphTimer?.invalidate()
+        glyphTimer = nil
     }
 
     /// Dock up (visible)  -> up chevron at full strength.
@@ -342,14 +784,28 @@ private final class DockAwayStatusView: NSVisualEffectView {
         let menu = NSMenu()
 
         let statusMenuItem = NSMenuItem()
-        let statusView = DockAwayStatusView(frame: NSRect(x: 0, y: 0, width: 232, height: 38))
+        let statusContainer = NSView(frame: NSRect(x: 0, y: 0, width: 212, height: 46))
+        let statusView = DockAwayStatusView(frame: .zero)
+        statusView.translatesAutoresizingMaskIntoConstraints = false
         statusView.pauseResumeButton.target = self
         statusView.pauseResumeButton.action = #selector(toggleDockAway)
-        statusView.update(active: dockAwayEnabled, status: activeStatusText)
-        statusMenuItem.view = statusView
+        statusView.update(
+            active: monitoringShouldRun,
+            status: activeStatusText,
+            inactiveDetail: dockAwayEnabled
+                ? automaticSuspensionDetail
+                : "App detection paused"
+        )
+        statusContainer.addSubview(statusView)
+        NSLayoutConstraint.activate([
+            statusView.leadingAnchor.constraint(equalTo: statusContainer.leadingAnchor, constant: 5),
+            statusView.trailingAnchor.constraint(equalTo: statusContainer.trailingAnchor, constant: -5),
+            statusView.topAnchor.constraint(equalTo: statusContainer.topAnchor, constant: 3),
+            statusView.bottomAnchor.constraint(equalTo: statusContainer.bottomAnchor, constant: -3)
+        ])
+        statusMenuItem.view = statusContainer
         dockAwayStatusView = statusView
         menu.addItem(statusMenuItem)
-        menu.addItem(.separator())
 
         let launchAtLogin = NSMenuItem(
             title: "Launch at Login",
@@ -376,11 +832,8 @@ private final class DockAwayStatusView: NSVisualEffectView {
             action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
             keyEquivalent: ""
         )
-        updateMenuItem.state = .on
-        updateMenuItem.onStateImage = menuIcon(from: NSImage(
-            systemSymbolName: "arrow.triangle.2.circlepath",
-            accessibilityDescription: "Check for Updates"
-        ))
+        self.updateMenuItem = updateMenuItem
+        refreshUpdateMenuItem()
         
         // Safety check to ensure we have a controller
         if let controller = self.updaterController {
@@ -388,7 +841,11 @@ private final class DockAwayStatusView: NSVisualEffectView {
             updateMenuItem.isEnabled = true
         } else {
             // If it's nil, we initialize it right here as a fallback
-            self.updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+            self.updaterController = SPUStandardUpdaterController(
+                startingUpdater: true,
+                updaterDelegate: nil,
+                userDriverDelegate: self
+            )
             updateMenuItem.target = self.updaterController
             updateMenuItem.isEnabled = true
         }
@@ -405,6 +862,46 @@ private final class DockAwayStatusView: NSVisualEffectView {
         menu.addItem(quitMenuItem)
 
         statusItem.menu = menu
+    }
+
+    private func refreshUpdateMenuItem() {
+        guard let updateMenuItem else { return }
+
+        let updateIsAvailable = availableUpdateVersion != nil
+        if let version = availableUpdateVersion {
+            updateMenuItem.title = "Update Available — v\(version)"
+            updateMenuItem.toolTip = "Install DockAway \(version)"
+        } else {
+            updateMenuItem.title = "Check for Updates..."
+            updateMenuItem.toolTip = "Check for a newer version of DockAway"
+        }
+
+        let symbolName = updateIsAvailable
+            ? "arrow.down.circle.fill"
+            : "arrow.triangle.2.circlepath"
+        updateMenuItem.state = .on
+        updateMenuItem.onStateImage = menuIcon(from: NSImage(
+            systemSymbolName: symbolName,
+            accessibilityDescription: updateIsAvailable
+                ? "Update Available"
+                : "Check for Updates"
+        ))
+    }
+
+    private func showAvailableUpdate(_ update: SUAppcastItem) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.availableUpdateVersion = update.displayVersionString
+            self.refreshUpdateMenuItem()
+        }
+    }
+
+    private func clearAvailableUpdateIndicator() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.availableUpdateVersion = nil
+            self.refreshUpdateMenuItem()
+        }
     }
 
     // MARK: - Blacklist
@@ -616,7 +1113,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
     func updateStatus(_ text: String) {
         DispatchQueue.main.async {
-            guard self.dockAwayEnabled else { return }
+            guard self.monitoringShouldRun else { return }
             self.activeStatusText = text
             self.dockAwayStatusView?.update(active: true, status: text)
         }
@@ -626,6 +1123,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
         if dockAwayEnabled {
             dockAwayEnabled = false
             fourFingersDown = false
+            fourFingerStartedInMissionControl = false
             dockWatcher?.stop()
             multitouch.stop()
             updateDockAwayMenuState()
@@ -639,21 +1137,20 @@ private final class DockAwayStatusView: NSVisualEffectView {
             }
 
             dockAwayEnabled = true
-            if dockWatcher == nil {
-                dockWatcher = DockWatcher()
-            }
-            dockWatcher.start()
-            startMultitouchPreHide()
+            startMonitoringIfAllowed(resetState: true)
             updateDockAwayMenuState()
-            dockWatcher.resetState()
             print("🟢 DockAway active")
         }
     }
 
     private func updateDockAwayMenuState() {
+        let monitoringIsActive = monitoringShouldRun
         dockAwayStatusView?.update(
-            active: dockAwayEnabled,
-            status: activeStatusText
+            active: monitoringIsActive,
+            status: activeStatusText,
+            inactiveDetail: dockAwayEnabled
+                ? automaticSuspensionDetail
+                : "App detection paused"
         )
     }
 
@@ -705,14 +1202,20 @@ private final class DockAwayStatusView: NSVisualEffectView {
     // MARK: - First Launch
 
     private func ensureDockAwayIsOn() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            let defaults = UserDefaults(suiteName: "com.apple.dock")
-            let isAlreadyOn = defaults?.bool(forKey: "autohide") ?? false
-            if !isAlreadyOn {
-                self.dockWatcher.simulateOptionCommandDPublic()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.dockWatcher.resetState()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard
+                let self,
+                self.monitoringShouldRun,
+                self.dockWatcher?.isRunning == true
+            else { return }
+
+            // Let DockWatcher decide the desired state. A raw ⌘⌥D here could
+            // otherwise hide the Dock in the middle of Mission Control or a
+            // Space swipe just because this delayed launch check fired.
+            self.dockWatcher.resetState()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, self.monitoringShouldRun else { return }
+                self.dockWatcher?.resetState()
             }
         }
     }
@@ -745,8 +1248,8 @@ private final class DockAwayStatusView: NSVisualEffectView {
     private func requestAccessibilityPermission() {
         if AXIsProcessTrusted() {
             dockWatcher = DockWatcher()
+            startMonitoringIfAllowed()
             ensureDockAwayIsOn()
-            dockWatcher.start()
             showWelcomeIfNeeded()
         } else {
             let alert = NSAlert()
@@ -798,6 +1301,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
             if alert.runModal() == .alertFirstButtonReturn {
                 let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true]
                 AXIsProcessTrustedWithOptions(options)
+                isWaitingForAccessibility = true
                 waitForAccessibility()
             } else {
                 NSApp.terminate(nil)
@@ -806,17 +1310,26 @@ private final class DockAwayStatusView: NSVisualEffectView {
     }
 
     private func waitForAccessibility() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+        guard !isQuitting, automaticSuspensionReasons.isEmpty else { return }
+
+        accessibilityWaitWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, !self.isQuitting, self.automaticSuspensionReasons.isEmpty else { return }
+
             if AXIsProcessTrusted() {
+                self.isWaitingForAccessibility = false
+                self.accessibilityWaitWorkItem = nil
                 print("✅ Accessibility granted - starting detector")
                 self.dockWatcher = DockWatcher()
+                self.startMonitoringIfAllowed()
                 self.ensureDockAwayIsOn()
-                self.dockWatcher.start()
                 self.showWelcomeIfNeeded()
             } else {
                 self.waitForAccessibility()
             }
         }
+        accessibilityWaitWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
     }
 
     // MARK: - Unix Signal & Cleanup
@@ -860,9 +1373,47 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
     func applicationWillTerminate(_ notification: Notification) {
         isQuitting = true
-        glyphTimer?.invalidate()
+        accessibilityWaitWorkItem?.cancel()
+        stopGlyphTimer()
+        dockWatcher?.stop()
         multitouch.stop()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        DistributedNotificationCenter.default().removeObserver(self)
         restoreDockState()
+    }
+}
+
+// MARK: - Sparkle Gentle Reminders
+
+extension AppDelegate: SPUStandardUserDriverDelegate {
+    var supportsGentleScheduledUpdateReminders: Bool {
+        true
+    }
+
+    /// Scheduled checks never steal focus. Sparkle keeps the update session
+    /// ready, while DockAway changes its menu item into the gentle reminder.
+    func standardUserDriverShouldHandleShowingScheduledUpdate(
+        _ update: SUAppcastItem,
+        andInImmediateFocus immediateFocus: Bool
+    ) -> Bool {
+        false
+    }
+
+    func standardUserDriverWillHandleShowingUpdate(
+        _ handleShowingUpdate: Bool,
+        forUpdate update: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        guard !state.userInitiated, !handleShowingUpdate else { return }
+        showAvailableUpdate(update)
+    }
+
+    func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
+        clearAvailableUpdateIndicator()
+    }
+
+    func standardUserDriverWillFinishUpdateSession() {
+        clearAvailableUpdateIndicator()
     }
 }
 
