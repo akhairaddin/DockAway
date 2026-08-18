@@ -9,6 +9,17 @@
     </style>
 </head>
 <body>
+    <h3>Version 1.1.6 <span style="font-weight: normal;">(8-18-26)</span></h3>
+    <ul>
+        <li><b>Update Checks at Launch:</b> DockAway now performs a quiet Sparkle update check whenever it is opened manually or launched automatically at login. Available updates appear through the existing gentle menu-bar reminder without interrupting the user, and the normal six-hour update schedule continues afterward.</li>
+        <li><b>Smoother Status Animation:</b> The green status dot now uses one uninterrupted animation timeline instead of restarting during routine status refreshes. Its three pulse waves are evenly spaced for a fluid, consistent rhythm with no visible pause at the loop boundary.</li>
+        <li><b>Faster Blacklist Detection:</b> Blacklist and running-process information is now cached in memory instead of being rebuilt during every window scan. The cache updates immediately after menu changes and app lifecycle events, while a lightweight safety refresh preserves compatibility with the existing Terminal configuration method.</li>
+        <li><b>Quick Blacklist Access:</b> The current foreground app now appears first in the Blacklist submenu, separated from the remaining applications for faster one-click selection.</li>
+        <li><b>Accessibility Permission Recovery:</b> If Accessibility access is removed while DockAway is running, monitoring stops safely and the menu clearly displays "Permission Required" with a direct shortcut to Accessibility Settings. DockAway resumes automatically after access is restored.</li>
+        <li><b>Lower Background Overhead:</b> DockAway now skips unchanged menu updates, stops cosmetic polling while paused, delays recurring helpers until permission is available, reuses static window-filter data, and gives noncritical timers scheduling tolerance so macOS can combine wakeups.</li>
+    </ul>
+    <hr>
+
     <h3>Version 1.1.5 <span style="font-weight: normal;">(8-16-26)</span></h3>
     <ul>
         <li><b>94% Idle-Scan Efficiency Improvement:</b> DockAway now uses the event-driven AXObserver notifications instead of continuously performing a full window scan every 0.12 seconds. A lightweight 2-second safety check remains for unusual apps, reducing routine idle scans from about 8.3 per second to 0.5 while retaining fast reactions.</li>

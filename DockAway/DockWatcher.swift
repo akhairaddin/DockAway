@@ -1,9 +1,9 @@
 import Cocoa
 import ApplicationServices
 
-/// Keeps the unmanaged AX callback pointer safe without retaining DockWatcher.
-/// The observation owns this context for exactly as long as its run-loop source
-/// is installed.
+// Keeps the unmanaged AX callback pointer safe without retaining DockWatcher.
+// The observation owns this context for exactly as long as its run-loop source
+// is installed.
 private final class DockWatcherAXContext {
     let processIdentifier: pid_t
     let handler: (pid_t, AXObserver, AXUIElement, String) -> Void
@@ -52,10 +52,10 @@ private let dockWatcherAXCallback: AXObserverCallback = {
     )
 }
 
-/// Read-only access to macOS' live Space ordering and the windows assigned to
-/// an inactive Space. These symbols are private, so every lookup is dynamic
-/// and optional. If Apple changes them, DockAway simply falls back to its
-/// existing on-screen destination probe instead of failing to launch.
+// Read-only access to macOS' live Space ordering and the windows assigned to
+// an inactive Space. These symbols are private, so every lookup is dynamic
+// and optional. If Apple changes them, DockAway simply falls back to its
+// existing on-screen destination probe instead of failing to launch.
 private final class DockWatcherSpaceAPI {
     struct Space {
         let identifier: UInt64
@@ -246,6 +246,13 @@ private final class DockWatcherSpaceAPI {
 final class DockWatcher {
 
     private static let ignoredWindowBundleIdentifiersKey = "IgnoredWindowBundleIdentifiers"
+    private static let ignoredWindowOwnerNames: Set<String> = [
+        "DockAway",
+        "Window Server",
+        "Dock",
+        "WindowManager",
+        "Control Center"
+    ]
 
     private enum DisplayWindowState {
         case empty
@@ -309,6 +316,8 @@ final class DockWatcher {
     private var lastPointerDisplayID: CGDirectDisplayID?
     private var lastEvaluatedDisplayID: CGDirectDisplayID?
     private var lastEvaluatedWindowState: DisplayWindowState?
+    private var cachedIgnoredBundleIdentifiers = Set<String>()
+    private var cachedBundleIdentifiersByPID = [pid_t: String]()
     private var lastCommandedDockVisibility: Bool?
     private var lastToggleTime = Date.distantPast
     private(set) var isRunning = false
@@ -370,6 +379,8 @@ final class DockWatcher {
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        refreshBlacklistCacheFromDefaults()
+        refreshRunningApplicationCache()
 
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -438,9 +449,15 @@ final class DockWatcher {
         let timer = Timer(timeInterval: safetyInterval, repeats: true) { [weak self] _ in
             guard let self else { return }
             guard (NSApp.delegate as? AppDelegate)?.isQuitting != true else { return }
+            guard AXIsProcessTrusted() else {
+                (NSApp.delegate as? AppDelegate)?.accessibilityPermissionWasRevoked()
+                return
+            }
+            self.refreshBlacklistCacheFromDefaults()
             self.refreshMissionControlState(allowWindowServerFallback: true)
             self.evaluateFrontmostApp(quiet: true)
         }
+        timer.tolerance = 0.20
         RunLoop.main.add(timer, forMode: .common)
         safetyTimer = timer
 
@@ -505,7 +522,7 @@ final class DockWatcher {
         lastEvaluatedDisplayID = nil
         lastEvaluatedWindowState = nil
         lastCommandedDockVisibility = nil
-        print("⏸️ DockStatus stopped")
+        print("⏸️ DockStatus Paused")
     }
 
     deinit { stop() }
@@ -820,6 +837,7 @@ final class DockWatcher {
 
     @objc private func applicationDidLaunch(_ note: Notification) {
         guard let application = runningApplication(from: note) else { return }
+        cacheBundleIdentifier(for: application)
 
         if application.bundleIdentifier == "com.apple.dock" {
             pendingDockObserverRetry?.cancel()
@@ -843,6 +861,7 @@ final class DockWatcher {
         guard let application = runningApplication(from: note) else { return }
 
         let processIdentifier = application.processIdentifier
+        cachedBundleIdentifiersByPID.removeValue(forKey: processIdentifier)
         if dockAccessibilityObservation?.context.processIdentifier == processIdentifier {
             pendingDockObserverRetry?.cancel()
             pendingDockObserverRetry = nil
@@ -865,11 +884,53 @@ final class DockWatcher {
         note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
     }
 
+    // Window classification is latency-sensitive during a Space swipe. Keep
+    // blacklist and process metadata in RAM, then refresh the defaults snapshot
+    // on the slow safety pass so legacy `defaults write` changes still work.
+    private func refreshBlacklistCacheFromDefaults() {
+        cachedIgnoredBundleIdentifiers = Set(
+            UserDefaults.standard.stringArray(
+                forKey: Self.ignoredWindowBundleIdentifiersKey
+            ) ?? []
+        )
+    }
+
+    private func refreshRunningApplicationCache() {
+        cachedBundleIdentifiersByPID.removeAll(keepingCapacity: true)
+        for application in NSWorkspace.shared.runningApplications {
+            cacheBundleIdentifier(for: application)
+        }
+    }
+
+    private func cacheBundleIdentifier(for application: NSRunningApplication) {
+        guard
+            application.processIdentifier > 0,
+            let bundleIdentifier = application.bundleIdentifier
+        else { return }
+
+        cachedBundleIdentifiersByPID[application.processIdentifier] = bundleIdentifier
+    }
+
+    private func bundleIdentifier(for processIdentifier: pid_t) -> String? {
+        if let cachedIdentifier = cachedBundleIdentifiersByPID[processIdentifier] {
+            return cachedIdentifier
+        }
+
+        guard let application = NSRunningApplication(
+            processIdentifier: processIdentifier
+        ), let bundleIdentifier = application.bundleIdentifier else {
+            return nil
+        }
+
+        cachedBundleIdentifiersByPID[processIdentifier] = bundleIdentifier
+        return bundleIdentifier
+    }
+
     // MARK: - Mission Control Detection
 
-    /// Mission Control is implemented by Dock.app. Its AX hierarchy gains a
-    /// first-level group whose stable identifier is `mc` while the overview is
-    /// visible. Dock also emits selected-children changes on entry and exit.
+    // Mission Control is implemented by Dock.app. Its AX hierarchy gains a
+    // first-level group whose stable identifier is `mc` while the overview is
+    // visible. Dock also emits selected-children changes on entry and exit.
     private func installDockAccessibilityObserver() {
         guard isRunning, AXIsProcessTrusted() else { return }
         guard let dockApplication = NSRunningApplication.runningApplications(
@@ -1117,9 +1178,9 @@ final class DockWatcher {
         return (false, !hadTransientIdentifierFailure)
     }
 
-    /// Tahoe and the current beta expose a WindowManager "Spaces Bar" at
-    /// layer 14 only for Mission Control (not App Exposé or Show Desktop).
-    /// This is an undocumented fallback used only when AX is late or unavailable.
+    // Tahoe and the current beta expose a WindowManager "Spaces Bar" at
+    // layer 14 only for Mission Control (not App Exposé or Show Desktop).
+    // This is an undocumented fallback used only when AX is late or unavailable.
     private func missionControlWindowServerState() -> Bool {
         let options: CGWindowListOption = [.optionOnScreenOnly]
         guard let windows = CGWindowListCopyWindowInfo(
@@ -1171,9 +1232,9 @@ final class DockWatcher {
 
     // MARK: - Pointer Display Tracking
 
-    /// Changing which display is under the pointer changes DockAway's target,
-    /// even when no application or AX event occurs. This timer is intentionally
-    /// cheap: it compares one display ID and scans windows only on a transition.
+    // Changing which display is under the pointer changes DockAway's target,
+    // even when no application or AX event occurs. This timer is intentionally
+    // cheap: it compares one display ID and scans windows only on a transition.
     private func startPointerDisplayTimer() {
         lastPointerDisplayID = displayIDUnderPointer()
 
@@ -1210,6 +1271,8 @@ final class DockWatcher {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         else { return }
 
+        cacheBundleIdentifier(for: app)
+
         let appName = app.localizedName ?? (app.bundleIdentifier ?? "Unknown")
         print("▶ Active app: \(appName)")
         evaluate(app: app, quiet: false)
@@ -1230,16 +1293,16 @@ final class DockWatcher {
 
     // MARK: - Core Logic
 
-    /// Re-checks whatever app macOS currently reports as frontmost.
+    // Re-checks whatever app macOS currently reports as frontmost.
     private func evaluateFrontmostApp(quiet: Bool) {
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
         evaluate(app: app, quiet: quiet)
     }
 
-    /// Shows the Dock only when the display under the pointer has no standard
-    /// app window, or when a blacklisted app is visible there. That is the
-    /// display whose Space the user is interacting with during a multi-monitor
-    /// desktop swipe.
+    // Shows the Dock only when the display under the pointer has no standard
+    // app window, or when a blacklisted app is visible there. That is the
+    // display whose Space the user is interacting with during a multi-monitor
+    // desktop swipe.
     private func evaluate(app: NSRunningApplication, quiet: Bool) {
         guard isRunning else { return }
 
@@ -1300,11 +1363,11 @@ final class DockWatcher {
 
     // MARK: - Window Detection
 
-    /// Classifies the foremost normal app window on the active display. The
-    /// Core Graphics window list is ordered front-to-back, so a covered
-    /// blacklisted window cannot override the app actually in front of it. A
-    /// small edge overlap is ignored so window shadows across a monitor boundary
-    /// cannot hide the Dock.
+    // Classifies the foremost normal app window on the active display. The
+    // Core Graphics window list is ordered front-to-back, so a covered
+    // blacklisted window cannot override the app actually in front of it. A
+    // small edge overlap is ignored so window shadows across a monitor boundary
+    // cannot hide the Dock.
     private func displayWindowState(on displayBounds: CGRect) -> DisplayWindowState {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
@@ -1314,10 +1377,10 @@ final class DockWatcher {
         return classifyWindowState(in: list, on: displayBounds) ?? .empty
     }
 
-    /// Applies DockAway's normal front-to-back window rules to either the live
-    /// on-screen list or a Space-specific list of window IDs. Keeping one
-    /// classifier ensures the prediction honors blacklist behavior exactly as
-    /// the ordinary detector does.
+    // Applies DockAway's normal front-to-back window rules to either the live
+    // on-screen list or a Space-specific list of window IDs. Keeping one
+    // classifier ensures the prediction honors blacklist behavior exactly as
+    // the ordinary detector does.
     private func classifyWindowState(
         in list: [[String: Any]],
         on displayBounds: CGRect,
@@ -1339,20 +1402,6 @@ final class DockWatcher {
             orderedList = list
         }
 
-        // Power-user configuration. An empty set is the normal behavior.
-        let ignoredBundleIdentifiers = Set(
-            UserDefaults.standard.stringArray(forKey: Self.ignoredWindowBundleIdentifiersKey) ?? []
-        )
-
-        var bundleIdentifiersByPID = [pid_t: String]()
-        if !ignoredBundleIdentifiers.isEmpty {
-            for application in NSWorkspace.shared.runningApplications {
-                if let bundleIdentifier = application.bundleIdentifier {
-                    bundleIdentifiersByPID[application.processIdentifier] = bundleIdentifier
-                }
-            }
-        }
-
         var predictedCandidateState: DisplayWindowState?
         for info in orderedList {
             guard
@@ -1362,8 +1411,7 @@ final class DockWatcher {
             else { continue }
 
             // WindowManager owns the invisible "Click to reveal desktop" overlay in macOS 14+.
-            let ignoredApps = ["DockAway", "Window Server", "Dock", "WindowManager", "Control Center"]
-            if ignoredApps.contains(ownerName) { continue }
+            if Self.ignoredWindowOwnerNames.contains(ownerName) { continue }
 
             let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1.0
             if alpha < 0.05 { continue }
@@ -1385,9 +1433,10 @@ final class DockWatcher {
             let overlap = windowRect.intersection(displayBounds)
             if overlap.width >= 50, overlap.height >= 50 {
                 let candidateState: DisplayWindowState
-                if let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                   let bundleIdentifier = bundleIdentifiersByPID[ownerPID],
-                   isBlacklisted(bundleIdentifier, in: ignoredBundleIdentifiers) {
+                if !cachedIgnoredBundleIdentifiers.isEmpty,
+                   let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                   let bundleIdentifier = bundleIdentifier(for: ownerPID),
+                   isBlacklisted(bundleIdentifier, in: cachedIgnoredBundleIdentifiers) {
                     candidateState = .blacklisted
                 } else {
                     candidateState = .occupied
@@ -1411,10 +1460,10 @@ final class DockWatcher {
         return predictedCandidateState ?? .empty
     }
 
-    /// Pre-classifies both adjacent Spaces while the fingers are resting, before
-    /// the horizontal animation has begun. That lets an occupied destination
-    /// use the stable build's early HIDE timing, while an empty destination can
-    /// keep the Dock continuously visible.
+    // Pre-classifies both adjacent Spaces while the fingers are resting, before
+    // the horizontal animation has begun. That lets an occupied destination
+    // use the stable build's early HIDE timing, while an empty destination can
+    // keep the Dock continuously visible.
     func prepareHorizontalSpacePredictionAtGestureStart() {
         horizontalSpacePrediction = nil
         let predictionStartedAt = ProcessInfo.processInfo.systemUptime
@@ -1487,8 +1536,8 @@ final class DockWatcher {
         horizontalSpacePrediction = nil
     }
 
-    /// Helper processes commonly append a suffix to their parent app's bundle
-    /// identifier. Treat those as part of the selected app as well.
+    // Helper processes commonly append a suffix to their parent app's bundle
+    // identifier. Treat those as part of the selected app as well.
     private func isBlacklisted(_ bundleIdentifier: String, in identifiers: Set<String>) -> Bool {
         identifiers.contains {
             bundleIdentifier == $0 || bundleIdentifier.hasPrefix($0 + ".")
@@ -1518,6 +1567,10 @@ final class DockWatcher {
 
     // MARK: - Public Helpers
 
+    func updateBlacklist(_ identifiers: Set<String>) {
+        cachedIgnoredBundleIdentifiers = identifiers
+    }
+
     func resetState() {
         evaluateFrontmostApp(quiet: false)
     }
@@ -1526,16 +1579,16 @@ final class DockWatcher {
         simulateOptionCommandD()
     }
 
-    /// Captures the already-maintained Mission Control state on first contact.
-    /// This must remain a cache read: synchronous AX/Window Server work here
-    /// delays the following motion callback until the Space animation begins.
+    // Captures the already-maintained Mission Control state on first contact.
+    // This must remain a cache read: synchronous AX/Window Server work here
+    // delays the following motion callback until the Space animation begins.
     func missionControlActiveAtGestureStart() -> Bool {
         isRunning && missionControlIsActive
     }
 
-    /// Keeps the Dock visible through a horizontal swipe only when the cached
-    /// source Space is already one where DockAway wants it shown. The cached
-    /// verdict avoids a synchronous window scan on the first motion frame.
+    // Keeps the Dock visible through a horizontal swipe only when the cached
+    // source Space is already one where DockAway wants it shown. The cached
+    // verdict avoids a synchronous window scan on the first motion frame.
     @discardableResult
     func beginVisibleHoldForHorizontalSwipeIfNeeded(
         movingToNextSpace: Bool,
@@ -1581,9 +1634,9 @@ final class DockWatcher {
         )
     }
 
-    /// Mission Control freezes ordinary scans, so the last evaluated state is
-    /// the desktop that macOS is returning to. Keep its Dock visible throughout
-    /// the downward animation when that desktop was empty or blacklisted.
+    // Mission Control freezes ordinary scans, so the last evaluated state is
+    // the desktop that macOS is returning to. Keep its Dock visible throughout
+    // the downward animation when that desktop was empty or blacklisted.
     @discardableResult
     func beginVisibleHoldForMissionControlExitIfNeeded(
         maximum: TimeInterval = 5.0
@@ -1628,9 +1681,9 @@ final class DockWatcher {
         return true
     }
 
-    /// Latch and pre-hide after raw contact motion has identified a horizontal
-    /// desktop swipe or a downward Mission Control exit. Motion classification
-    /// avoids hiding merely because four fingers are resting in the overview.
+    // Latch and pre-hide after raw contact motion has identified a horizontal
+    // desktop swipe or a downward Mission Control exit. Motion classification
+    // avoids hiding merely because four fingers are resting in the overview.
     @discardableResult
     func beginHoldHidden(
         missionControlWasActiveAtContact: Bool,
@@ -1676,8 +1729,8 @@ final class DockWatcher {
         return true
     }
 
-    /// Keep SHOW suppressed briefly after finger lift so the destination Space
-    /// is fully landed before one fresh occupancy decision is made.
+    // Keep SHOW suppressed briefly after finger lift so the destination Space
+    // is fully landed before one fresh occupancy decision is made.
     @discardableResult
     func endHoldHidden(after seconds: TimeInterval) -> Bool {
         guard isRunning, isHoldingHidden else { return false }
@@ -1688,9 +1741,9 @@ final class DockWatcher {
         return true
     }
 
-    /// Keep HIDE suppressed briefly after finger lift. Window evaluations keep
-    /// running during this hold so its release can immediately apply the final
-    /// destination Space verdict.
+    // Keep HIDE suppressed briefly after finger lift. Window evaluations keep
+    // running during this hold so its release can immediately apply the final
+    // destination Space verdict.
     @discardableResult
     func endHoldVisible(after seconds: TimeInterval) -> Bool {
         guard isRunning, isHoldingVisible else { return false }
@@ -1795,7 +1848,7 @@ final class DockWatcher {
             visibleHoldReleaseAt.timeIntervalSinceNow
         )
 
-        print("  ⚡ occupied destination detected → switching to hidden pre-hide")
+        print("  ⚡ Occupied destination detected → switching to hidden pre-hide")
         guard beginHoldHidden(missionControlWasActiveAtContact: false) else {
             return false
         }

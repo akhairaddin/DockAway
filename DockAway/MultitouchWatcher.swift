@@ -1,16 +1,16 @@
 import Foundation
 
-/// Reads raw trackpad contacts from the private MultitouchSupport framework —
-/// the only way to know fingers are resting on the trackpad before any motion
-/// has happened. AppKit does not emit a gesture event until a swipe starts.
-///
-/// Everything is resolved with dlopen/dlsym at runtime rather than linked at
-/// build time. If Apple moves the framework or renames a symbol, `start` fails,
-/// logs, and the app carries on without the feature instead of refusing to
-/// launch. That matters on a beta OS.
-///
-/// This is private API. It is not reviewed, not documented, and not promised to
-/// exist in the next build of macOS.
+// Reads raw trackpad contacts from the private MultitouchSupport framework —
+// the only way to know fingers are resting on the trackpad before any motion
+// has happened. AppKit does not emit a gesture event until a swipe starts.
+//
+// Everything is resolved with dlopen/dlsym at runtime rather than linked at
+// build time. If Apple moves the framework or renames a symbol, `start` fails,
+// logs, and the app carries on without the feature instead of refusing to
+// launch. That matters on a beta OS.
+//
+// This is private API. It is not reviewed, not documented, and not promised to
+// exist in the next build of macOS.
 final class MultitouchWatcher {
 
     typealias FingerCountHandler = (Int) -> Void
@@ -39,8 +39,8 @@ final class MultitouchWatcher {
     private static let frameworkPath =
         "/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport"
 
-    /// Finger-count changes fire on contact. Once four contacts move far enough
-    /// to reject resting noise, their dominant direction is reported once.
+    // Finger-count changes fire on contact. Once four contacts move far enough
+    // to reject resting noise, their dominant direction is reported once.
     func start(
         onFingerCountChange handler: @escaping FingerCountHandler,
         onFourFingerMotion motionHandler: @escaping FourFingerMotionHandler
@@ -129,9 +129,9 @@ private struct MTVector {
     var velocity: MTPoint
 }
 
-/// Runtime layout used by MultitouchSupport's contact-frame callback. DockAway
-/// reads only `normalized.position`; the remaining fields preserve the native
-/// stride so each contact begins at the correct address.
+// Runtime layout used by MultitouchSupport's contact-frame callback. DockAway
+// reads only `normalized.position`; the remaining fields preserve the native
+// stride so each contact begins at the correct address.
 private struct MTContact {
     var frame: Int32
     var timestamp: Double

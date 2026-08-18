@@ -55,10 +55,10 @@ private final class PulsingStatusDotView: NSView {
     }
 
     func setActive(_ active: Bool) {
-        guard isActive != active else {
-            updatePulseAnimation()
-            return
-        }
+        // Status text is refreshed frequently. If the activity state did not
+        // change, leave the existing infinite pulse timeline untouched rather
+        // than making the waves visibly restart from their first frame.
+        guard isActive != active else { return }
 
         isActive = active
         updateAppearance(animated: window != nil)
@@ -138,16 +138,34 @@ private final class PulsingStatusDotView: NSView {
             return
         }
 
+        guard
+            window != nil,
+            !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        else {
+            for pulseLayer in pulseLayers {
+                pulseLayer.removeAnimation(forKey: "outwardPulse")
+                pulseLayer.removeAnimation(forKey: "pulseStop")
+                pulseLayer.opacity = 0
+            }
+            return
+        }
+
+        // AppKit may notify us about the same window attachment more than once.
+        // Preserve the shared phase of a healthy animation instead of resetting
+        // all three waves.
+        guard pulseLayers.contains(where: {
+            $0.animation(forKey: "outwardPulse") == nil
+        }) else { return }
+
         for pulseLayer in pulseLayers {
             pulseLayer.removeAnimation(forKey: "outwardPulse")
             pulseLayer.removeAnimation(forKey: "pulseStop")
             pulseLayer.opacity = 0
         }
 
-        guard
-            window != nil,
-            !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        else { return }
+        let pulseDuration = 2.1 * animationDurationScale
+        let waveInterval = pulseDuration / Double(pulseLayers.count)
+        let timelineStart = CACurrentMediaTime()
 
         for (index, pulseLayer) in pulseLayers.enumerated() {
             let scale = CABasicAnimation(keyPath: "transform.scale")
@@ -160,9 +178,8 @@ private final class PulsingStatusDotView: NSView {
 
             let pulse = CAAnimationGroup()
             pulse.animations = [scale, fade]
-            pulse.duration = 2.1 * animationDurationScale
-            pulse.beginTime = CACurrentMediaTime()
-                + (Double(index) * 0.62 * animationDurationScale)
+            pulse.duration = pulseDuration
+            pulse.beginTime = timelineStart + (Double(index) * waveInterval)
             pulse.repeatCount = .infinity
             pulse.timingFunction = CAMediaTimingFunction(name: .easeOut)
             pulseLayer.add(pulse, forKey: "outwardPulse")
@@ -309,20 +326,31 @@ private final class DockAwayStatusView: NSVisualEffectView {
     func update(
         active: Bool,
         status: String,
-        inactiveDetail: String = " App detection paused"
+        inactiveTitle: String = "DockAway: Paused",
+        inactiveDetail: String = " App detection paused",
+        inactiveActionTitle: String = "Resume DockAway"
     ) {
-        statusDot.setActive(active)
-        titleLabel.stringValue = active ? "DockAway: Active" : "DockAway: Stopped"
-        titleLabel.textColor = active ? .labelColor : .secondaryLabelColor
-        detailLabel.stringValue = active
+        let title = active ? "DockAway: Active" : inactiveTitle
+        let detail = active
             ? (status == "Desktop" ? "Desktop" : "App: \(status)")
             : inactiveDetail
 
+        guard displayedActiveState != active
+            || titleLabel.stringValue != title
+            || detailLabel.stringValue != detail
+        else { return }
+
+        statusDot.setActive(active)
+        titleLabel.stringValue = title
+        titleLabel.textColor = active ? .labelColor : .secondaryLabelColor
+        detailLabel.stringValue = detail
+
+        let actionTitle = active ? "Stop DockAway" : inactiveActionTitle
         let symbolName = active ? "pause.fill" : "play.fill"
         let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
         let symbolImage = NSImage(
             systemSymbolName: symbolName,
-            accessibilityDescription: active ? "Stop DockAway" : "Resume DockAway"
+            accessibilityDescription: actionTitle
         )?.withSymbolConfiguration(symbolConfiguration)
 
         if let symbolImage {
@@ -335,7 +363,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
         }
         displayedActiveState = active
         pauseResumeImageView.contentTintColor = active ? .secondaryLabelColor : .systemGreen
-        pauseResumeButton.toolTip = active ? "Stop DockAway" : "Resume DockAway"
+        pauseResumeButton.toolTip = actionTitle
         pauseResumeButton.setAccessibilityLabel(pauseResumeButton.toolTip ?? "Toggle DockAway")
     }
 }
@@ -364,10 +392,13 @@ private final class DockAwayStatusView: NSVisualEffectView {
     private var updateMenuItem: NSMenuItem!
     private var availableUpdateVersion: String?
     private var blacklistMenu: NSMenu!
+    private var accessibilityRecoveryMenuItem: NSMenuItem?
+    private var accessibilityRecoverySeparator: NSMenuItem?
     private var dockAwayStatusView: DockAwayStatusView!
     private var dockAwayEnabled = true
     private var activeStatusText = "Detecting…"
     private var automaticSuspensionReasons = Set<AutomaticSuspensionReason>()
+    private var accessibilityPermissionMissing = false
     private var isWaitingForAccessibility = false
     private var accessibilityWaitWorkItem: DispatchWorkItem?
     
@@ -403,8 +434,16 @@ private final class DockAwayStatusView: NSVisualEffectView {
             updaterDelegate: nil,
             userDriverDelegate: self
         )
+
+        // Check quietly on every fresh launch, including Launch at Login.
+        // Sparkle continues using the normal six-hour schedule afterward and
+        // the gentle-reminder delegate surfaces discoveries in DockAway's menu.
+        if updaterController.updater.automaticallyChecksForUpdates {
+            updaterController.updater.checkForUpdatesInBackground()
+        }
+
+        accessibilityPermissionMissing = !AXIsProcessTrusted()
         setupMenuBar()
-        startMultitouchPreHide()
         requestAccessibilityPermission()
         
         // Arm the signal trapper
@@ -414,10 +453,16 @@ private final class DockAwayStatusView: NSVisualEffectView {
     // MARK: - Sleep & Session Awareness
 
     private var monitoringShouldRun: Bool {
-        dockAwayEnabled && automaticSuspensionReasons.isEmpty && !isQuitting
+        dockAwayEnabled
+            && !accessibilityPermissionMissing
+            && automaticSuspensionReasons.isEmpty
+            && !isQuitting
     }
 
     private var automaticSuspensionDetail: String {
+        if accessibilityPermissionMissing {
+            return "Accessibility access is off"
+        }
         if automaticSuspensionReasons.contains(.screenLocked)
             || automaticSuspensionReasons.contains(.sessionInactive) {
             return "Screen locked"
@@ -431,9 +476,15 @@ private final class DockAwayStatusView: NSVisualEffectView {
         return "App detection paused"
     }
 
-    /// Stops all of DockAway's active monitoring while nobody can interact
-    /// with the desktop. Reasons are tracked independently because a Mac often
-    /// wakes while its display is still asleep or its user session is locked.
+    private var inactiveStatusTitle: String {
+        accessibilityPermissionMissing && dockAwayEnabled
+            ? "Permission Required"
+            : "DockAway: Paused"
+    }
+
+    // Stops all of DockAway's active monitoring while nobody can interact
+    // with the desktop. Reasons are tracked independently because a Mac often
+    // wakes while its display is still asleep or its user session is locked.
     private func setupSleepAndLockAwareness() {
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         workspaceCenter.addObserver(
@@ -584,6 +635,13 @@ private final class DockAwayStatusView: NSVisualEffectView {
             return
         }
 
+        guard AXIsProcessTrusted() else {
+            accessibilityPermissionWasRevoked()
+            return
+        }
+        accessibilityPermissionMissing = false
+        isWaitingForAccessibility = false
+
         startMonitoringIfAllowed(resetState: true)
 
         // Window Server can still be settling immediately after unlock. The
@@ -596,7 +654,11 @@ private final class DockAwayStatusView: NSVisualEffectView {
     }
 
     private func startMonitoringIfAllowed(resetState: Bool = false) {
-        guard monitoringShouldRun, AXIsProcessTrusted() else { return }
+        guard monitoringShouldRun else { return }
+        guard AXIsProcessTrusted() else {
+            accessibilityPermissionWasRevoked()
+            return
+        }
 
         if dockWatcher == nil {
             dockWatcher = DockWatcher()
@@ -619,14 +681,13 @@ private final class DockAwayStatusView: NSVisualEffectView {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         applyStatusIcon(dockVisible: isDockCurrentlyVisible())
         buildMenu()
-        startGlyphTimer()
     }
 
     // MARK: - Four-Finger Pre-Hide
 
-    /// Uses raw contact motion to distinguish horizontal desktop swipes,
-    /// upward Mission Control entry, and downward Mission Control exit.
-    /// Degrades to a no-op if MultitouchSupport can't be loaded.
+    // Uses raw contact motion to distinguish horizontal desktop swipes,
+    // upward Mission Control entry, and downward Mission Control exit.
+    // Degrades to a no-op if MultitouchSupport can't be loaded.
     private func startMultitouchPreHide() {
         guard monitoringShouldRun else { return }
 
@@ -732,20 +793,20 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
     // MARK: - Dynamic Glyph
 
-    /// The Dock's live autohide setting. A fresh instance every call, since a
-    /// long-lived UserDefaults for another app's domain can serve a stale
-    /// snapshot of that domain.
+    // The Dock's live autohide setting. A fresh instance every call, since a
+    // long-lived UserDefaults for another app's domain can serve a stale
+    // snapshot of that domain.
     private func isDockCurrentlyVisible() -> Bool {
         !(UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false)
     }
 
-    /// Polls the Dock state for the sole purpose of picking a glyph.
-    ///
-    /// This is intentionally a separate loop rather than a hook inside
-    /// DockWatcher. It only ever reads, never calls into DockWatcher, and never
-    /// participates in a toggle decision — so the worst a wrong or late read can
-    /// do is show the wrong chevron for a fraction of a second. It cannot move
-    /// the Dock.
+    // Polls the Dock state for the sole purpose of picking a glyph.
+    //
+    // This is intentionally a separate loop rather than a hook inside
+    // DockWatcher. It only ever reads, never calls into DockWatcher, and never
+    // participates in a toggle decision — so the worst a wrong or late read can
+    // do is show the wrong chevron for a fraction of a second. It cannot move
+    // the Dock.
     private func startGlyphTimer() {
         guard monitoringShouldRun, glyphTimer == nil else { return }
 
@@ -753,6 +814,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
             guard let self, self.monitoringShouldRun else { return }
             self.applyStatusIcon(dockVisible: self.isDockCurrentlyVisible())
         }
+        timer.tolerance = 0.04
         // .common so the glyph keeps updating while a menu is open.
         RunLoop.main.add(timer, forMode: .common)
         glyphTimer = timer
@@ -763,8 +825,8 @@ private final class DockAwayStatusView: NSVisualEffectView {
         glyphTimer = nil
     }
 
-    /// Dock up (visible)  -> up chevron at full strength.
-    /// Dock down (hidden) -> down chevron at full strength.
+    // Dock up (visible)  -> up chevron at full strength.
+    // Dock down (hidden) -> down chevron at full strength.
     private func applyStatusIcon(dockVisible: Bool) {
         guard glyphShowsDockVisible != dockVisible else { return }
 
@@ -792,9 +854,13 @@ private final class DockAwayStatusView: NSVisualEffectView {
         statusView.update(
             active: monitoringShouldRun,
             status: activeStatusText,
+            inactiveTitle: inactiveStatusTitle,
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
-                : "App detection paused"
+                : "App detection paused",
+            inactiveActionTitle: accessibilityPermissionMissing && dockAwayEnabled
+                ? "Open Accessibility Settings"
+                : "Resume DockAway"
         )
         statusContainer.addSubview(statusView)
         NSLayoutConstraint.activate([
@@ -806,6 +872,28 @@ private final class DockAwayStatusView: NSVisualEffectView {
         statusMenuItem.view = statusContainer
         dockAwayStatusView = statusView
         menu.addItem(statusMenuItem)
+
+        let accessibilityRecoveryItem = NSMenuItem(
+            title: "Open Accessibility Settings…",
+            action: #selector(openAccessibilitySettings),
+            keyEquivalent: ""
+        )
+        accessibilityRecoveryItem.target = self
+        accessibilityRecoveryItem.state = .on
+        accessibilityRecoveryItem.onStateImage = menuIcon(from: NSImage(
+            systemSymbolName: "exclamationmark.triangle.fill",
+            accessibilityDescription: "Accessibility Permission Required"
+        ))
+        accessibilityRecoveryItem.toolTip =
+            "DockAway cannot manage the Dock until Accessibility access is restored."
+        accessibilityRecoveryItem.isHidden = !accessibilityPermissionMissing
+        accessibilityRecoveryMenuItem = accessibilityRecoveryItem
+        menu.addItem(accessibilityRecoveryItem)
+
+        let accessibilitySeparator = NSMenuItem.separator()
+        accessibilitySeparator.isHidden = !accessibilityPermissionMissing
+        accessibilityRecoverySeparator = accessibilitySeparator
+        menu.addItem(accessibilitySeparator)
 
         let launchAtLogin = NSMenuItem(
             title: "Launch at Login",
@@ -919,6 +1007,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
             identifiers.sorted(),
             forKey: Self.ignoredWindowBundleIdentifiersKey
         )
+        dockWatcher?.updateBlacklist(identifiers)
         dockWatcher?.resetState()
     }
 
@@ -929,6 +1018,18 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
         let ignoredIdentifiers = ignoredWindowBundleIdentifiers
         var applicationsByIdentifier = [String: BlacklistApplication]()
+        var currentApplication: BlacklistApplication?
+
+        if let runningApplication = NSWorkspace.shared.frontmostApplication,
+           runningApplication.activationPolicy == .regular,
+           let bundleIdentifier = runningApplication.bundleIdentifier,
+           bundleIdentifier != Bundle.main.bundleIdentifier {
+            currentApplication = BlacklistApplication(
+                bundleIdentifier: bundleIdentifier,
+                name: runningApplication.localizedName ?? bundleIdentifier,
+                icon: runningApplication.icon
+            )
+        }
 
         // Keep previously blacklisted apps visible even when they are not running.
         for bundleIdentifier in ignoredIdentifiers {
@@ -943,7 +1044,8 @@ private final class DockAwayStatusView: NSVisualEffectView {
             guard
                 application.activationPolicy == .regular,
                 let bundleIdentifier = application.bundleIdentifier,
-                bundleIdentifier != Bundle.main.bundleIdentifier
+                bundleIdentifier != Bundle.main.bundleIdentifier,
+                bundleIdentifier != currentApplication?.bundleIdentifier
             else { continue }
 
             applicationsByIdentifier[bundleIdentifier] = BlacklistApplication(
@@ -953,13 +1055,27 @@ private final class DockAwayStatusView: NSVisualEffectView {
             )
         }
 
-        let applications = applicationsByIdentifier.values.sorted {
+        let applications = applicationsByIdentifier.values.filter {
+            $0.bundleIdentifier != currentApplication?.bundleIdentifier
+        }.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+
+        if let currentApplication {
+            let currentItem = blacklistMenuItem(
+                for: currentApplication,
+                ignoredIdentifiers: ignoredIdentifiers
+            )
+            currentItem.toolTip = "Current application"
+            blacklistMenu.addItem(currentItem)
+            blacklistMenu.addItem(.separator())
         }
 
         if applications.isEmpty {
             let emptyItem = NSMenuItem(
-                title: "No Running Applications",
+                title: currentApplication == nil
+                    ? "No Running Applications"
+                    : "No Other Applications",
                 action: nil,
                 keyEquivalent: ""
             )
@@ -967,22 +1083,10 @@ private final class DockAwayStatusView: NSVisualEffectView {
             blacklistMenu.addItem(emptyItem)
         } else {
             for application in applications {
-                let item = NSMenuItem(
-                    title: application.name,
-                    action: #selector(toggleBlacklistedApplication(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = self
-                item.representedObject = application.bundleIdentifier
-                item.state = ignoredIdentifiers.contains(application.bundleIdentifier) ? .on : .off
-                item.attributedTitle = menuTitle(
-                    application.name,
-                    icon: application.icon ?? NSImage(
-                        systemSymbolName: "app",
-                        accessibilityDescription: "Application"
-                    )
-                )
-                blacklistMenu.addItem(item)
+                blacklistMenu.addItem(blacklistMenuItem(
+                    for: application,
+                    ignoredIdentifiers: ignoredIdentifiers
+                ))
             }
         }
 
@@ -1019,6 +1123,28 @@ private final class DockAwayStatusView: NSVisualEffectView {
         helpItem.toolTip = "A blacklisted app keeps the Dock shown while it is the frontmost app on the active display. When another app moves in front, DockAway hides the Dock normally."
         helpItem.isEnabled = true
         blacklistMenu.addItem(helpItem)
+    }
+
+    private func blacklistMenuItem(
+        for application: BlacklistApplication,
+        ignoredIdentifiers: Set<String>
+    ) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: application.name,
+            action: #selector(toggleBlacklistedApplication(_:)),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.representedObject = application.bundleIdentifier
+        item.state = ignoredIdentifiers.contains(application.bundleIdentifier) ? .on : .off
+        item.attributedTitle = menuTitle(
+            application.name,
+            icon: application.icon ?? NSImage(
+                systemSymbolName: "app",
+                accessibilityDescription: "Application"
+            )
+        )
+        return item
     }
 
     private func applicationInfo(forBundleIdentifier bundleIdentifier: String) -> BlacklistApplication {
@@ -1112,31 +1238,50 @@ private final class DockAwayStatusView: NSVisualEffectView {
     }
 
     func updateStatus(_ text: String) {
-        DispatchQueue.main.async {
-            guard self.monitoringShouldRun else { return }
+        let applyUpdate = { [weak self] in
+            guard let self, self.monitoringShouldRun else { return }
+            guard self.activeStatusText != text else { return }
             self.activeStatusText = text
             self.dockAwayStatusView?.update(active: true, status: text)
+        }
+
+        if Thread.isMainThread {
+            applyUpdate()
+        } else {
+            DispatchQueue.main.async(execute: applyUpdate)
         }
     }
 
     @objc private func toggleDockAway() {
+        if accessibilityPermissionMissing, dockAwayEnabled {
+            openAccessibilitySettings()
+            return
+        }
+
         if dockAwayEnabled {
             dockAwayEnabled = false
             fourFingersDown = false
             fourFingerStartedInMissionControl = false
             dockWatcher?.stop()
             multitouch.stop()
+            stopGlyphTimer()
             updateDockAwayMenuState()
             restoreDockState()
+            applyStatusIcon(dockVisible: isDockCurrentlyVisible())
             print("🔴 DockAway inactive")
         } else {
+            dockAwayEnabled = true
             guard AXIsProcessTrusted() else {
+                accessibilityPermissionMissing = true
+                isWaitingForAccessibility = true
                 let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true]
                 AXIsProcessTrustedWithOptions(options)
+                updateDockAwayMenuState()
+                waitForAccessibility()
                 return
             }
 
-            dockAwayEnabled = true
+            accessibilityPermissionMissing = false
             startMonitoringIfAllowed(resetState: true)
             updateDockAwayMenuState()
             print("🟢 DockAway active")
@@ -1148,10 +1293,16 @@ private final class DockAwayStatusView: NSVisualEffectView {
         dockAwayStatusView?.update(
             active: monitoringIsActive,
             status: activeStatusText,
+            inactiveTitle: inactiveStatusTitle,
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
-                : "App detection paused"
+                : "App detection paused",
+            inactiveActionTitle: accessibilityPermissionMissing && dockAwayEnabled
+                ? "Open Accessibility Settings"
+                : "Resume DockAway"
         )
+        accessibilityRecoveryMenuItem?.isHidden = !accessibilityPermissionMissing
+        accessibilityRecoverySeparator?.isHidden = !accessibilityPermissionMissing
     }
 
     // MARK: - Launch at Login
@@ -1247,11 +1398,16 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
     private func requestAccessibilityPermission() {
         if AXIsProcessTrusted() {
+            accessibilityPermissionMissing = false
+            isWaitingForAccessibility = false
             dockWatcher = DockWatcher()
             startMonitoringIfAllowed()
             ensureDockAwayIsOn()
             showWelcomeIfNeeded()
         } else {
+            accessibilityPermissionMissing = true
+            updateDockAwayMenuState()
+
             let alert = NSAlert()
             alert.messageText = "But First ☝️"
             alert.informativeText = "Accessibility Permission is Required:\nDockAway is requesting accessibility permission from system settings in order to detect desktop app occupancy status. Input monitoring (Automatically enabled after accessibility permission is granted) is required to detect when the Dock should be shown or hidden on a 4 finger press."
@@ -1317,19 +1473,67 @@ private final class DockAwayStatusView: NSVisualEffectView {
             guard let self, !self.isQuitting, self.automaticSuspensionReasons.isEmpty else { return }
 
             if AXIsProcessTrusted() {
+                self.accessibilityPermissionMissing = false
                 self.isWaitingForAccessibility = false
                 self.accessibilityWaitWorkItem = nil
                 print("✅ Accessibility granted - starting detector")
-                self.dockWatcher = DockWatcher()
+                if self.dockWatcher == nil {
+                    self.dockWatcher = DockWatcher()
+                }
                 self.startMonitoringIfAllowed()
                 self.ensureDockAwayIsOn()
                 self.showWelcomeIfNeeded()
+                self.updateDockAwayMenuState()
             } else {
+                self.accessibilityPermissionMissing = true
+                self.updateDockAwayMenuState()
                 self.waitForAccessibility()
             }
         }
         accessibilityWaitWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+    }
+
+    func accessibilityPermissionWasRevoked() {
+        let handleLoss = { [weak self] in
+            guard let self, !self.isQuitting else { return }
+            guard !self.accessibilityPermissionMissing else { return }
+
+            self.accessibilityPermissionMissing = true
+            self.isWaitingForAccessibility = true
+            self.fourFingersDown = false
+            self.fourFingerStartedInMissionControl = false
+            self.dockWatcher?.stop()
+            self.multitouch.stop()
+            self.stopGlyphTimer()
+            self.updateDockAwayMenuState()
+            self.waitForAccessibility()
+            print("⚠️ Accessibility permission removed — DockAway paused")
+        }
+
+        if Thread.isMainThread {
+            handleLoss()
+        } else {
+            DispatchQueue.main.async(execute: handleLoss)
+        }
+    }
+
+    @objc private func openAccessibilitySettings() {
+        accessibilityPermissionMissing = !AXIsProcessTrusted()
+        isWaitingForAccessibility = accessibilityPermissionMissing
+        updateDockAwayMenuState()
+
+        if let settingsURL = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ) {
+            NSWorkspace.shared.open(settingsURL)
+        }
+
+        if accessibilityPermissionMissing {
+            waitForAccessibility()
+        } else {
+            startMonitoringIfAllowed(resetState: true)
+        }
     }
 
     // MARK: - Unix Signal & Cleanup
@@ -1390,8 +1594,8 @@ extension AppDelegate: SPUStandardUserDriverDelegate {
         true
     }
 
-    /// Scheduled checks never steal focus. Sparkle keeps the update session
-    /// ready, while DockAway changes its menu item into the gentle reminder.
+    // Scheduled checks never steal focus. Sparkle keeps the update session
+    // ready, while DockAway changes its menu item into the gentle reminder.
     func standardUserDriverShouldHandleShowingScheduledUpdate(
         _ update: SUAppcastItem,
         andInImmediateFocus immediateFocus: Bool
