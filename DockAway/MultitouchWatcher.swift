@@ -52,7 +52,7 @@ final class MultitouchWatcher {
             lib = existingHandle
         } else {
             guard let loadedHandle = dlopen(Self.frameworkPath, RTLD_LAZY) else {
-                print("⚠️ MultitouchSupport: dlopen failed — feature disabled")
+                dockAwayDebugLog("⚠️ MultitouchSupport: dlopen failed — feature disabled")
                 return
             }
             libHandle = loadedHandle
@@ -65,7 +65,7 @@ final class MultitouchWatcher {
             let startSym    = dlsym(lib, "MTDeviceStart"),
             let stopSym     = dlsym(lib, "MTDeviceStop")
         else {
-            print("⚠️ MultitouchSupport: symbols missing — feature disabled")
+            dockAwayDebugLog("⚠️ MultitouchSupport: symbols missing — feature disabled")
             return
         }
 
@@ -75,7 +75,7 @@ final class MultitouchWatcher {
         stopFn           = unsafeBitCast(stopSym,     to: MTDeviceStopFn.self)
 
         guard let dev = createDevice() else {
-            print("⚠️ MultitouchSupport: no trackpad found — feature disabled")
+            dockAwayDebugLog("⚠️ MultitouchSupport: no trackpad found — feature disabled")
             return
         }
         device = dev
@@ -91,7 +91,7 @@ final class MultitouchWatcher {
         startDevice(dev, 0)
 
         isRunning = true
-        print("✅ MultitouchSupport running — watching raw trackpad contacts")
+        dockAwayDebugLog("✅ MultitouchSupport running — watching raw trackpad contacts")
     }
 
     func stop() {

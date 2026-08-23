@@ -9,6 +9,17 @@
     </style>
 </head>
 <body>
+    <h3>Version 1.1.7 <span style="font-weight: normal;">(8-23-26)</span></h3>
+    <ul>
+        <li><b>Customizable Update Schedule:</b> Automatic Sparkle checks now default to once every 24 hours, and the new Update Frequency submenu offers Daily, Every 3 Days, Weekly, or Manual Only. Sparkle remembers the selection, relaunching DockAway no longer forces an extra request before the chosen interval is due, and manual update checks remain available at any time.</li>
+        <li><b>Faster PID and Blacklist Caching:</b> DockAway now stores both positive and negative blacklist results for each window-owning process in memory. Repeated scans no longer resolve the same process or redo bundle-identifier comparisons, while app launches, app quits, and blacklist changes precisely invalidate affected cache entries to prevent stale results.</li>
+        <li><b>Permission Recovery:</b> DockAway now detects missing Accessibility and Input Monitoring access, clearly displays a white "Permission Required" warning, and identifies the permission that needs attention. The compact play/resume button requests the missing permission and opens the correct System Settings page, then DockAway automatically restores the appropriate monitoring when access is granted.</li>
+        <li><b>Lower Background Overhead:</b> The menu-bar Dock indicator is now updated by DockAway's existing state events instead of a permanent quarter-second cosmetic timer, eliminating unnecessary background checks while keeping the indicator current.</li>
+        <li><b>More Efficient Display Tracking:</b> DockAway now gives its lightweight pointer/display tracking timer a small scheduling tolerance, allowing macOS to combine nearby wakeups without changing its responsive 120 ms scan interval.</li>
+        <li><b>Quieter Release Builds:</b> Diagnostic transition logging remains available when testing in Xcode but is compiled out of release builds, preventing unnecessary console output and string-formatting work for users.</li>
+    </ul>
+    <hr>
+
     <h3>Version 1.1.6 <span style="font-weight: normal;">(8-18-26)</span></h3>
     <ul>
         <li><b>Update Checks at Launch:</b> DockAway now performs a quiet Sparkle update check whenever it is opened manually or launched automatically at login. Available updates appear through the existing gentle menu-bar reminder without interrupting the user, and the normal six-hour update schedule continues afterward.</li>

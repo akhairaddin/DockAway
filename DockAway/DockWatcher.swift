@@ -318,6 +318,11 @@ final class DockWatcher {
     private var lastEvaluatedWindowState: DisplayWindowState?
     private var cachedIgnoredBundleIdentifiers = Set<String>()
     private var cachedBundleIdentifiersByPID = [pid_t: String]()
+    // Stores both blacklist hits and misses. Most Window Server scans encounter
+    // the same owner PIDs repeatedly, so remembering `false` is just as useful
+    // as remembering `true`: neither NSRunningApplication nor prefix matching
+    // needs to run again until the process or blacklist actually changes.
+    private var cachedBlacklistStatusByPID = [pid_t: Bool]()
     private var lastCommandedDockVisibility: Bool?
     private var lastToggleTime = Date.distantPast
     private(set) var isRunning = false
@@ -461,7 +466,7 @@ final class DockWatcher {
         RunLoop.main.add(timer, forMode: .common)
         safetyTimer = timer
 
-        print("✅ DockStatus started")
+        dockAwayDebugLog("✅ DockStatus started")
     }
 
     func stop() {
@@ -522,7 +527,7 @@ final class DockWatcher {
         lastEvaluatedDisplayID = nil
         lastEvaluatedWindowState = nil
         lastCommandedDockVisibility = nil
-        print("⏸️ DockStatus Paused")
+        dockAwayDebugLog("⏸️ DockStatus Paused")
     }
 
     deinit { stop() }
@@ -531,7 +536,27 @@ final class DockWatcher {
 
     @objc private func spaceDidChange() {
         guard isRunning else { return }
-        horizontalSpacePrediction = nil
+
+        // A fast horizontal swipe can deliver this notification before the
+        // raw-motion closure that consumes the gesture's adjacent-Space
+        // prediction. Keep a fresh prediction alive so an occupied destination
+        // still pre-hides before its animation; clearing it here forced the
+        // live probe to hide mid-transition, which can make Chrome repaint its
+        // tab bar black. Stale snapshots remain disposable, and all normal
+        // gesture-end/consumption paths clear the prediction themselves.
+        if let prediction = horizontalSpacePrediction {
+            let predictionAge = Date().timeIntervalSince(prediction.capturedAt)
+            if predictionAge > horizontalSpacePredictionLifetime {
+                horizontalSpacePrediction = nil
+            } else {
+                dockAwayDebugLog(
+                    String(
+                        format: "  🔭 Space changed before motion → preserving %.3fs prediction",
+                        predictionAge
+                    )
+                )
+            }
+        }
 
         // The destination can become classifiable just before this event. Give
         // the visible hold one immediate chance to hand off to hidden pre-hide.
@@ -837,6 +862,7 @@ final class DockWatcher {
 
     @objc private func applicationDidLaunch(_ note: Notification) {
         guard let application = runningApplication(from: note) else { return }
+        invalidateProcessCache(for: application.processIdentifier)
         cacheBundleIdentifier(for: application)
 
         if application.bundleIdentifier == "com.apple.dock" {
@@ -861,7 +887,7 @@ final class DockWatcher {
         guard let application = runningApplication(from: note) else { return }
 
         let processIdentifier = application.processIdentifier
-        cachedBundleIdentifiersByPID.removeValue(forKey: processIdentifier)
+        invalidateProcessCache(for: processIdentifier)
         if dockAccessibilityObservation?.context.processIdentifier == processIdentifier {
             pendingDockObserverRetry?.cancel()
             pendingDockObserverRetry = nil
@@ -888,27 +914,43 @@ final class DockWatcher {
     // blacklist and process metadata in RAM, then refresh the defaults snapshot
     // on the slow safety pass so legacy `defaults write` changes still work.
     private func refreshBlacklistCacheFromDefaults() {
-        cachedIgnoredBundleIdentifiers = Set(
+        let refreshedIdentifiers = Set(
             UserDefaults.standard.stringArray(
                 forKey: Self.ignoredWindowBundleIdentifiersKey
             ) ?? []
         )
+        guard refreshedIdentifiers != cachedIgnoredBundleIdentifiers else { return }
+
+        cachedIgnoredBundleIdentifiers = refreshedIdentifiers
+        cachedBlacklistStatusByPID.removeAll(keepingCapacity: true)
     }
 
     private func refreshRunningApplicationCache() {
         cachedBundleIdentifiersByPID.removeAll(keepingCapacity: true)
+        cachedBlacklistStatusByPID.removeAll(keepingCapacity: true)
         for application in NSWorkspace.shared.runningApplications {
             cacheBundleIdentifier(for: application)
         }
     }
 
     private func cacheBundleIdentifier(for application: NSRunningApplication) {
+        let processIdentifier = application.processIdentifier
         guard
-            application.processIdentifier > 0,
+            processIdentifier > 0,
             let bundleIdentifier = application.bundleIdentifier
         else { return }
 
-        cachedBundleIdentifiersByPID[application.processIdentifier] = bundleIdentifier
+        guard cachedBundleIdentifiersByPID[processIdentifier] != bundleIdentifier else {
+            return
+        }
+
+        cachedBundleIdentifiersByPID[processIdentifier] = bundleIdentifier
+        cachedBlacklistStatusByPID.removeValue(forKey: processIdentifier)
+    }
+
+    private func invalidateProcessCache(for processIdentifier: pid_t) {
+        cachedBundleIdentifiersByPID.removeValue(forKey: processIdentifier)
+        cachedBlacklistStatusByPID.removeValue(forKey: processIdentifier)
     }
 
     private func bundleIdentifier(for processIdentifier: pid_t) -> String? {
@@ -924,6 +966,21 @@ final class DockWatcher {
 
         cachedBundleIdentifiersByPID[processIdentifier] = bundleIdentifier
         return bundleIdentifier
+    }
+
+    private func isProcessBlacklisted(_ processIdentifier: pid_t) -> Bool {
+        guard processIdentifier > 0, !cachedIgnoredBundleIdentifiers.isEmpty else {
+            return false
+        }
+        if let cachedStatus = cachedBlacklistStatusByPID[processIdentifier] {
+            return cachedStatus
+        }
+
+        let isBlacklistedStatus = bundleIdentifier(for: processIdentifier).map {
+            isBlacklisted($0, in: cachedIgnoredBundleIdentifiers)
+        } ?? false
+        cachedBlacklistStatusByPID[processIdentifier] = isBlacklistedStatus
+        return isBlacklistedStatus
     }
 
     // MARK: - Mission Control Detection
@@ -1023,7 +1080,7 @@ final class DockWatcher {
         case .notificationUnsupported, .notImplemented:
             // Polling the `mc` AX group and the WindowServer fallback still
             // provide correctness when this optional notification is absent.
-            print("⚠️ Dock AX event unavailable — using Mission Control polling")
+            dockAwayDebugLog("⚠️ Dock AX event unavailable — using Mission Control polling")
         default:
             scheduleDockObserverRetry()
         }
@@ -1218,13 +1275,13 @@ final class DockWatcher {
                 clearVisibleHold()
             }
             let canceledPreHide = cancelHoldHiddenForMissionControl()
-            print(
+            dockAwayDebugLog(
                 canceledPreHide
                     ? "🖥️ Mission Control active → pre-hide canceled, Dock decisions paused"
                     : "🖥️ Mission Control active → Dock decisions paused"
             )
         } else {
-            print("🖥️ Mission Control closed → verifying landing")
+            dockAwayDebugLog("🖥️ Mission Control closed → verifying landing")
             desktopTransitionPhase = .settling
             scheduleDesktopTransitionFinish(after: missionControlExitSettleDelay)
         }
@@ -1254,6 +1311,10 @@ final class DockWatcher {
             guard displayChanged else { return }
             self.evaluateFrontmostApp(quiet: true)
         }
+        // Pointer/display changes are not latency-sensitive enough to require
+        // every 120 ms wakeup exactly on schedule. Let macOS coalesce nearby
+        // work without changing the polling interval or gesture behavior.
+        timer.tolerance = 0.02
         RunLoop.main.add(timer, forMode: .common)
         pointerDisplayTimer = timer
     }
@@ -1274,7 +1335,7 @@ final class DockWatcher {
         cacheBundleIdentifier(for: app)
 
         let appName = app.localizedName ?? (app.bundleIdentifier ?? "Unknown")
-        print("▶ Active app: \(appName)")
+        dockAwayDebugLog("▶ Active app: \(appName)")
         evaluate(app: app, quiet: false)
 
         // Some apps are not ready to vend their AX hierarchy at launch. App
@@ -1337,11 +1398,11 @@ final class DockWatcher {
         if !quiet {
             switch windowState {
             case .empty:
-                print("  → Active display is empty → showing Dock")
+                dockAwayDebugLog("  → Active display is empty → showing Dock")
             case .blacklisted:
-                print("  → Active display has a blacklisted app → showing Dock")
+                dockAwayDebugLog("  → Active display has a blacklisted app → showing Dock")
             case .occupied:
-                print("  → Active display has a window → hiding Dock")
+                dockAwayDebugLog("  → Active display has a window → hiding Dock")
             }
         }
 
@@ -1433,10 +1494,8 @@ final class DockWatcher {
             let overlap = windowRect.intersection(displayBounds)
             if overlap.width >= 50, overlap.height >= 50 {
                 let candidateState: DisplayWindowState
-                if !cachedIgnoredBundleIdentifiers.isEmpty,
-                   let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                   let bundleIdentifier = bundleIdentifier(for: ownerPID),
-                   isBlacklisted(bundleIdentifier, in: cachedIgnoredBundleIdentifiers) {
+                if let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                   isProcessBlacklisted(ownerPID) {
                     candidateState = .blacklisted
                 } else {
                     candidateState = .occupied
@@ -1522,7 +1581,7 @@ final class DockWatcher {
         let elapsedMilliseconds = (
             ProcessInfo.processInfo.systemUptime - predictionStartedAt
         ) * 1_000
-        print(
+        dockAwayDebugLog(
             String(
                 format: "  🔭 Adjacent Spaces: left=%@, right=%@ (%.2f ms)",
                 label(for: previousState),
@@ -1568,7 +1627,9 @@ final class DockWatcher {
     // MARK: - Public Helpers
 
     func updateBlacklist(_ identifiers: Set<String>) {
+        guard identifiers != cachedIgnoredBundleIdentifiers else { return }
         cachedIgnoredBundleIdentifiers = identifiers
+        cachedBlacklistStatusByPID.removeAll(keepingCapacity: true)
     }
 
     func resetState() {
@@ -1614,7 +1675,7 @@ final class DockWatcher {
             horizontalSpacePrediction = nil
 
             if predictedDestinationState == .occupied {
-                print("  🔭 Occupied adjacent Space predicted → pre-hiding before animation")
+                dockAwayDebugLog("  🔭 Occupied adjacent Space predicted → pre-hiding before animation")
                 return false
             }
         } else {
@@ -1848,7 +1909,7 @@ final class DockWatcher {
             visibleHoldReleaseAt.timeIntervalSinceNow
         )
 
-        print("  ⚡ Occupied destination detected → switching to hidden pre-hide")
+        dockAwayDebugLog("  ⚡ Occupied destination detected → switching to hidden pre-hide")
         guard beginHoldHidden(missionControlWasActiveAtContact: false) else {
             return false
         }
@@ -1970,10 +2031,11 @@ final class DockWatcher {
         pendingDebounceCheck = nil
     }
 
-    private func simulateOptionCommandD() {
+    @discardableResult
+    private func simulateOptionCommandD() -> Bool {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
-            print("  ⚠️ Could not create CGEventSource")
-            return
+            dockAwayDebugLog("  ⚠️ Could not create CGEventSource")
+            return false
         }
 
         let keyD: CGKeyCode = 2
@@ -1981,7 +2043,7 @@ final class DockWatcher {
         guard
             let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyD, keyDown: true),
             let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyD, keyDown: false)
-        else { return }
+        else { return false }
 
         let modifiers: CGEventFlags = [.maskAlternate, .maskCommand]
         keyDown.flags = modifiers
@@ -1990,7 +2052,8 @@ final class DockWatcher {
         keyDown.post(tap: .cgSessionEventTap)
         keyUp.post(tap: .cgSessionEventTap)
 
-        print("  ⌨️ Sent ⌘⌥D")
+        dockAwayDebugLog("  ⌨️ Sent ⌘⌥D")
+        return true
     }
 
     private func setDockVisible(_ shouldShow: Bool) {
@@ -2050,7 +2113,10 @@ final class DockWatcher {
     }
 
     private func dockIsActuallyShown() -> Bool {
-        !(UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false)
+        let isShown = !(UserDefaults(suiteName: "com.apple.dock")?
+            .bool(forKey: "autohide") ?? false)
+        postDockVisibility(isShown)
+        return isShown
     }
 
     private func reconcileLastDockCommand(with actuallyShown: Bool) {
@@ -2064,10 +2130,12 @@ final class DockWatcher {
     }
 
     private func sendDockToggle(towardVisible visible: Bool, reason: String) {
-        print("  ⚡ \(reason) \(visible ? "SHOW" : "HIDE")")
+        dockAwayDebugLog("  ⚡ \(reason) \(visible ? "SHOW" : "HIDE")")
         lastToggleTime = Date()
         lastCommandedDockVisibility = visible
-        simulateOptionCommandD()
+        if simulateOptionCommandD() {
+            postDockVisibility(visible)
+        }
     }
 
     private func scheduleDebounceReevaluation(after delay: TimeInterval) {
@@ -2089,5 +2157,9 @@ final class DockWatcher {
 
     private func postStatus(_ text: String) {
         (NSApp.delegate as? AppDelegate)?.updateStatus(text)
+    }
+
+    private func postDockVisibility(_ isVisible: Bool) {
+        (NSApp.delegate as? AppDelegate)?.updateDockVisibilityGlyph(isVisible)
     }
 }

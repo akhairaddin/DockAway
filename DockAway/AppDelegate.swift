@@ -4,6 +4,16 @@ import ServiceManagement
 import Sparkle
 import UniformTypeIdentifiers
 
+// Debug builds keep the transition trace that makes Dock behavior easy to
+// tune in Xcode. Release builds compile the calls down to no-ops, including
+// their interpolated-string work, so users do not pay for console logging.
+@inline(__always)
+func dockAwayDebugLog(_ message: @autoclosure () -> String) {
+#if DEBUG
+    print(message())
+#endif
+}
+
 private final class PulsingStatusDotView: NSView {
     private let coreLayer = CALayer()
     private let pulseLayers = (0..<3).map { _ in CALayer() }
@@ -342,7 +352,9 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
         statusDot.setActive(active)
         titleLabel.stringValue = title
-        titleLabel.textColor = active ? .labelColor : .secondaryLabelColor
+        titleLabel.textColor = active || inactiveTitle == "Permission Required"
+            ? .labelColor
+            : .secondaryLabelColor
         detailLabel.stringValue = detail
 
         let actionTitle = active ? "Stop DockAway" : inactiveActionTitle
@@ -372,6 +384,22 @@ private final class DockAwayStatusView: NSVisualEffectView {
 @objc class AppDelegate: NSObject, NSApplicationDelegate {
     private static let ignoredWindowBundleIdentifiersKey = "IgnoredWindowBundleIdentifiers"
 
+    private enum UpdateFrequency: Int, CaseIterable {
+        case daily = 86_400
+        case everyThreeDays = 259_200
+        case weekly = 604_800
+        case manualOnly = 0
+
+        var title: String {
+            switch self {
+            case .daily: "Daily"
+            case .everyThreeDays: "Every 3 Days"
+            case .weekly: "Weekly"
+            case .manualOnly: "Manual Only"
+            }
+        }
+    }
+
     private enum AutomaticSuspensionReason: Hashable {
         case screenLocked
         case displayAsleep
@@ -390,24 +418,24 @@ private final class DockAwayStatusView: NSVisualEffectView {
     private var dockWatcher: DockWatcher!
     private var updaterController: SPUStandardUpdaterController!
     private var updateMenuItem: NSMenuItem!
+    private var updateFrequencyMenu: NSMenu!
     private var availableUpdateVersion: String?
     private var blacklistMenu: NSMenu!
-    private var accessibilityRecoveryMenuItem: NSMenuItem?
-    private var accessibilityRecoverySeparator: NSMenuItem?
     private var dockAwayStatusView: DockAwayStatusView!
     private var dockAwayEnabled = true
     private var activeStatusText = "Detecting…"
     private var automaticSuspensionReasons = Set<AutomaticSuspensionReason>()
     private var accessibilityPermissionMissing = false
+    private var inputMonitoringPermissionMissing = false
     private var isWaitingForAccessibility = false
     private var accessibilityWaitWorkItem: DispatchWorkItem?
+    private var inputMonitoringWaitWorkItem: DispatchWorkItem?
     
     // The Unix signal trapper
     private var sigtermSource: DispatchSourceSignal?
 
-    // Menu bar glyph. Deliberately self-contained: DockWatcher knows nothing
-    // about any of this and is never called from it.
-    private var glyphTimer: Timer?
+    // DockWatcher publishes its existing live state reads here. This keeps the
+    // menu-bar glyph current without a permanent cosmetic polling timer.
     private var glyphShowsDockVisible: Bool?
 
     // Four-finger pre-hide via private MultitouchSupport.
@@ -422,7 +450,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("🚀 APP LAUNCHED")
+        dockAwayDebugLog("🚀 APP LAUNCHED")
         NSApp.setActivationPolicy(.accessory)
 
         setupSleepAndLockAwareness()
@@ -435,19 +463,21 @@ private final class DockAwayStatusView: NSVisualEffectView {
             userDriverDelegate: self
         )
 
-        // Check quietly on every fresh launch, including Launch at Login.
-        // Sparkle continues using the normal six-hour schedule afterward and
-        // the gentle-reminder delegate surfaces discoveries in DockAway's menu.
-        if updaterController.updater.automaticallyChecksForUpdates {
-            updaterController.updater.checkForUpdatesInBackground()
-        }
+        // Sparkle owns the daily schedule and remembers the last check date.
+        // On launch it checks only when the 24-hour interval is due, avoiding
+        // an extra network request each time DockAway is restarted.
 
         accessibilityPermissionMissing = !AXIsProcessTrusted()
+        inputMonitoringPermissionMissing = !CGPreflightListenEventAccess()
         setupMenuBar()
         requestAccessibilityPermission()
         
         // Arm the signal trapper
         setupSignalHandler()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        refreshInputMonitoringPermission()
     }
 
     // MARK: - Sleep & Session Awareness
@@ -459,9 +489,19 @@ private final class DockAwayStatusView: NSVisualEffectView {
             && !isQuitting
     }
 
+    // Input Monitoring improves gesture timing but is not required for the
+    // core Dock watcher. Keep the watcher running while still showing the
+    // user that gesture smoothing needs permission.
+    private var statusAppearsActive: Bool {
+        monitoringShouldRun && !inputMonitoringPermissionMissing
+    }
+
     private var automaticSuspensionDetail: String {
         if accessibilityPermissionMissing {
             return "Accessibility access is off"
+        }
+        if inputMonitoringPermissionMissing {
+            return "Input Monitoring is off"
         }
         if automaticSuspensionReasons.contains(.screenLocked)
             || automaticSuspensionReasons.contains(.sessionInactive) {
@@ -477,9 +517,16 @@ private final class DockAwayStatusView: NSVisualEffectView {
     }
 
     private var inactiveStatusTitle: String {
-        accessibilityPermissionMissing && dockAwayEnabled
+        (accessibilityPermissionMissing || inputMonitoringPermissionMissing)
+            && dockAwayEnabled
             ? "Permission Required"
             : "DockAway: Paused"
+    }
+
+    private var permissionActionTitle: String {
+        accessibilityPermissionMissing
+            ? "Open Accessibility Settings"
+            : "Open Input Monitoring Settings"
     }
 
     // Stops all of DockAway's active monitoring while nobody can interact
@@ -602,11 +649,12 @@ private final class DockAwayStatusView: NSVisualEffectView {
         fourFingerStartedInMissionControl = false
         dockWatcher?.stop()
         multitouch.stop()
-        stopGlyphTimer()
         accessibilityWaitWorkItem?.cancel()
         accessibilityWaitWorkItem = nil
+        inputMonitoringWaitWorkItem?.cancel()
+        inputMonitoringWaitWorkItem = nil
         updateDockAwayMenuState()
-        print("🌙 DockAway monitoring suspended: \(automaticSuspensionDetail)")
+        dockAwayDebugLog("🌙 DockAway monitoring suspended: \(automaticSuspensionDetail)")
     }
 
     private func clearAutomaticSuspension(_ reason: AutomaticSuspensionReason) {
@@ -641,6 +689,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
         }
         accessibilityPermissionMissing = false
         isWaitingForAccessibility = false
+        refreshInputMonitoringPermission()
 
         startMonitoringIfAllowed(resetState: true)
 
@@ -650,7 +699,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
             guard let self, self.monitoringShouldRun else { return }
             self.dockWatcher?.resetState()
         }
-        print("☀️ DockAway monitoring resumed")
+        dockAwayDebugLog("☀️ DockAway monitoring resumed")
     }
 
     private func startMonitoringIfAllowed(resetState: Bool = false) {
@@ -663,9 +712,10 @@ private final class DockAwayStatusView: NSVisualEffectView {
         if dockWatcher == nil {
             dockWatcher = DockWatcher()
         }
+        inputMonitoringPermissionMissing = !CGPreflightListenEventAccess()
         dockWatcher.start()
         startMultitouchPreHide()
-        startGlyphTimer()
+        applyStatusIcon(dockVisible: isDockCurrentlyVisible())
         updateDockAwayMenuState()
 
         if resetState {
@@ -689,7 +739,11 @@ private final class DockAwayStatusView: NSVisualEffectView {
     // upward Mission Control entry, and downward Mission Control exit.
     // Degrades to a no-op if MultitouchSupport can't be loaded.
     private func startMultitouchPreHide() {
-        guard monitoringShouldRun else { return }
+        guard
+            monitoringShouldRun,
+            !inputMonitoringPermissionMissing,
+            dockWatcher?.isRunning == true
+        else { return }
 
         multitouch.start(
             onFingerCountChange: { [weak self] fingers in
@@ -705,7 +759,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
                     self.fourFingersDown = true
                     self.fourFingerStartedInMissionControl =
                         watcher.missionControlActiveAtGestureStart()
-                    print(
+                    dockAwayDebugLog(
                         self.fourFingerStartedInMissionControl
                             ? "  🧭 Four-finger gesture began in Mission Control"
                             : "  🧭 Four-finger gesture began on Desktop"
@@ -723,7 +777,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
                     let releasingVisibleHold = watcher.endHoldVisible(
                         after: self.preHideRelease
                     )
-                    print(
+                    dockAwayDebugLog(
                         releasingPreHide
                             ? "  ✋ Fingers lifted → hidden hold releases in \(self.preHideRelease)s"
                             : releasingVisibleHold
@@ -758,21 +812,21 @@ private final class DockAwayStatusView: NSVisualEffectView {
                     movingToNextSpace = nil
                 }
 
-                print("  🧭 Four-finger motion=\(motion)")
+                dockAwayDebugLog("  🧭 Four-finger motion=\(motion)")
 
                 if let movingToNextSpace,
                    !self.fourFingerStartedInMissionControl,
                    watcher.beginVisibleHoldForHorizontalSwipeIfNeeded(
                         movingToNextSpace: movingToNextSpace
                    ) {
-                    print("  ✨ Dock-visible source confirmed → visible hold armed")
+                    dockAwayDebugLog("  ✨ Dock-visible source confirmed → visible hold armed")
                     return
                 }
 
                 if motion == .downward,
                    self.fourFingerStartedInMissionControl,
                    watcher.beginVisibleHoldForMissionControlExitIfNeeded() {
-                    print("  ✨ Empty Mission Control destination → visible hold armed")
+                    dockAwayDebugLog("  ✨ Empty Mission Control destination → visible hold armed")
                     return
                 }
 
@@ -782,7 +836,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
                     missionControlWasActiveAtContact:
                         self.fourFingerStartedInMissionControl
                 )
-                print(
+                dockAwayDebugLog(
                     armedPreHide
                         ? "  ⚡ Motion confirmed → hidden hold armed"
                         : "  ⚡ Motion confirmed → pre-hide suppressed"
@@ -800,29 +854,19 @@ private final class DockAwayStatusView: NSVisualEffectView {
         !(UserDefaults(suiteName: "com.apple.dock")?.bool(forKey: "autohide") ?? false)
     }
 
-    // Polls the Dock state for the sole purpose of picking a glyph.
-    //
-    // This is intentionally a separate loop rather than a hook inside
-    // DockWatcher. It only ever reads, never calls into DockWatcher, and never
-    // participates in a toggle decision — so the worst a wrong or late read can
-    // do is show the wrong chevron for a fraction of a second. It cannot move
-    // the Dock.
-    private func startGlyphTimer() {
-        guard monitoringShouldRun, glyphTimer == nil else { return }
-
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self, self.monitoringShouldRun else { return }
-            self.applyStatusIcon(dockVisible: self.isDockCurrentlyVisible())
+    // DockWatcher calls this from its existing state-read and command paths.
+    // A main-queue hop keeps AppKit isolated even if a future detector callback
+    // arrives off-main. `applyStatusIcon` ignores unchanged values.
+    func updateDockVisibilityGlyph(_ dockVisible: Bool) {
+        let applyUpdate: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.applyStatusIcon(dockVisible: dockVisible)
         }
-        timer.tolerance = 0.04
-        // .common so the glyph keeps updating while a menu is open.
-        RunLoop.main.add(timer, forMode: .common)
-        glyphTimer = timer
-    }
-
-    private func stopGlyphTimer() {
-        glyphTimer?.invalidate()
-        glyphTimer = nil
+        if Thread.isMainThread {
+            applyUpdate()
+        } else {
+            DispatchQueue.main.async(execute: applyUpdate)
+        }
     }
 
     // Dock up (visible)  -> up chevron at full strength.
@@ -832,7 +876,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
         let name = dockVisible ? "DockAwayStatus-Up" : "DockAwayStatus-Down"
         guard let image = NSImage(named: name) else {
-            print("⚠️ Missing menu bar image asset: \(name)")
+            dockAwayDebugLog("⚠️ Missing menu bar image asset: \(name)")
             return
         }
 
@@ -852,14 +896,15 @@ private final class DockAwayStatusView: NSVisualEffectView {
         statusView.pauseResumeButton.target = self
         statusView.pauseResumeButton.action = #selector(toggleDockAway)
         statusView.update(
-            active: monitoringShouldRun,
+            active: statusAppearsActive,
             status: activeStatusText,
             inactiveTitle: inactiveStatusTitle,
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
                 : "App detection paused",
-            inactiveActionTitle: accessibilityPermissionMissing && dockAwayEnabled
-                ? "Open Accessibility Settings"
+            inactiveActionTitle: (accessibilityPermissionMissing || inputMonitoringPermissionMissing)
+                && dockAwayEnabled
+                ? permissionActionTitle
                 : "Resume DockAway"
         )
         statusContainer.addSubview(statusView)
@@ -872,28 +917,6 @@ private final class DockAwayStatusView: NSVisualEffectView {
         statusMenuItem.view = statusContainer
         dockAwayStatusView = statusView
         menu.addItem(statusMenuItem)
-
-        let accessibilityRecoveryItem = NSMenuItem(
-            title: "Open Accessibility Settings…",
-            action: #selector(openAccessibilitySettings),
-            keyEquivalent: ""
-        )
-        accessibilityRecoveryItem.target = self
-        accessibilityRecoveryItem.state = .on
-        accessibilityRecoveryItem.onStateImage = menuIcon(from: NSImage(
-            systemSymbolName: "exclamationmark.triangle.fill",
-            accessibilityDescription: "Accessibility Permission Required"
-        ))
-        accessibilityRecoveryItem.toolTip =
-            "DockAway cannot manage the Dock until Accessibility access is restored."
-        accessibilityRecoveryItem.isHidden = !accessibilityPermissionMissing
-        accessibilityRecoveryMenuItem = accessibilityRecoveryItem
-        menu.addItem(accessibilityRecoveryItem)
-
-        let accessibilitySeparator = NSMenuItem.separator()
-        accessibilitySeparator.isHidden = !accessibilityPermissionMissing
-        accessibilityRecoverySeparator = accessibilitySeparator
-        menu.addItem(accessibilitySeparator)
 
         let launchAtLogin = NSMenuItem(
             title: "Launch at Login",
@@ -940,6 +963,34 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
         menu.addItem(updateMenuItem)
 
+        let updateFrequencyItem = NSMenuItem(
+            title: "Update Frequency",
+            action: nil,
+            keyEquivalent: ""
+        )
+        updateFrequencyItem.state = .on
+        updateFrequencyItem.onStateImage = menuIcon(from: NSImage(
+            systemSymbolName: "clock.arrow.circlepath",
+            accessibilityDescription: "Update Frequency"
+        ))
+
+        let updateFrequencyMenu = NSMenu(title: "Update Frequency")
+        updateFrequencyMenu.autoenablesItems = false
+        for frequency in UpdateFrequency.allCases {
+            let item = NSMenuItem(
+                title: frequency.title,
+                action: #selector(selectUpdateFrequency(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = frequency.rawValue
+            updateFrequencyMenu.addItem(item)
+        }
+        updateFrequencyItem.submenu = updateFrequencyMenu
+        self.updateFrequencyMenu = updateFrequencyMenu
+        refreshUpdateFrequencyMenu()
+        menu.addItem(updateFrequencyItem)
+
         menu.addItem(NSMenuItem(title: "About DockAway", action: #selector(showAbout), keyEquivalent: ""))
         let quitMenuItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quitMenuItem.state = .on
@@ -949,6 +1000,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
         ))
         menu.addItem(quitMenuItem)
 
+        menu.delegate = self
         statusItem.menu = menu
     }
 
@@ -974,6 +1026,40 @@ private final class DockAwayStatusView: NSVisualEffectView {
                 ? "Update Available"
                 : "Check for Updates"
         ))
+    }
+
+    private func refreshUpdateFrequencyMenu() {
+        guard let updateFrequencyMenu, let updaterController else { return }
+
+        let updater = updaterController.updater
+        let automaticChecksEnabled = updater.automaticallyChecksForUpdates
+        let currentInterval = updater.updateCheckInterval
+
+        for item in updateFrequencyMenu.items {
+            guard let frequency = UpdateFrequency(rawValue: item.tag) else { continue }
+            if frequency == .manualOnly {
+                item.state = automaticChecksEnabled ? .off : .on
+            } else {
+                let intervalMatches = abs(currentInterval - Double(frequency.rawValue)) < 1.0
+                item.state = automaticChecksEnabled && intervalMatches ? .on : .off
+            }
+        }
+    }
+
+    @objc private func selectUpdateFrequency(_ sender: NSMenuItem) {
+        guard
+            let frequency = UpdateFrequency(rawValue: sender.tag),
+            let updaterController
+        else { return }
+
+        let updater = updaterController.updater
+        if frequency == .manualOnly {
+            updater.automaticallyChecksForUpdates = false
+        } else {
+            updater.updateCheckInterval = Double(frequency.rawValue)
+            updater.automaticallyChecksForUpdates = true
+        }
+        refreshUpdateFrequencyMenu()
     }
 
     private func showAvailableUpdate(_ update: SUAppcastItem) {
@@ -1242,7 +1328,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
             guard let self, self.monitoringShouldRun else { return }
             guard self.activeStatusText != text else { return }
             self.activeStatusText = text
-            self.dockAwayStatusView?.update(active: true, status: text)
+            self.updateDockAwayMenuState()
         }
 
         if Thread.isMainThread {
@@ -1253,9 +1339,15 @@ private final class DockAwayStatusView: NSVisualEffectView {
     }
 
     @objc private func toggleDockAway() {
-        if accessibilityPermissionMissing, dockAwayEnabled {
-            openAccessibilitySettings()
-            return
+        if dockAwayEnabled {
+            if accessibilityPermissionMissing {
+                openAccessibilitySettings()
+                return
+            }
+            if inputMonitoringPermissionMissing {
+                openInputMonitoringSettings()
+                return
+            }
         }
 
         if dockAwayEnabled {
@@ -1264,11 +1356,12 @@ private final class DockAwayStatusView: NSVisualEffectView {
             fourFingerStartedInMissionControl = false
             dockWatcher?.stop()
             multitouch.stop()
-            stopGlyphTimer()
+            inputMonitoringWaitWorkItem?.cancel()
+            inputMonitoringWaitWorkItem = nil
             updateDockAwayMenuState()
             restoreDockState()
             applyStatusIcon(dockVisible: isDockCurrentlyVisible())
-            print("🔴 DockAway inactive")
+            dockAwayDebugLog("🔴 DockAway inactive")
         } else {
             dockAwayEnabled = true
             guard AXIsProcessTrusted() else {
@@ -1284,25 +1377,23 @@ private final class DockAwayStatusView: NSVisualEffectView {
             accessibilityPermissionMissing = false
             startMonitoringIfAllowed(resetState: true)
             updateDockAwayMenuState()
-            print("🟢 DockAway active")
+            dockAwayDebugLog("🟢 DockAway active")
         }
     }
 
     private func updateDockAwayMenuState() {
-        let monitoringIsActive = monitoringShouldRun
         dockAwayStatusView?.update(
-            active: monitoringIsActive,
+            active: statusAppearsActive,
             status: activeStatusText,
             inactiveTitle: inactiveStatusTitle,
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
                 : "App detection paused",
-            inactiveActionTitle: accessibilityPermissionMissing && dockAwayEnabled
-                ? "Open Accessibility Settings"
+            inactiveActionTitle: (accessibilityPermissionMissing || inputMonitoringPermissionMissing)
+                && dockAwayEnabled
+                ? permissionActionTitle
                 : "Resume DockAway"
         )
-        accessibilityRecoveryMenuItem?.isHidden = !accessibilityPermissionMissing
-        accessibilityRecoverySeparator?.isHidden = !accessibilityPermissionMissing
     }
 
     // MARK: - Launch at Login
@@ -1324,7 +1415,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
                 try service.register()
             }
         } catch {
-            print("⚠️ Launch at login error: \(error)")
+            dockAwayDebugLog("⚠️ Launch at login error: \(error)")
         }
         statusItem.menu?.item(withTag: 200)?.state = isLaunchAtLoginEnabled() ? .on : .off
     }
@@ -1410,7 +1501,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
             let alert = NSAlert()
             alert.messageText = "But First ☝️"
-            alert.informativeText = "Accessibility Permission is Required:\nDockAway is requesting accessibility permission from system settings in order to detect desktop app occupancy status. Input monitoring (Automatically enabled after accessibility permission is granted) is required to detect when the Dock should be shown or hidden on a 4 finger press."
+            alert.informativeText = "Accessibility Permission is Required:\nDockAway uses Accessibility to detect window changes and manage the Dock. Input Monitoring is a separate optional permission used for early four-finger gesture detection; if it is missing, DockAway will show a direct shortcut in its menu."
             alert.alertStyle = .informational
             
             alert.addButton(withTitle: "Allow Access")
@@ -1476,7 +1567,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
                 self.accessibilityPermissionMissing = false
                 self.isWaitingForAccessibility = false
                 self.accessibilityWaitWorkItem = nil
-                print("✅ Accessibility granted - starting detector")
+                dockAwayDebugLog("✅ Accessibility granted - starting detector")
                 if self.dockWatcher == nil {
                     self.dockWatcher = DockWatcher()
                 }
@@ -1505,10 +1596,9 @@ private final class DockAwayStatusView: NSVisualEffectView {
             self.fourFingerStartedInMissionControl = false
             self.dockWatcher?.stop()
             self.multitouch.stop()
-            self.stopGlyphTimer()
             self.updateDockAwayMenuState()
             self.waitForAccessibility()
-            print("⚠️ Accessibility permission removed — DockAway paused")
+            dockAwayDebugLog("⚠️ Accessibility permission removed — DockAway paused")
         }
 
         if Thread.isMainThread {
@@ -1519,6 +1609,13 @@ private final class DockAwayStatusView: NSVisualEffectView {
     }
 
     @objc private func openAccessibilitySettings() {
+        if !AXIsProcessTrusted() {
+            let options: NSDictionary = [
+                kAXTrustedCheckOptionPrompt.takeRetainedValue(): true
+            ]
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
+
         accessibilityPermissionMissing = !AXIsProcessTrusted()
         isWaitingForAccessibility = accessibilityPermissionMissing
         updateDockAwayMenuState()
@@ -1536,6 +1633,70 @@ private final class DockAwayStatusView: NSVisualEffectView {
         }
     }
 
+    // MARK: - Input Monitoring Permission
+
+    @discardableResult
+    private func refreshInputMonitoringPermission() -> Bool {
+        let permissionIsGranted = CGPreflightListenEventAccess()
+        inputMonitoringPermissionMissing = !permissionIsGranted
+
+        if permissionIsGranted {
+            inputMonitoringWaitWorkItem?.cancel()
+            inputMonitoringWaitWorkItem = nil
+            startMultitouchPreHide()
+        } else {
+            fourFingersDown = false
+            fourFingerStartedInMissionControl = false
+            multitouch.stop()
+        }
+
+        updateDockAwayMenuState()
+        return permissionIsGranted
+    }
+
+    private func waitForInputMonitoringPermission() {
+        guard
+            !isQuitting,
+            dockAwayEnabled,
+            automaticSuspensionReasons.isEmpty,
+            inputMonitoringPermissionMissing
+        else { return }
+
+        inputMonitoringWaitWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, !self.isQuitting else { return }
+            self.inputMonitoringWaitWorkItem = nil
+            if !self.refreshInputMonitoringPermission() {
+                self.waitForInputMonitoringPermission()
+            } else {
+                dockAwayDebugLog("✅ Input Monitoring granted - gesture smoothing enabled")
+            }
+        }
+        inputMonitoringWaitWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+    }
+
+    @objc private func openInputMonitoringSettings() {
+        // This user-initiated request lets macOS present its native permission
+        // prompt. The Settings link remains useful when the app is already in
+        // the list but its switch is off.
+        _ = CGRequestListenEventAccess()
+
+        if let settingsURL = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        ) {
+            NSWorkspace.shared.open(settingsURL)
+        }
+
+        inputMonitoringPermissionMissing = !CGPreflightListenEventAccess()
+        updateDockAwayMenuState()
+        if inputMonitoringPermissionMissing {
+            waitForInputMonitoringPermission()
+        } else {
+            startMultitouchPreHide()
+        }
+    }
+
     // MARK: - Unix Signal & Cleanup
 
     private func setupSignalHandler() {
@@ -1545,7 +1706,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
         // 2. Set up a listener for the Unix signal
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler { [weak self] in
-            print("  ⚠️ Caught Unix SIGTERM (Activity Monitor)")
+            dockAwayDebugLog("  ⚠️ Caught Unix SIGTERM (Activity Monitor)")
             self?.isQuitting = true
             self?.restoreDockState()
             
@@ -1562,8 +1723,9 @@ private final class DockAwayStatusView: NSVisualEffectView {
         let isHidden = defaults?.bool(forKey: "autohide") ?? false
         
         if isHidden, let watcher = dockWatcher {
-            print("  ⚡ Restoring Dock visibility before termination")
+            dockAwayDebugLog("  ⚡ Restoring Dock visibility before termination")
             watcher.simulateOptionCommandDPublic()
+            applyStatusIcon(dockVisible: true)
             
             // The Life Support Hold: Keep the app alive just long enough for the keystroke to register
             Thread.sleep(forTimeInterval: 0.15)
@@ -1578,7 +1740,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
     func applicationWillTerminate(_ notification: Notification) {
         isQuitting = true
         accessibilityWaitWorkItem?.cancel()
-        stopGlyphTimer()
+        inputMonitoringWaitWorkItem?.cancel()
         dockWatcher?.stop()
         multitouch.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -1625,6 +1787,12 @@ extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         if menu === blacklistMenu {
             rebuildBlacklistMenu()
+        } else if menu === statusItem.menu {
+            // The menu opening is an event-driven opportunity to reflect a
+            // manual Dock shortcut or a permission changed in System Settings.
+            applyStatusIcon(dockVisible: isDockCurrentlyVisible())
+            refreshInputMonitoringPermission()
+            refreshUpdateFrequencyMenu()
         }
     }
 }

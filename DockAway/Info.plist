@@ -5,7 +5,7 @@
 	<key>SUFeedURL</key>
 	<string>https://akhairaddin.github.io/DockAway/appcast.xml</string>
 	<key>SUScheduledCheckInterval</key>
-	<integer>21600</integer>
+	<integer>86400</integer>
 	<key>SUPublicEDKey</key>
 	<string>zYAiplcyCV5FRtAfznnxDlSdDKDdxLwhpANnGRmy0Io=</string>
 </dict>
