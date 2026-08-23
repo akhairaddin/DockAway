@@ -11,12 +11,14 @@
 <body>
     <h3>Version 1.1.7 <span style="font-weight: normal;">(8-23-26)</span></h3>
     <ul>
-        <li><b>Customizable Update Schedule:</b> Automatic Sparkle checks now default to once every 24 hours, and the new Update Frequency submenu offers Daily, Every 3 Days, Weekly, or Manual Only. Sparkle remembers the selection, relaunching DockAway no longer forces an extra request before the chosen interval is due, and manual update checks remain available at any time.</li>
-        <li><b>Faster PID and Blacklist Caching:</b> DockAway now stores both positive and negative blacklist results for each window-owning process in memory. Repeated scans no longer resolve the same process or redo bundle-identifier comparisons, while app launches, app quits, and blacklist changes precisely invalidate affected cache entries to prevent stale results.</li>
-        <li><b>Permission Recovery:</b> DockAway now detects missing Accessibility and Input Monitoring access, clearly displays a white "Permission Required" warning, and identifies the permission that needs attention. The compact play/resume button requests the missing permission and opens the correct System Settings page, then DockAway automatically restores the appropriate monitoring when access is granted.</li>
-        <li><b>Lower Background Overhead:</b> The menu-bar Dock indicator is now updated by DockAway's existing state events instead of a permanent quarter-second cosmetic timer, eliminating unnecessary background checks while keeping the indicator current.</li>
-        <li><b>More Efficient Display Tracking:</b> DockAway now gives its lightweight pointer/display tracking timer a small scheduling tolerance, allowing macOS to combine nearby wakeups without changing its responsive 120 ms scan interval.</li>
-        <li><b>Quieter Release Builds:</b> Diagnostic transition logging remains available when testing in Xcode but is compiled out of release builds, preventing unnecessary console output and string-formatting work for users.</li>
+        <li><b>Smoother Fast Desktop Swipes:</b> Fixed a timing race that could make Chrome and Chrome web apps briefly display a black toolbar when rapidly swiping from an empty desktop. DockAway now preserves its fresh destination prediction and hides the Dock before the Space animation begins.</li>
+        <li><b>Customizable Update Schedule:</b> Automatic Sparkle checks now default to every 24 hours. The new Update Frequency submenu offers Daily, Every 3 Days, Weekly, and Manual Only options, with selections remembered between launches.</li>
+        <li><b>Faster PID and Blacklist Caching:</b> DockAway now caches both positive and negative blacklist results in memory. App launches, quits, and blacklist changes precisely invalidate affected entries, improving performance without retaining stale information.</li>
+        <li><b>Permission Recovery:</b> DockAway now detects missing Accessibility and Input Monitoring permissions, clearly identifies what is required, and provides direct shortcuts to the correct System Settings page. The Resume button also assists with restoring missing access.</li>
+        <li><b>Lower Background Overhead:</b> The menu-bar Dock indicator now updates through existing DockAway events instead of using a permanent quarter-second cosmetic polling timer.</li>
+        <li><b>More Efficient Display Tracking:</b> The lightweight pointer and display timer now includes scheduling tolerance, allowing macOS to combine nearby wakeups while preserving DockAway's responsive 120 ms tracking interval.</li>
+        <li><b>Quieter Release Builds:</b> Diagnostic transition logs remain available during Xcode testing but are compiled out of release builds, eliminating unnecessary console output and formatting work for users.</li>
+        <li><b>Updated Menu Preview:</b> The README now includes the latest DockAway menu design, including the Blacklist and Update Frequency controls.</li>
     </ul>
     <hr>
 
