@@ -9,10 +9,20 @@
     </style>
 </head>
 <body>
+    <h3>Version 1.1.8 <span style="font-weight: normal;">(8-24-26)</span></h3>
+    <ul>
+        <li><b>Seamless Empty-Display Hover Handoff:</b> On multi-display setups, moving the pointer from an occupied monitor onto an empty desktop now routes and shows the Dock automatically without simulating a click or changing focus. Single-display behavior is unchanged.</li>
+        <li><b>Optional Launch Checks:</b> The automatic check-on-launch behavior introduced in 1.1.6 and removed in 1.1.7 now returns as an optional, off-by-default Check at Launch toggle. It appears above the scheduled Update Frequency choices and, when enabled, quietly checks whenever DockAway opens while keeping the Daily, Every 3 Days, Weekly, or Manual Only schedule as a separate preference.</li>
+        <li><b>Reliable Update-Available Indicator:</b> The menu now displays "Update Available — v…" whenever Sparkle discovers a new DockAway release, including when automatic downloading and installation are enabled.</li>
+
+    </ul>
+    <hr>
+
     <h3>Version 1.1.7 <span style="font-weight: normal;">(8-23-26)</span></h3>
     <ul>
         <li><b>Smoother Fast Desktop Swipes:</b> Fixed a timing race that could make Chrome and Chrome web apps briefly display a black toolbar when rapidly swiping from an empty desktop. DockAway now preserves its fresh destination prediction and hides the Dock before the Space animation begins.</li>
         <li><b>Customizable Update Schedule:</b> Automatic Sparkle checks now default to every 24 hours. The new Update Frequency submenu offers Daily, Every 3 Days, Weekly, and Manual Only options, with selections remembered between launches.</li>
+        <li><b>Launch Update Checks Removed:</b> Removed the automatic update check that ran every time DockAway opened. The next update will give users more control by making launch checks an optional setting.</li>
         <li><b>Faster PID and Blacklist Caching:</b> DockAway now caches both positive and negative blacklist results in memory. App launches, quits, and blacklist changes precisely invalidate affected entries, improving performance without retaining stale information.</li>
         <li><b>Permission Recovery:</b> DockAway now detects missing Accessibility and Input Monitoring permissions, clearly identifies what is required, and provides direct shortcuts to the correct System Settings page. The Resume button also assists with restoring missing access.</li>
         <li><b>Lower Background Overhead:</b> The menu-bar Dock indicator now updates through existing DockAway events instead of using a permanent quarter-second cosmetic polling timer.</li>

@@ -275,6 +275,11 @@ final class DockWatcher {
         case missionControlExit
     }
 
+    private enum DockDisplayHandoffTrigger {
+        case activation
+        case hover
+    }
+
     private struct HorizontalSpacePrediction {
         let displayID: CGDirectDisplayID
         let capturedAt: Date
@@ -290,6 +295,7 @@ final class DockWatcher {
     private var pendingVisibleHoldReleaseCheck: DispatchWorkItem?
     private var pendingMissionControlRefresh: DispatchWorkItem?
     private var pendingDockObserverRetry: DispatchWorkItem?
+    private var pendingDockDisplayHandoffWork: DispatchWorkItem?
     private var pendingObserverRetries = [pid_t: DispatchWorkItem]()
     private var safetyTimer: Timer?
     private var pointerDisplayTimer: Timer?
@@ -314,6 +320,19 @@ final class DockWatcher {
     private var nextMissionControlProbeAt = Date.distantPast
     private var dockObserverRetryAttempt = 0
     private var lastPointerDisplayID: CGDirectDisplayID?
+    // A hover-triggered display handoff must not issue the global SHOW command
+    // before Dock.app confirms that it owns the empty destination. This marker
+    // keeps unrelated safety/AX reevaluations quiet during that short handoff.
+    private var pointerOnlyEmptyDisplayID: CGDirectDisplayID?
+    private var cachedDockDisplayID: CGDirectDisplayID?
+    private var dockDisplayCacheValidUntil = Date.distantPast
+    private var dockDisplayHandoffTargetID: CGDirectDisplayID?
+    private var dockDisplayHandoffPointerAnchor: CGPoint?
+    private var dockDisplayHandoffExpectedState: DisplayWindowState?
+    private var dockDisplayHandoffExpectedBundleIdentifier: String?
+    private var dockDisplayHandoffTrigger: DockDisplayHandoffTrigger = .activation
+    private var dockDisplayHoverCooldownUntil = [CGDirectDisplayID: Date]()
+    private var dockDisplayHandoffGeneration = 0
     private var lastEvaluatedDisplayID: CGDirectDisplayID?
     private var lastEvaluatedWindowState: DisplayWindowState?
     private var cachedIgnoredBundleIdentifiers = Set<String>()
@@ -331,6 +350,9 @@ final class DockWatcher {
     // Raise any of these if the Dock starts double-toggling.
     private let accessibilityDebounce: TimeInterval = 0.05
     private let pointerDisplayInterval: TimeInterval = 0.12
+    private let dockDisplayCacheLifetime: TimeInterval = 0.50
+    private let dockDisplayHoverSettleInterval: TimeInterval = 0.05
+    private let dockDisplayHoverCooldown: TimeInterval = 0.40
     // Only runs during an empty-source gesture and its short landing grace. It
     // catches the incoming window before the ordinary Space-change correction.
     private let visibleHoldDestinationProbeInterval: TimeInterval = 0.03
@@ -489,6 +511,7 @@ final class DockWatcher {
         pendingMissionControlRefresh = nil
         pendingDockObserverRetry?.cancel()
         pendingDockObserverRetry = nil
+        cancelDockDisplayHandoff()
         for retry in pendingObserverRetries.values {
             retry.cancel()
         }
@@ -508,6 +531,10 @@ final class DockWatcher {
         visibleHoldDestinationTimer?.invalidate()
         visibleHoldDestinationTimer = nil
         lastPointerDisplayID = nil
+        pointerOnlyEmptyDisplayID = nil
+        cachedDockDisplayID = nil
+        dockDisplayCacheValidUntil = .distantPast
+        dockDisplayHoverCooldownUntil.removeAll(keepingCapacity: true)
         missionControlIsActive = false
         desktopTransitionPhase = .idle
         desktopTransitionGeneration += 1
@@ -536,6 +563,12 @@ final class DockWatcher {
 
     @objc private func spaceDidChange() {
         guard isRunning else { return }
+
+        cancelDockDisplayHandoff()
+
+        // A Space switch is an intentional interaction with the display under
+        // the pointer, so an empty destination may now own a SHOW decision.
+        pointerOnlyEmptyDisplayID = nil
 
         // A fast horizontal swipe can deliver this notification before the
         // raw-motion closure that consumes the gesture's adjacent-Space
@@ -1259,6 +1292,7 @@ final class DockWatcher {
         nextMissionControlProbeAt = .distantPast
 
         if isActive {
+            cancelDockDisplayHandoff()
             // A brief false AX/WindowServer edge may already have scheduled an
             // exit finish. Mission Control is authoritative again, so retire
             // that stale landing work before it can clear transition state.
@@ -1309,7 +1343,10 @@ final class DockWatcher {
             }
 
             guard displayChanged else { return }
-            self.evaluateFrontmostApp(quiet: true)
+            self.evaluateFrontmostApp(
+                quiet: true,
+                pointerDisplayChanged: true
+            )
         }
         // Pointer/display changes are not latency-sensitive enough to require
         // every 120 ms wakeup exactly on schedule. Let macOS coalesce nearby
@@ -1320,7 +1357,12 @@ final class DockWatcher {
     }
 
     @objc private func screenParametersDidChange() {
+        cancelDockDisplayHandoff()
         horizontalSpacePrediction = nil
+        pointerOnlyEmptyDisplayID = nil
+        cachedDockDisplayID = nil
+        dockDisplayCacheValidUntil = .distantPast
+        dockDisplayHoverCooldownUntil.removeAll(keepingCapacity: true)
         lastPointerDisplayID = displayIDUnderPointer()
         scheduleAccessibilityEvaluation(includeSettleRecheck: true)
     }
@@ -1336,7 +1378,30 @@ final class DockWatcher {
 
         let appName = app.localizedName ?? (app.bundleIdentifier ?? "Unknown")
         dockAwayDebugLog("▶ Active app: \(appName)")
-        evaluate(app: app, quiet: false)
+
+        // Finder activation is the click-based fallback if a hover handoff did
+        // not finish. Ordinary app activations do not clear the pending-empty
+        // marker unless a window actually occupies this display.
+        let finderActivated = app.bundleIdentifier == "com.apple.finder"
+        // App activation is a correctness boundary: never route a SHOW from a
+        // potentially stale Dock-owner snapshot.
+        cachedDockDisplayID = nil
+        dockDisplayCacheValidUntil = .distantPast
+        if finderActivated {
+            // If the click beats the 120 ms pointer timer, consume that display
+            // change here so the next tick cannot launch a duplicate hover
+            // handoff for the same confirmed desktop click.
+            lastPointerDisplayID = displayIDUnderPointer()
+            pointerOnlyEmptyDisplayID = nil
+        } else {
+            cancelDockDisplayHandoff()
+        }
+        evaluate(
+            app: app,
+            quiet: false,
+            applicationActivated: true,
+            finderActivated: finderActivated
+        )
 
         // Some apps are not ready to vend their AX hierarchy at launch. App
         // activation is a reliable second opportunity to attach their observer.
@@ -1355,16 +1420,29 @@ final class DockWatcher {
     // MARK: - Core Logic
 
     // Re-checks whatever app macOS currently reports as frontmost.
-    private func evaluateFrontmostApp(quiet: Bool) {
+    private func evaluateFrontmostApp(
+        quiet: Bool,
+        pointerDisplayChanged: Bool = false
+    ) {
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
-        evaluate(app: app, quiet: quiet)
+        evaluate(
+            app: app,
+            quiet: quiet,
+            pointerDisplayChanged: pointerDisplayChanged
+        )
     }
 
     // Shows the Dock only when the display under the pointer has no standard
     // app window, or when a blacklisted app is visible there. That is the
     // display whose Space the user is interacting with during a multi-monitor
     // desktop swipe.
-    private func evaluate(app: NSRunningApplication, quiet: Bool) {
+    private func evaluate(
+        app: NSRunningApplication,
+        quiet: Bool,
+        pointerDisplayChanged: Bool = false,
+        applicationActivated: Bool = false,
+        finderActivated: Bool = false
+    ) {
         guard isRunning else { return }
 
         // Four-finger pre-hide owns the Dock until the swipe has landed. Any
@@ -1386,13 +1464,85 @@ final class DockWatcher {
         let windowState = displayWindowState(on: activeDisplay)
         lastEvaluatedDisplayID = activeDisplayID
         lastEvaluatedWindowState = windowState
+
+        let pointerEnteredEmptyDisplay = pointerDisplayChanged
+            && windowState == .empty
+        if pointerDisplayChanged {
+            if windowState != .empty {
+                cancelDockDisplayHandoff()
+            }
+            // A display crossing is rare and correctness-sensitive. Refresh the
+            // cached Dock owner before deciding whether SHOW is already safe or
+            // a verified handoff is required.
+            cachedDockDisplayID = nil
+            dockDisplayCacheValidUntil = .distantPast
+            pointerOnlyEmptyDisplayID = windowState == .empty
+                ? activeDisplayID
+                : nil
+        } else if pointerOnlyEmptyDisplayID == activeDisplayID,
+                  windowState != .empty {
+            // An app or blacklisted window appearing on the hovered display is
+            // a real state change. HIDE/blacklist behavior takes over normally.
+            pointerOnlyEmptyDisplayID = nil
+        }
+
         let shouldShowDock = windowState != .occupied
+        let suppressPendingHoverShow = !pointerEnteredEmptyDisplay
+            && windowState == .empty
+            && pointerOnlyEmptyDisplayID == activeDisplayID
 
         if handOffVisibleHoldToHiddenIfNeeded(
             for: windowState,
             on: activeDisplayID
         ) {
             return
+        }
+
+        let suppressUnsafeDisplayShow = shouldShowDock
+            && showNeedsDisplaySafetySuppression(
+                targetDisplayID: activeDisplayID
+            )
+
+        // Entering an empty display, focusing its Finder desktop, or activating
+        // a blacklisted app expresses intent to use that display. macOS does
+        // not always move an already-hidden Dock there by itself, so ask
+        // Dock.app to process an edge pulse and permit SHOW only after its own
+        // window proves that the display handoff succeeded.
+        let handoffExpectedState: DisplayWindowState?
+        if pointerEnteredEmptyDisplay
+            || (finderActivated && windowState == .empty) {
+            handoffExpectedState = .empty
+        } else if applicationActivated,
+                  windowState == .blacklisted,
+                  isBlacklisted(
+                      bundleID,
+                      in: cachedIgnoredBundleIdentifiers
+                  ) {
+            handoffExpectedState = .blacklisted
+        } else {
+            handoffExpectedState = nil
+        }
+
+        if suppressUnsafeDisplayShow,
+           let handoffExpectedState,
+           beginDockDisplayHandoff(
+                to: activeDisplayID,
+                expectedState: handoffExpectedState,
+                frontmostBundleIdentifier: bundleID,
+                trigger: pointerEnteredEmptyDisplay ? .hover : .activation
+           ) {
+            postStatus(
+                windowState == .empty
+                    ? "Desktop"
+                    : (app.localizedName ?? bundleID)
+            )
+            return
+        }
+
+        if pointerEnteredEmptyDisplay, !suppressUnsafeDisplayShow {
+            // Dock.app already owns this display, so no routing pulse is
+            // necessary and the hover can show it immediately.
+            pointerOnlyEmptyDisplayID = nil
         }
 
         if !quiet {
@@ -1406,7 +1556,13 @@ final class DockWatcher {
             }
         }
 
-        setDockVisible(shouldShowDock)
+        if suppressPendingHoverShow {
+            dockAwayDebugLog("  → Empty-display handoff pending → SHOW suppressed")
+        } else if suppressUnsafeDisplayShow {
+            dockAwayDebugLog("  → Dock target is unsafe or unresolved → SHOW suppressed")
+        } else {
+            setDockVisible(shouldShowDock)
+        }
 
         // Quiet evaluations suppress repetitive console output, but they are
         // also the authoritative post-transition correction. Always refresh
@@ -1524,6 +1680,7 @@ final class DockWatcher {
     // use the stable build's early HIDE timing, while an empty destination can
     // keep the Dock continuously visible.
     func prepareHorizontalSpacePredictionAtGestureStart() {
+        cancelDockDisplayHandoff()
         horizontalSpacePrediction = nil
         let predictionStartedAt = ProcessInfo.processInfo.systemUptime
 
@@ -1603,10 +1760,13 @@ final class DockWatcher {
         }
     }
 
-    private func displayIDUnderPointer() -> CGDirectDisplayID {
+    private func pointerDisplaySnapshot() -> (
+        location: CGPoint,
+        displayID: CGDirectDisplayID
+    )? {
         // CGEvent(source: nil)?.location is in global display coordinates.
         guard let pointerLocation = CGEvent(source: nil)?.location else {
-            return CGMainDisplayID()
+            return nil
         }
 
         var display = CGMainDisplayID()
@@ -1618,10 +1778,514 @@ final class DockWatcher {
             &displayCount
         )
         guard result == .success, displayCount > 0 else {
-            return CGMainDisplayID()
+            return nil
         }
 
-        return display
+        return (pointerLocation, display)
+    }
+
+    private func displayIDUnderPointer() -> CGDirectDisplayID {
+        pointerDisplaySnapshot()?.displayID ?? CGMainDisplayID()
+    }
+
+    // Cmd-Option-D changes Dock autohide globally; it cannot choose which
+    // display receives the Dock. Dock.app keeps one full-display layer at the
+    // Dock window level whose bounds identify the display it currently owns,
+    // even while autohide is enabled. Use this read-only hint to avoid showing
+    // the Dock over an app on another screen.
+    private func dockAssignedDisplayID() -> CGDirectDisplayID? {
+        let now = Date()
+        if now < dockDisplayCacheValidUntil {
+            return cachedDockDisplayID
+        }
+
+        defer {
+            dockDisplayCacheValidUntil = now.addingTimeInterval(
+                dockDisplayCacheLifetime
+            )
+        }
+
+        guard let windows = CGWindowListCopyWindowInfo(
+            .optionAll,
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            cachedDockDisplayID = nil
+            return nil
+        }
+
+        var displayCount: UInt32 = 0
+        guard
+            CGGetActiveDisplayList(0, nil, &displayCount) == .success,
+            displayCount > 0
+        else {
+            cachedDockDisplayID = nil
+            return nil
+        }
+
+        var displayIDs = [CGDirectDisplayID](
+            repeating: 0,
+            count: Int(displayCount)
+        )
+        guard CGGetActiveDisplayList(
+            displayCount,
+            &displayIDs,
+            &displayCount
+        ) == .success else {
+            cachedDockDisplayID = nil
+            return nil
+        }
+
+        let dockWindowLevel = Int(CGWindowLevelForKey(.dockWindow))
+        for info in windows {
+            guard
+                info[kCGWindowOwnerName as String] as? String == "Dock",
+                info[kCGWindowLayer as String] as? Int == dockWindowLevel,
+                let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary
+            else { continue }
+
+            var dockBounds = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(
+                boundsDictionary,
+                &dockBounds
+            ) else { continue }
+
+            if let displayID = displayIDs.prefix(Int(displayCount)).first(
+                where: { displayBounds(CGDisplayBounds($0), match: dockBounds) }
+            ) {
+                cachedDockDisplayID = displayID
+                return displayID
+            }
+        }
+
+        cachedDockDisplayID = nil
+        return nil
+    }
+
+    private func displayBounds(_ lhs: CGRect, match rhs: CGRect) -> Bool {
+        let tolerance: CGFloat = 1.0
+        return abs(lhs.minX - rhs.minX) <= tolerance
+            && abs(lhs.minY - rhs.minY) <= tolerance
+            && abs(lhs.width - rhs.width) <= tolerance
+            && abs(lhs.height - rhs.height) <= tolerance
+    }
+
+    private func displaysRepresentSameTarget(
+        _ lhs: CGDirectDisplayID,
+        _ rhs: CGDirectDisplayID
+    ) -> Bool {
+        lhs == rhs
+            || displayBounds(
+                CGDisplayBounds(lhs),
+                match: CGDisplayBounds(rhs)
+            )
+    }
+
+    private func showNeedsDisplaySafetySuppression(
+        targetDisplayID: CGDirectDisplayID
+    ) -> Bool {
+        guard let dockDisplayID = dockAssignedDisplayID() else {
+            // With more than one display, an unknown Dock owner is not enough
+            // evidence to issue a global SHOW. A later event can retry once
+            // Dock.app exposes its ownership window again.
+            var displayCount: UInt32 = 0
+            guard CGGetActiveDisplayList(
+                0,
+                nil,
+                &displayCount
+            ) == .success else { return true }
+            return displayCount > 1
+        }
+
+        // Mirrored displays can have distinct IDs but identical global bounds.
+        // Treat them as one destination for Dock routing purposes.
+        if displaysRepresentSameTarget(dockDisplayID, targetDisplayID) {
+            return false
+        }
+
+        // A global SHOW would appear on Dock.app's current owner, not on the
+        // display DockAway just evaluated. Route every non-mirrored mismatch
+        // through the verified handoff, regardless of what is on the old
+        // display.
+        return true
+    }
+
+    // A real Dock-edge gesture tells Dock.app which display should own the
+    // Dock. App activation and an empty-desktop hover alone do not. Reproduce
+    // only that routing hint in one synchronous pulse and immediately restore
+    // the pointer to its live position. Unlike the former nudge experiment, no
+    // cursor position is held at the edge and SHOW remains forbidden until
+    // ownership is verified.
+    @discardableResult
+    private func beginDockDisplayHandoff(
+        to targetDisplayID: CGDirectDisplayID,
+        expectedState: DisplayWindowState,
+        frontmostBundleIdentifier: String,
+        trigger: DockDisplayHandoffTrigger = .activation
+    ) -> Bool {
+        cancelDockDisplayHandoff()
+
+        guard
+            let pointerSnapshot = pointerDisplaySnapshot(),
+            pointerSnapshot.displayID == targetDisplayID
+        else { return false }
+
+        if trigger == .hover {
+            guard
+                NSEvent.pressedMouseButtons == 0,
+                dockDisplayHoverCooldownUntil[targetDisplayID, default: .distantPast]
+                    <= Date()
+            else { return false }
+        }
+
+        dockDisplayHandoffPointerAnchor = pointerSnapshot.location
+        dockDisplayHandoffExpectedState = expectedState
+        dockDisplayHandoffExpectedBundleIdentifier = frontmostBundleIdentifier
+        dockDisplayHandoffTrigger = trigger
+
+        guard dockDisplayHandoffIsStillValid(for: targetDisplayID) else {
+            finishDockDisplayHandoff()
+            return false
+        }
+
+        let generation = dockDisplayHandoffGeneration
+        dockDisplayHandoffTargetID = targetDisplayID
+
+        scheduleInitialDockDisplayHandoffPulse(
+            targetDisplayID: targetDisplayID,
+            generation: generation,
+            readinessAttempt: 0,
+            after: trigger == .hover ? dockDisplayHoverSettleInterval : 0
+        )
+        return true
+    }
+
+    private func scheduleInitialDockDisplayHandoffPulse(
+        targetDisplayID: CGDirectDisplayID,
+        generation: Int,
+        readinessAttempt: Int,
+        after delay: TimeInterval
+    ) {
+        pendingDockDisplayHandoffWork?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard
+                let self,
+                self.isRunning,
+                generation == self.dockDisplayHandoffGeneration,
+                self.dockDisplayHandoffTargetID == targetDisplayID
+            else { return }
+
+            guard self.dockDisplayHandoffIsStillValid(
+                for: targetDisplayID
+            ) else {
+                self.cancelDockDisplayHandoff()
+                return
+            }
+
+            if self.dockDisplayHandoffTrigger == .hover {
+                // A hover means the pointer has actually settled on the empty
+                // display, not merely crossed its seam at speed. Re-anchor while
+                // it is moving and emit at most one pulse after a quiet sample.
+                guard
+                    NSEvent.pressedMouseButtons == 0,
+                    let pointerSnapshot = self.pointerDisplaySnapshot(),
+                    pointerSnapshot.displayID == targetDisplayID,
+                    let pointerAnchor = self.dockDisplayHandoffPointerAnchor
+                else {
+                    self.cancelDockDisplayHandoff()
+                    return
+                }
+
+                let movement = hypot(
+                    pointerSnapshot.location.x - pointerAnchor.x,
+                    pointerSnapshot.location.y - pointerAnchor.y
+                )
+                if movement > 10 {
+                    guard readinessAttempt < 20 else {
+                        self.cancelDockDisplayHandoff()
+                        return
+                    }
+                    self.dockDisplayHandoffPointerAnchor =
+                        pointerSnapshot.location
+                    self.scheduleInitialDockDisplayHandoffPulse(
+                        targetDisplayID: targetDisplayID,
+                        generation: generation,
+                        readinessAttempt: readinessAttempt + 1,
+                        after: self.dockDisplayHoverSettleInterval
+                    )
+                    return
+                }
+            } else if NSEvent.pressedMouseButtons != 0 {
+                // App activation can arrive on mouse-down. Never synthesize the
+                // edge pulse until that click is released; temporary movement
+                // while a button is held could otherwise become a drag.
+                guard readinessAttempt < 20 else {
+                    self.cancelDockDisplayHandoff()
+                    return
+                }
+                self.scheduleInitialDockDisplayHandoffPulse(
+                    targetDisplayID: targetDisplayID,
+                    generation: generation,
+                    readinessAttempt: readinessAttempt + 1,
+                    after: 0.01
+                )
+                return
+            }
+
+            guard self.postDockEdgePulse(to: targetDisplayID) else {
+                self.cancelDockDisplayHandoff()
+                return
+            }
+
+            if self.dockDisplayHandoffTrigger == .hover {
+                self.dockDisplayHoverCooldownUntil[targetDisplayID] =
+                    Date().addingTimeInterval(self.dockDisplayHoverCooldown)
+            }
+
+            dockAwayDebugLog(
+                "  🖥️ Target display → requesting Dock display handoff"
+            )
+            self.scheduleDockDisplayHandoffCheck(
+                targetDisplayID: targetDisplayID,
+                generation: generation,
+                attempt: 1,
+                mouseUpWaitAttempt: 0,
+                after: 0.06
+            )
+        }
+        pendingDockDisplayHandoffWork = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + max(0, delay),
+            execute: work
+        )
+    }
+
+    private func scheduleDockDisplayHandoffCheck(
+        targetDisplayID: CGDirectDisplayID,
+        generation: Int,
+        attempt: Int,
+        mouseUpWaitAttempt: Int,
+        after delay: TimeInterval
+    ) {
+        pendingDockDisplayHandoffWork?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            guard
+                let self,
+                self.isRunning,
+                generation == self.dockDisplayHandoffGeneration,
+                self.dockDisplayHandoffTargetID == targetDisplayID
+            else { return }
+
+            guard self.dockDisplayHandoffIsStillValid(
+                for: targetDisplayID
+            ) else {
+                self.cancelDockDisplayHandoff()
+                return
+            }
+
+            if self.dockDisplayHandoffTrigger == .hover,
+               NSEvent.pressedMouseButtons != 0 {
+                guard mouseUpWaitAttempt < 20 else {
+                    self.cancelDockDisplayHandoff()
+                    return
+                }
+                self.scheduleDockDisplayHandoffCheck(
+                    targetDisplayID: targetDisplayID,
+                    generation: generation,
+                    attempt: attempt,
+                    mouseUpWaitAttempt: mouseUpWaitAttempt + 1,
+                    after: 0.01
+                )
+                return
+            }
+
+            self.cachedDockDisplayID = nil
+            self.dockDisplayCacheValidUntil = .distantPast
+
+            if let dockDisplayID = self.dockAssignedDisplayID(),
+               self.displaysRepresentSameTarget(
+                   dockDisplayID,
+                   targetDisplayID
+               ) {
+                if self.pointerOnlyEmptyDisplayID == targetDisplayID {
+                    self.pointerOnlyEmptyDisplayID = nil
+                }
+                self.finishDockDisplayHandoff()
+                dockAwayDebugLog(
+                    "  ✅ Dock display handoff confirmed → showing on focused display"
+                )
+                self.setDockVisible(true)
+                return
+            }
+
+            // Dock's ownership window can lag the pulse. Hover checks remain
+            // read-only after their one settled pulse so synthetic movement can
+            // never race a pointer that has started moving again. Activation
+            // handoffs retain two bounded retries for the existing click path.
+            if attempt < 3 {
+                if self.dockDisplayHandoffTrigger == .activation,
+                   !self.postDockEdgePulse(to: targetDisplayID) {
+                    self.finishDockDisplayHandoff()
+                    return
+                }
+                self.scheduleDockDisplayHandoffCheck(
+                    targetDisplayID: targetDisplayID,
+                    generation: generation,
+                    attempt: attempt + 1,
+                    mouseUpWaitAttempt: 0,
+                    after: attempt == 1 ? 0.08 : 0.10
+                )
+                return
+            }
+
+            self.finishDockDisplayHandoff()
+            dockAwayDebugLog(
+                "  ⚠️ Dock display handoff was not confirmed → leaving Dock hidden"
+            )
+        }
+        pendingDockDisplayHandoffWork = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + max(0, delay),
+            execute: work
+        )
+    }
+
+    private func dockDisplayHandoffIsStillValid(
+        for targetDisplayID: CGDirectDisplayID
+    ) -> Bool {
+        let pointerStayedNearAnchor: Bool
+        if dockDisplayHandoffTrigger == .activation {
+            guard
+                let pointerAnchor = dockDisplayHandoffPointerAnchor,
+                let pointerLocation = CGEvent(source: nil)?.location
+            else { return false }
+
+            pointerStayedNearAnchor = hypot(
+                pointerLocation.x - pointerAnchor.x,
+                pointerLocation.y - pointerAnchor.y
+            ) <= 8
+        } else {
+            // Hover handoffs use a dedicated pre-pulse settle check. After that
+            // single pulse, validity only requires the live pointer to remain
+            // on the intended empty display while Dock.app confirms ownership.
+            pointerStayedNearAnchor = true
+        }
+
+        guard
+            isRunning,
+            !isDesktopTransitionProtected,
+            !isHoldingHidden,
+            !isHoldingVisible,
+            let expectedState = dockDisplayHandoffExpectedState,
+            let expectedBundleIdentifier =
+                dockDisplayHandoffExpectedBundleIdentifier,
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                == expectedBundleIdentifier,
+            let pointerSnapshot = pointerDisplaySnapshot(),
+            pointerSnapshot.displayID == targetDisplayID,
+            pointerStayedNearAnchor
+        else { return false }
+
+        return displayWindowState(
+            on: CGDisplayBounds(targetDisplayID)
+        ) == expectedState
+    }
+
+    private func postDockEdgePulse(
+        to targetDisplayID: CGDirectDisplayID
+    ) -> Bool {
+        guard
+            NSEvent.pressedMouseButtons == 0,
+            let source = CGEventSource(stateID: .hidSystemState),
+            let pointerSnapshot = pointerDisplaySnapshot(),
+            pointerSnapshot.displayID == targetDisplayID
+        else { return false }
+
+        let pointerLocation = pointerSnapshot.location
+
+        // Do not let synthetic motion suppress real hardware input. The pulse
+        // is posted back-to-back and restored immediately to minimize any
+        // presentation of its temporary edge location.
+        source.localEventsSuppressionInterval = 0
+
+        let bounds = CGDisplayBounds(targetDisplayID)
+        let orientation = UserDefaults(suiteName: "com.apple.dock")?
+            .string(forKey: "orientation") ?? "bottom"
+        let horizontalPosition = min(
+            max(pointerLocation.x, bounds.minX + 24),
+            bounds.maxX - 24
+        )
+        let verticalPosition = min(
+            max(pointerLocation.y, bounds.minY + 24),
+            bounds.maxY - 24
+        )
+
+        let edgePoints: [CGPoint]
+        let deltaX: Int64
+        let deltaY: Int64
+
+        switch orientation {
+        case "left":
+            edgePoints = [4, 2, 1].map {
+                CGPoint(x: bounds.minX + CGFloat($0), y: verticalPosition)
+            }
+            deltaX = -64
+            deltaY = 0
+        case "right":
+            edgePoints = [4, 2, 1].map {
+                CGPoint(x: bounds.maxX - CGFloat($0), y: verticalPosition)
+            }
+            deltaX = 64
+            deltaY = 0
+        default:
+            edgePoints = [4, 2, 1].map {
+                CGPoint(x: horizontalPosition, y: bounds.maxY - CGFloat($0))
+            }
+            deltaX = 0
+            deltaY = 64
+        }
+
+        var events = [CGEvent]()
+        events.reserveCapacity(edgePoints.count)
+        for point in edgePoints {
+            guard let event = CGEvent(
+                mouseEventSource: source,
+                mouseType: .mouseMoved,
+                mouseCursorPosition: point,
+                mouseButton: .left
+            ) else { return false }
+
+            event.setIntegerValueField(.mouseEventDeltaX, value: deltaX)
+            event.setIntegerValueField(.mouseEventDeltaY, value: deltaY)
+            events.append(event)
+        }
+
+        for event in events {
+            event.post(tap: .cghidEventTap)
+        }
+
+        let restoreResult = CGWarpMouseCursorPosition(pointerLocation)
+        if restoreResult != .success {
+            dockAwayDebugLog("  ⚠️ Could not restore pointer after Dock display pulse")
+            return false
+        }
+        return true
+    }
+
+    private func finishDockDisplayHandoff() {
+        pendingDockDisplayHandoffWork?.cancel()
+        pendingDockDisplayHandoffWork = nil
+        dockDisplayHandoffTargetID = nil
+        dockDisplayHandoffPointerAnchor = nil
+        dockDisplayHandoffExpectedState = nil
+        dockDisplayHandoffExpectedBundleIdentifier = nil
+        dockDisplayHandoffTrigger = .activation
+    }
+
+    private func cancelDockDisplayHandoff() {
+        dockDisplayHandoffGeneration += 1
+        finishDockDisplayHandoff()
     }
 
     // MARK: - Public Helpers
@@ -1727,6 +2391,7 @@ final class DockWatcher {
         canPrehideOccupiedDestination: Bool,
         maximum: TimeInterval
     ) -> Bool {
+        cancelDockDisplayHandoff()
         clearHiddenHold()
         cancelTransientDecisionWork()
         visibleHoldLatched = true
@@ -1751,6 +2416,8 @@ final class DockWatcher {
         maximum: TimeInterval = 5.0
     ) -> Bool {
         guard isRunning else { return false }
+
+        cancelDockDisplayHandoff()
 
         // Direction has already disambiguated horizontal desktop motion from
         // upward Mission Control entry. Do not insert AX or Window Server IPC

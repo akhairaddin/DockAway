@@ -383,6 +383,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
 @objc class AppDelegate: NSObject, NSApplicationDelegate {
     private static let ignoredWindowBundleIdentifiersKey = "IgnoredWindowBundleIdentifiers"
+    private static let checkForUpdatesAtLaunchKey = "CheckForUpdatesAtLaunch"
 
     private enum UpdateFrequency: Int, CaseIterable {
         case daily = 86_400
@@ -419,6 +420,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
     private var updaterController: SPUStandardUpdaterController!
     private var updateMenuItem: NSMenuItem!
     private var updateFrequencyMenu: NSMenu!
+    private var checkForUpdatesAtLaunchItem: NSMenuItem!
     private var availableUpdateVersion: String?
     private var blacklistMenu: NSMenu!
     private var dockAwayStatusView: DockAwayStatusView!
@@ -455,17 +457,19 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
         setupSleepAndLockAwareness()
         
-        // Sparkle keeps scheduled checks gentle: background discoveries are
-        // surfaced in DockAway's menu instead of opening a surprise window.
+        // Sparkle keeps scheduled checks gentle, while its updater delegate
+        // reports every valid update path (manual, gentle, or automatic) so
+        // DockAway can always surface the available version in its menu.
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
-            updaterDelegate: nil,
+            updaterDelegate: self,
             userDriverDelegate: self
         )
 
-        // Sparkle owns the daily schedule and remembers the last check date.
-        // On launch it checks only when the 24-hour interval is due, avoiding
-        // an extra network request each time DockAway is restarted.
+        checkForUpdatesAtLaunchIfEnabled()
+
+        // Sparkle owns the selected schedule and remembers the last check date.
+        // The independent launch toggle can request an immediate silent check.
 
         accessibilityPermissionMissing = !AXIsProcessTrusted()
         inputMonitoringPermissionMissing = !CGPreflightListenEventAccess()
@@ -954,7 +958,7 @@ private final class DockAwayStatusView: NSVisualEffectView {
             // If it's nil, we initialize it right here as a fallback
             self.updaterController = SPUStandardUpdaterController(
                 startingUpdater: true,
-                updaterDelegate: nil,
+                updaterDelegate: self,
                 userDriverDelegate: self
             )
             updateMenuItem.target = self.updaterController
@@ -976,6 +980,20 @@ private final class DockAwayStatusView: NSVisualEffectView {
 
         let updateFrequencyMenu = NSMenu(title: "Update Frequency")
         updateFrequencyMenu.autoenablesItems = false
+
+        let checkForUpdatesAtLaunchItem = NSMenuItem(
+            title: "Check at Launch",
+            action: #selector(toggleCheckForUpdatesAtLaunch(_:)),
+            keyEquivalent: ""
+        )
+        checkForUpdatesAtLaunchItem.target = self
+        checkForUpdatesAtLaunchItem.tag = -1
+        checkForUpdatesAtLaunchItem.toolTip =
+            "Check for a new DockAway version whenever DockAway opens"
+        updateFrequencyMenu.addItem(checkForUpdatesAtLaunchItem)
+        updateFrequencyMenu.addItem(.separator())
+        self.checkForUpdatesAtLaunchItem = checkForUpdatesAtLaunchItem
+
         for frequency in UpdateFrequency.allCases {
             let item = NSMenuItem(
                 title: frequency.title,
@@ -1031,11 +1049,16 @@ private final class DockAwayStatusView: NSVisualEffectView {
     private func refreshUpdateFrequencyMenu() {
         guard let updateFrequencyMenu, let updaterController else { return }
 
+        checkForUpdatesAtLaunchItem?.state = UserDefaults.standard.bool(
+            forKey: Self.checkForUpdatesAtLaunchKey
+        ) ? .on : .off
+
         let updater = updaterController.updater
         let automaticChecksEnabled = updater.automaticallyChecksForUpdates
         let currentInterval = updater.updateCheckInterval
 
         for item in updateFrequencyMenu.items {
+            guard !item.isSeparatorItem else { continue }
             guard let frequency = UpdateFrequency(rawValue: item.tag) else { continue }
             if frequency == .manualOnly {
                 item.state = automaticChecksEnabled ? .off : .on
@@ -1060,6 +1083,30 @@ private final class DockAwayStatusView: NSVisualEffectView {
             updater.automaticallyChecksForUpdates = true
         }
         refreshUpdateFrequencyMenu()
+    }
+
+    @objc private func toggleCheckForUpdatesAtLaunch(_ sender: NSMenuItem) {
+        let enabled = !UserDefaults.standard.bool(
+            forKey: Self.checkForUpdatesAtLaunchKey
+        )
+        UserDefaults.standard.set(enabled, forKey: Self.checkForUpdatesAtLaunchKey)
+        sender.state = enabled ? .on : .off
+    }
+
+    private func checkForUpdatesAtLaunchIfEnabled() {
+        guard UserDefaults.standard.bool(forKey: Self.checkForUpdatesAtLaunchKey) else {
+            return
+        }
+
+        let updater = updaterController.updater
+        if updater.automaticallyChecksForUpdates {
+            // Preserve Sparkle's automatic-download/install preference.
+            updater.checkForUpdatesInBackground()
+        } else {
+            // "Manual Only" disables Sparkle's background driver, so probe the
+            // feed and update DockAway's menu without offering the update.
+            updater.checkForUpdateInformation()
+        }
     }
 
     private func showAvailableUpdate(_ update: SUAppcastItem) {
@@ -1746,6 +1793,17 @@ private final class DockAwayStatusView: NSVisualEffectView {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         DistributedNotificationCenter.default().removeObserver(self)
         restoreDockState()
+    }
+}
+
+// MARK: - Sparkle Update Discovery
+
+extension AppDelegate: SPUUpdaterDelegate {
+    // This callback is shared by Sparkle's manual, scheduled, and automatic
+    // update drivers. Keep the menu indicator independent of whether the user
+    // has enabled automatic downloads and installation.
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        showAvailableUpdate(item)
     }
 }
 
