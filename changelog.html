@@ -2,13 +2,35 @@
 <html>
 <head>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 13px; color: #333; }
-        @media (prefers-color-scheme: dark) { body { color: #ddd; } }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 13px; color: #fff; background-color: #000; }
         h3 { margin-top: 0; padding-top: 0; }
         li { margin-bottom: 6px; }
     </style>
 </head>
 <body>
+    <h3>Version 1.1.9 <span style="font-weight: normal;">(8-31-26)</span></h3>
+    <ul>
+        <li><b>Introducing Dock Settings:</b> The Dock controls you used to need another app for are now built right into DockAway. No Terminal side quests required. Open one beautifully organized menu to choose the Dock's position, control how quickly it moves, and decide how long it waits before appearing.
+            <ul>
+                <li><b>Dock Position:</b> Move the Dock to the left, bottom, or right directly from the menu bar.</li>
+                <li><b>Animation Speed:</b> Use a native macOS slider for precise control from slow to instant.</li>
+                <li><b>Reveal Delay:</b> Choose anything from no delay to a long wait with the same fine-grained control.</li>
+                <li><b>Checkpoint Haptics:</b> The sliders visibly mark 25%, 50%, and 75%, gently snap to each checkpoint, and provide reliable haptic feedback at every marker and endpoint.</li>
+                <li><b>Your Settings, Your Exit:</b> Independently choose whether Dock Position, Animation Speed, and Reveal Delay remain after DockAway quits. Anything you do not keep automatically returns to its macOS default.</li>
+            </ul>
+        </li>
+        <li><b>Signed and Notarized:</b> DockAway releases are now signed with an Apple Developer ID and notarized by Apple. macOS can verify the developer, confirm the app has not been altered since signing, and open official releases without the old unsigned-app workaround.</li>
+        <li><b>Native Liquid Glass:</b> DockAway's status panel, Dock Settings controls, and menu components now use the newest native macOS glass treatment where available, with a polished fallback for earlier supported versions.</li>
+        <li><b>A Smarter, Animated Blacklist:</b> Blacklisted apps now stay together at the top, followed by an alphabetized list of everything else. A persistent separator keeps both groups clear while apps glide smoothly between them, and longer lists remain scrollable.</li>
+        <li><b>Menus That Stay Put:</b> Changing Launch at Login, selecting blacklist apps, adjusting Dock settings, restoring defaults, or choosing an update frequency no longer dismisses the menu after every click. Configure everything in one uninterrupted pass.</li>
+        <li><b>Multitouch Support Detection:</b> DockAway now detects when four-finger gesture support is unavailable and shows a yellow status warning with a retry action. Mouse-only Macs and systems without a trackpad stay quiet.</li>
+        <li><b>Liquid Glass Blacklist Help:</b> “About Blacklist” now opens a native macOS help popover on hover or click, putting a plain-language explanation right where it is needed.</li>
+        <li><b>Safer Bulk Blacklist Removal:</b> “Remove All” now asks for confirmation when two or more applications are blacklisted, while single-app removal remains immediate.</li>
+        <li><b>Pixel-Perfect Menu Refinements:</b> Checkboxes, labels, separators, icons, slider markers, and action rows now share consistent alignment and spacing throughout the menu.</li>
+        <li><b>Updated Menu Preview:</b> The README now shows DockAway's latest menu design and its expanded Dock Settings controls.</li>
+    </ul>
+    <hr>
+
     <h3>Version 1.1.8 <span style="font-weight: normal;">(8-24-26)</span></h3>
     <ul>
         <li><b>Seamless Empty-Display Hover Handoff:</b> On multi-display setups, moving the pointer from an occupied monitor onto an empty desktop now routes and shows the Dock automatically without simulating a click or changing focus. Single-display behavior is unchanged.</li>

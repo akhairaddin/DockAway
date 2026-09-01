@@ -365,7 +365,7 @@ final class DockWatcher {
     private let missionControlExitSettleDelay: TimeInterval = 0.12
     private let missionControlIdleProbeInterval: TimeInterval = 0.35
     private let missionControlActiveProbeInterval: TimeInterval = 0.12
-    private let dockCommandSettleTimeout: TimeInterval = 1.0
+    private var dockCommandSettleTimeout: TimeInterval = 1.0
     // AX notifications handle normal window changes. This intentionally slow
     // timer is only a backstop for apps that expose incomplete accessibility.
     private let safetyInterval: TimeInterval   = 2.0
@@ -406,6 +406,7 @@ final class DockWatcher {
     func start() {
         guard !isRunning else { return }
         isRunning = true
+        refreshDockCommandSettleTimeout()
         refreshBlacklistCacheFromDefaults()
         refreshRunningApplicationCache()
 
@@ -489,6 +490,22 @@ final class DockWatcher {
         safetyTimer = timer
 
         dockAwayDebugLog("✅ DockStatus started")
+    }
+
+    private func refreshDockCommandSettleTimeout() {
+        let customDuration = (
+            UserDefaults(suiteName: "com.apple.dock")?
+                .object(forKey: "autohide-time-modifier") as? NSNumber
+        )?.doubleValue
+
+        // Keep the stable one-second gate for the system default and all fast
+        // presets. Slower custom animations need extra time to land before a
+        // later AX event is allowed to reconcile or reverse the command.
+        if let customDuration, customDuration > 1.0 {
+            dockCommandSettleTimeout = min(customDuration + 0.5, 3.0)
+        } else {
+            dockCommandSettleTimeout = 1.0
+        }
     }
 
     func stop() {
@@ -1272,11 +1289,15 @@ final class DockWatcher {
     // layer 14 only for Mission Control (not App Exposé or Show Desktop).
     // This is an undocumented fallback used only when AX is late or unavailable.
     private func missionControlWindowServerState() -> Bool {
+        missionControlWindowServerStateSnapshot() ?? false
+    }
+
+    private func missionControlWindowServerStateSnapshot() -> Bool? {
         let options: CGWindowListOption = [.optionOnScreenOnly]
         guard let windows = CGWindowListCopyWindowInfo(
             options,
             kCGNullWindowID
-        ) as? [[String: Any]] else { return false }
+        ) as? [[String: Any]] else { return nil }
 
         return windows.contains { info in
             let ownerName = info[kCGWindowOwnerName as String] as? String
@@ -2289,6 +2310,47 @@ final class DockWatcher {
     }
 
     // MARK: - Public Helpers
+
+    // Dock.app also owns Mission Control and the Spaces animation. Restarting
+    // it during any protected transition can leave the destination Space in a
+    // partial state, so Dock settings remain disabled until all holds, handoffs,
+    // and settling work are idle.
+    var canRestartDockSafely: Bool {
+        guard let missionControlIsVisible = missionControlWindowServerStateSnapshot(),
+              !missionControlIsVisible else { return false }
+        guard isRunning else { return true }
+        return !isDesktopTransitionProtected
+            && !isHoldingHidden
+            && !isHoldingVisible
+            && dockDisplayHandoffTargetID == nil
+    }
+
+    // launchd can assign the replacement Dock process to a different display.
+    // Treat the current pointer display as a fresh destination so the existing
+    // verified handoff path repairs ownership before any global SHOW command.
+    func repairStateAfterDockRestart() {
+        guard isRunning else { return }
+
+        cancelDockDisplayHandoff()
+        pointerOnlyEmptyDisplayID = nil
+        cachedDockDisplayID = nil
+        dockDisplayCacheValidUntil = .distantPast
+        dockDisplayHoverCooldownUntil.removeAll(keepingCapacity: true)
+        lastCommandedDockVisibility = nil
+        lastToggleTime = .distantPast
+        lastPointerDisplayID = displayIDUnderPointer()
+
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        let finderIsFrontmost = app.bundleIdentifier == "com.apple.finder"
+        evaluate(
+            app: app,
+            quiet: false,
+            pointerDisplayChanged: true,
+            applicationActivated: true,
+            finderActivated: finderIsFrontmost
+        )
+        scheduleAccessibilityEvaluation(includeSettleRecheck: true)
+    }
 
     func updateBlacklist(_ identifiers: Set<String>) {
         guard identifiers != cachedIgnoredBundleIdentifiers else { return }

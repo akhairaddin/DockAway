@@ -32,6 +32,10 @@ final class MultitouchWatcher {
     private typealias MTDeviceStopFn = @convention(c) (MTDeviceRef) -> Void
 
     private(set) var isRunning = false
+    private(set) var failureReason: String?
+    // A missing trackpad is normal on mouse-only Macs. Only framework-level
+    // failures should produce a user-facing degraded-support warning.
+    private(set) var shouldWarnUser = false
     private var libHandle: UnsafeMutableRawPointer?
     private var device: MTDeviceRef?
     private var stopFn: MTDeviceStopFn?
@@ -41,19 +45,22 @@ final class MultitouchWatcher {
 
     // Finger-count changes fire on contact. Once four contacts move far enough
     // to reject resting noise, their dominant direction is reported once.
+    @discardableResult
     func start(
         onFingerCountChange handler: @escaping FingerCountHandler,
         onFourFingerMotion motionHandler: @escaping FourFingerMotionHandler
-    ) {
-        guard !isRunning else { return }
+    ) -> Bool {
+        guard !isRunning else { return true }
 
         let lib: UnsafeMutableRawPointer
         if let existingHandle = libHandle {
             lib = existingHandle
         } else {
             guard let loadedHandle = dlopen(Self.frameworkPath, RTLD_LAZY) else {
+                failureReason = "MultitouchSupport could not be loaded"
+                shouldWarnUser = true
                 dockAwayDebugLog("⚠️ MultitouchSupport: dlopen failed — feature disabled")
-                return
+                return false
             }
             libHandle = loadedHandle
             lib = loadedHandle
@@ -65,8 +72,10 @@ final class MultitouchWatcher {
             let startSym    = dlsym(lib, "MTDeviceStart"),
             let stopSym     = dlsym(lib, "MTDeviceStop")
         else {
+            failureReason = "MultitouchSupport symbols are unavailable"
+            shouldWarnUser = true
             dockAwayDebugLog("⚠️ MultitouchSupport: symbols missing — feature disabled")
-            return
+            return false
         }
 
         let createDevice = unsafeBitCast(createSym,   to: MTDeviceCreateDefaultFn.self)
@@ -75,8 +84,10 @@ final class MultitouchWatcher {
         stopFn           = unsafeBitCast(stopSym,     to: MTDeviceStopFn.self)
 
         guard let dev = createDevice() else {
+            failureReason = "No trackpad was found"
+            shouldWarnUser = false
             dockAwayDebugLog("⚠️ MultitouchSupport: no trackpad found — feature disabled")
-            return
+            return false
         }
         device = dev
 
@@ -91,7 +102,10 @@ final class MultitouchWatcher {
         startDevice(dev, 0)
 
         isRunning = true
+        failureReason = nil
+        shouldWarnUser = false
         dockAwayDebugLog("✅ MultitouchSupport running — watching raw trackpad contacts")
+        return true
     }
 
     func stop() {

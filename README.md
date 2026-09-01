@@ -24,6 +24,7 @@ DockAway uses the system shortcut **⌘⌥D** (Command+Option+D), the same short
 ## Features
 
 - A lightweight, native Swift menu-bar app.
+- Official releases are signed with an Apple Developer ID and notarized by Apple.
 - Works well alongside window-management apps such as Rectangle by Ryan Hanson and Swish by Christian Renninger.
 - Responds to app switches, window changes, and Space or desktop swipes.
 - Detects the desktop state on the display under your pointer, rather than just checking Finder. This correctly handles minimizing an app's last window, tiled/split-screen layouts, trackpad gesture minimizing, and multi-display setups.
@@ -77,16 +78,11 @@ The core logic is distributed across `DockWatcher.swift`, `MultitouchWatcher.swi
 6. **Timings & Safety Nets:** Four-finger direction is recognized directly from trackpad frames; pointer-display and Mission Control state changes retain a lightweight 0.12-second check. The pointer timer has a small scheduling tolerance so macOS can combine nearby wakeups without changing its response interval. A 2-second full scan catches apps with incomplete accessibility support. Visible and hidden gesture holds release 0.60 seconds after finger lift, and Mission Control exit uses one 0.12-second verification tick before a fresh occupancy decision.
 7. **Dynamic UI & Graceful Exits:** The menu-bar chevron is updated through DockAway's existing state events instead of a dedicated cosmetic timer. Monitoring stops while the Mac is asleep or locked, permission problems are surfaced in the menu, and quitting DockAway restores the Dock to its normal visible state.
 
-## Unsigned App Warning
+## Signed and Notarized
 
-Because DockAway is not signed and notarized through Apple's paid Developer Program, macOS may display a **“DockAway Not Opened”** warning. In that case:
+Official DockAway releases are signed with an Apple Developer ID and notarized by Apple. This allows macOS to verify the developer, confirm the app has not been altered since it was signed, and validate the release through Gatekeeper. Releases downloaded from the official GitHub page should no longer require the previous **Open Anyway** workaround.
 
-1. Click **Done** in the warning.
-2. Open **System Settings → Privacy & Security** and scroll to the Security section.
-3. Find the message that DockAway was blocked and click **Open Anyway**.
-4. Click **Open Anyway** again in the confirmation dialog.
-5. Confirm with Touch ID or your password.
-6. Open DockAway again and grant the requested permissions.
+DockAway will still request Accessibility and Input Monitoring permission on first launch because those permissions are required for its Dock and trackpad features. Code signing and notarization do not bypass macOS privacy controls.
 
 ## Note
 
