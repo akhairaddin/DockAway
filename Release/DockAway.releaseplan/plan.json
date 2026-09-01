@@ -1,0 +1,39 @@
+{
+  "artifacts" : {
+    "appZip" : false,
+    "dsymArchiveDir" : "DockAway/dist/dSYMs",
+    "outputDir" : "DockAway/dist/releases"
+  },
+  "design" : {
+    "source" : "embedded"
+  },
+  "identity" : "485A95B2-649A-4874-907B-2780804D0A63",
+  "notarization" : {
+    "keychainProfile" : "DockAway-Notary"
+  },
+  "project" : {
+    "archs" : [
+      "arm64",
+      "x86_64"
+    ],
+    "extraBuildSettings" : {
+
+    },
+    "path" : "..",
+    "scheme" : "DockAway"
+  },
+  "publish" : {
+    "channel" : "script",
+    "githubRepo" : "akhairaddin/DockAway",
+    "postScript" : "Release/update-appcast.sh",
+    "prerelease" : false,
+    "script" : "Release/publish-github.sh"
+  },
+  "signing" : {
+    "identity" : "Developer ID Application: Abdullah Khairaddin (9R8WN5SC2D)"
+  },
+  "version" : 1,
+  "versioning" : {
+    "bump" : "patch"
+  }
+}

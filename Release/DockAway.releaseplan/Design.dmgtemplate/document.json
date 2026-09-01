@@ -1,0 +1,250 @@
+{
+  "background" : {
+    "color" : {
+      "blue" : 0.9358213543891907,
+      "green" : 0.4504052400588989,
+      "red" : 0
+    },
+    "gradient" : {
+      "angle" : 59.91421568627452,
+      "centerX" : 0.5,
+      "centerY" : 0.5,
+      "endRadius" : 1.2505446623093681,
+      "startRadius" : 0.09698393246187363,
+      "stops" : [
+        {
+          "color" : {
+            "blue" : 0.9676323533058167,
+            "green" : 0.5782213807106018,
+            "red" : 0.19424539804458618
+          },
+          "id" : "2B0305F4-C6E5-4695-8986-4206CB048103",
+          "location" : 0
+        },
+        {
+          "color" : {
+            "blue" : 0.8225564360618591,
+            "green" : 0.3005053699016571,
+            "red" : 0
+          },
+          "id" : "01D665EB-CC22-40A1-890F-BFE72DB8FAA0",
+          "location" : 0.42
+        },
+        {
+          "color" : {
+            "blue" : 0.45,
+            "green" : 0.54,
+            "red" : 0.6
+          },
+          "id" : "0785516E-FEE7-43DD-95FB-BFCBBCDC15F7",
+          "location" : 0.66
+        },
+        {
+          "color" : {
+            "blue" : 0.38,
+            "green" : 0.46,
+            "red" : 0.52
+          },
+          "id" : "36BD4751-2A5D-478A-8C89-20350AA54699",
+          "location" : 0.82
+        },
+        {
+          "color" : {
+            "blue" : 0.33,
+            "green" : 0.4,
+            "red" : 0.46
+          },
+          "id" : "6678278B-026B-4C1A-ABF9-20F812A515AD",
+          "location" : 1
+        }
+      ],
+      "type" : "linear"
+    },
+    "grain" : {
+      "amount" : 0.3,
+      "enabled" : false,
+      "isColored" : false,
+      "size" : 1
+    },
+    "layers" : [
+
+    ],
+    "type" : "color"
+  },
+  "codeSign" : {
+    "enabled" : true,
+    "identity" : "Developer ID Application: Abdullah Khairaddin (9R8WN5SC2D)"
+  },
+  "dmgFormat" : "ULFO",
+  "filesystem" : "APFS",
+  "gridSpacing" : 100,
+  "hideExtensions" : true,
+  "iconSize" : 96,
+  "isGridSpacingAuto" : true,
+  "items" : [
+    {
+      "background" : {
+        "bevel" : {
+          "depth" : 1.4795411220043568,
+          "enabled" : true,
+          "intensity" : 0.12765522875816993,
+          "lightAngle" : 235.66176470588235
+        },
+        "blendMode" : "normal",
+        "blurFeather" : 0,
+        "blurRadius" : 0,
+        "color" : {
+          "blue" : 1,
+          "green" : 0.5982644557952881,
+          "red" : 0
+        },
+        "cornerRadius" : 20.222494553376904,
+        "enabled" : true,
+        "glass" : {
+          "borderOpacity" : 0.5016271786492376,
+          "borderWidth" : 1,
+          "enabled" : true,
+          "innerShadowOpacity" : 1,
+          "innerShadowRadius" : 0,
+          "lightAngle" : 90.36764705882352,
+          "saturation" : 2
+        },
+        "opacity" : 0,
+        "padding" : 10.122549019607844
+      },
+      "id" : "4216D79E-8D08-4A60-ABFB-2D77FEFD6C1D",
+      "isPlaceholder" : false,
+      "kind" : "applicationsSymlink",
+      "label" : "Applications",
+      "linkType" : "copy",
+      "position" : [
+        396,
+        220
+      ]
+    },
+    {
+      "background" : {
+        "bevel" : {
+          "depth" : 1.4795411220043568,
+          "enabled" : true,
+          "intensity" : 0.12765522875816993,
+          "lightAngle" : 235.66176470588235
+        },
+        "blendMode" : "normal",
+        "blurFeather" : 0,
+        "blurRadius" : 0,
+        "color" : {
+          "blue" : 1,
+          "green" : 0.5982644557952881,
+          "red" : 0
+        },
+        "cornerRadius" : 20.222494553376904,
+        "enabled" : true,
+        "glass" : {
+          "borderOpacity" : 0.5016271786492376,
+          "borderWidth" : 1,
+          "enabled" : true,
+          "innerShadowOpacity" : 1,
+          "innerShadowRadius" : 0,
+          "lightAngle" : 90.36764705882352,
+          "saturation" : 2
+        },
+        "opacity" : 0,
+        "padding" : 10.122549019607844
+      },
+      "id" : "9A29DBD5-1BAF-4667-9B1E-6B172ECB8443",
+      "isPlaceholder" : true,
+      "kind" : "app",
+      "label" : "DockAway.app",
+      "linkType" : "copy",
+      "position" : [
+        164,
+        220
+      ]
+    }
+  ],
+  "sfSymbolLayers" : [
+    {
+      "color" : {
+        "blue" : 1,
+        "green" : 0.9896811842918396,
+        "red" : 0.9856467843055725
+      },
+      "id" : "FA9982F4-258A-408F-8734-F8FFC50F04DD",
+      "pointSize" : 48,
+      "position" : [
+        280,
+        210
+      ],
+      "symbolName" : "arrow.right",
+      "weight" : "semibold"
+    }
+  ],
+  "textLayers" : [
+    {
+      "color" : {
+        "blue" : 1,
+        "green" : 1,
+        "red" : 0.9999960065
+      },
+      "fontFamily" : "Helvetica Neue",
+      "fontSize" : 60,
+      "id" : "48C17739-526C-4C50-9162-612791CDAF9F",
+      "isBold" : true,
+      "isItalic" : false,
+      "position" : [
+        280,
+        50
+      ],
+      "text" : "DockAway"
+    },
+    {
+      "color" : {
+        "blue" : 1,
+        "green" : 0.9896811842918396,
+        "red" : 0.9856467843055725
+      },
+      "fontFamily" : "Helvetica Neue",
+      "fontSize" : 18,
+      "id" : "06073B50-63C0-490D-B3D2-C7F32B454961",
+      "isBold" : false,
+      "isItalic" : false,
+      "position" : [
+        280,
+        110
+      ],
+      "text" : "Drag DockAway into Applications to install"
+    },
+    {
+      "color" : {
+        "blue" : 1,
+        "green" : 0.9602182507514954,
+        "red" : 0.934243381023407
+      },
+      "fontFamily" : "Helvetica Neue",
+      "fontSize" : 16,
+      "id" : "492AD7BB-791B-4C26-8BAE-DFECC2BAA90D",
+      "isBold" : false,
+      "isItalic" : false,
+      "position" : [
+        280,
+        335
+      ],
+      "text" : "Copyright © 2026 Abdullah Khairaddin All rights reserved."
+    }
+  ],
+  "textSize" : 16,
+  "version" : 1,
+  "volumeIcon" : {
+    "type" : "composed"
+  },
+  "volumeName" : "Install",
+  "window" : {
+    "height" : 380,
+    "width" : 560
+  },
+  "windowPosition" : {
+    "x" : 200,
+    "y" : 120
+  }
+}
