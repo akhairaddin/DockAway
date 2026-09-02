@@ -16,6 +16,8 @@ A tiny macOS menu-bar utility that keeps your Dock out of the way. It shows the 
 | --- | --- |
 | An empty desktop with no app windows | Dock shown |
 | One or more app windows | Dock hidden |
+| A blacklisted app is frontmost | Dock shown |
+| A blacklisted app is visible, but a non-blacklisted app is in front | Dock hidden |
 | The only or last window is minimized | Dock shown |
 | One of multiple windows is minimized | Dock remains hidden |
 
@@ -31,6 +33,8 @@ DockAway uses the system shortcut **⌘⌥D** (Command+Option+D), the same short
 - Verifies the live `com.apple.dock autohide` value before acting, reducing the chance of DockAway drifting out of sync with macOS.
 - Uses accessibility events for immediate reactions and a lightweight safety check for apps that expose incomplete notifications.
 - Caches running-process, bundle-identifier, and positive or negative blacklist results in memory. Cache entries are invalidated when apps launch or quit and when the blacklist changes.
+- Adds native Dock Settings for position, animation speed, and reveal delay, complete with checkpoint snapping and haptic feedback.
+- Lets you choose which Dock settings remain after quitting, or restore everything to the macOS defaults at any time.
 - Includes a Launch at Login toggle directly in the menu, without a trip to System Settings.
 - Restores the Dock to its normal visible state when DockAway quits.
 - Updates the menu-bar Dock indicator from existing state events instead of running a separate cosmetic polling timer.
@@ -40,8 +44,9 @@ DockAway uses the system shortcut **⌘⌥D** (Command+Option+D), the same short
 
 - **Status**: Shows the active app and whether DockAway is currently running. If a required permission is unavailable, the header displays **Permission Required** and identifies the missing access.
 - **Stop / Resume**: Temporarily pauses DockAway and restores normal Dock visibility, then resumes monitoring from the same media-style control. When permission is missing, the resume button requests it and opens the appropriate System Settings page.
-- **Launch at Login Toggle**: Activates via `SMAppService`, with no System Settings round-trip needed.
 - **Blacklist**: Check running apps directly or choose installed apps from Finder so their windows do not hide the Dock.
+- **Dock Settings**: Move the Dock to the left, bottom, or right; tune animation speed and reveal delay; choose which settings remain after quitting; or restore the macOS defaults.
+- **Launch at Login Toggle**: Activates via `SMAppService`, with no System Settings round-trip needed.
 - **Update Frequency**: Choose Daily, Every 3 Days, Weekly, or Manual Only. Sparkle remembers the selection, and manual update checks remain available with every option.
 - **About DockAway**: Opens the standard macOS About panel.
 - **Quit**: Resets Dock auto-hide to off and restores the Dock to its normal visible state.
@@ -83,6 +88,10 @@ The core logic is distributed across `DockWatcher.swift`, `MultitouchWatcher.swi
 Official DockAway releases are signed with an Apple Developer ID and notarized by Apple. This allows macOS to verify the developer, confirm the app has not been altered since it was signed, and validate the release through Gatekeeper. Releases downloaded from the official GitHub page should no longer require the previous **Open Anyway** workaround.
 
 DockAway will still request Accessibility and Input Monitoring permission on first launch because those permissions are required for its Dock and trackpad features. Code signing and notarization do not bypass macOS privacy controls.
+
+## Special Thanks
+
+A special shout-out to [Rilmazafone](https://github.com/kageroumado/rilmazafone) and its developer [kageroumado](https://github.com/kageroumado). Rilmazafone creates DockAway's polished DMG and powers its release plan, including archiving, Developer ID signing, app and DMG notarization, stapling, verification, and release orchestration. It is a beautiful native Mac app backed by a great developer, and it made shipping DockAway dramatically better.
 
 ## Note
 
