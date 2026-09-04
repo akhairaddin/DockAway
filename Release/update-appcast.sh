@@ -81,6 +81,23 @@ sed -i '' \
     's#sparkle:fullReleaseNotesLink#sparkle:releaseNotesLink#g' \
     "$generated_appcast"
 
+# generate_appcast rewrites the current item and may discard surrounding
+# comments or an existing per-item release-notes link. Restore both pieces so
+# every generated feed remains readable and Sparkle can show the changelog.
+RILMAZAFONE_RELEASE_VERSION="$version" \
+RILMAZAFONE_RELEASE_NOTES_URL="$release_notes_url" \
+perl -0pi -e '
+    my $version = quotemeta($ENV{"RILMAZAFONE_RELEASE_VERSION"});
+    my $url = $ENV{"RILMAZAFONE_RELEASE_NOTES_URL"};
+    s{(<item>\s*<title>$version</title>.*?)(\s*</item>)}{
+        my ($item, $close) = ($1, $2);
+        $item =~ /<sparkle:releaseNotesLink>/
+            ? "$item$close"
+            : "$item\n            <sparkle:releaseNotesLink>$url</sparkle:releaseNotesLink>$close";
+    }gse;
+    s{(?<!RELEASE -->\n        )<item>\n            <title>([^<]+)</title>}{<!-- $1 RELEASE -->\n        <item>\n            <title>$1</title>}g;
+' "$generated_appcast"
+
 expected_version="<sparkle:shortVersionString>$version</sparkle:shortVersionString>"
 expected_download="$download_prefix$dmg_name"
 
@@ -88,9 +105,16 @@ grep -F "$expected_version" "$generated_appcast" >/dev/null \
     || fail "Generated appcast does not contain version $version."
 grep -F "$expected_download" "$generated_appcast" >/dev/null \
     || fail "Generated appcast does not contain the GitHub DMG URL."
-grep -F "<sparkle:releaseNotesLink>$release_notes_url</sparkle:releaseNotesLink>" \
-    "$generated_appcast" >/dev/null \
-    || fail "Generated appcast does not contain the changelog link."
+RILMAZAFONE_RELEASE_VERSION="$version" \
+RILMAZAFONE_RELEASE_NOTES_URL="$release_notes_url" \
+perl -0ne '
+    my $version = quotemeta($ENV{"RILMAZAFONE_RELEASE_VERSION"});
+    my $url = quotemeta($ENV{"RILMAZAFONE_RELEASE_NOTES_URL"});
+    exit(/<item>\s*<title>$version<\/title>.*?<sparkle:releaseNotesLink>$url<\/sparkle:releaseNotesLink>.*?<\/item>/s ? 0 : 1);
+' "$generated_appcast" \
+    || fail "Generated appcast item $version does not contain the changelog link."
+grep -F "<!-- $version RELEASE -->" "$generated_appcast" >/dev/null \
+    || fail "Generated appcast does not contain the $version release separator."
 grep -F 'sparkle:edSignature=' "$generated_appcast" >/dev/null \
     || fail "Generated appcast does not contain a Sparkle signature."
 
