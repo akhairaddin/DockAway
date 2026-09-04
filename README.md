@@ -7,6 +7,14 @@
 A tiny macOS menu-bar utility that keeps your Dock out of the way. It shows the Dock on an empty desktop and normally hides it when an app window occupies the active display. Applications you add to the blacklist can keep the Dock shown while they are in front.
 
 <p align="center">
+  <a href="https://github.com/akhairaddin/DockAway/releases/latest">Install</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#privacy">Privacy</a> ·
+  <a href="changelog.html">Changelog</a> ·
+  <a href="https://github.com/akhairaddin/DockAway/issues">Contact</a>
+</p>
+
+<p align="center">
   <img src="DockAway/docs/DockAwayMenu.png" alt="DockAway menu and application blacklist" width="620">
 </p>
 
