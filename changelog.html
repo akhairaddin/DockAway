@@ -8,6 +8,23 @@
     </style>
 </head>
 <body>
+    <h3>Version 1.2 <span style="font-weight: normal;">(9-4-26)</span></h3>
+    <ul>
+        <li><b>A Proper DockAway Welcome:</b> First launch now opens a guided setup for Input Monitoring and Accessibility. Permission states update live, Launch at Login can be configured before starting, and the blue Continue action becomes available as soon as both permissions are ready.</li>
+        <li><b>Seamless Input Monitoring Setup:</b> DockAway asks you to choose “Later” when macOS offers to quit, keeps checking the permission while System Settings is open, and performs the required restart after Continue is pressed. Turning Input Monitoring back off immediately returns the setup step to its incomplete state.</li>
+        <li><b>Cleaner Permission Requests:</b> Permission actions open the correct native System Settings panes directly, avoiding an unnecessary additional device-control prompt.</li>
+        <li><b>Live Permission Recovery:</b> If Accessibility or Input Monitoring is revoked while DockAway is running, monitoring pauses safely and the menu immediately identifies what is missing. Gentle green rings draw attention to Resume, which reopens the guided setup instead of leaving the user at a one-off alert.</li>
+        <li><b>Polished Permission Feedback:</b> Permission circles transition smoothly between gray and green. White checkmarks draw on only after access is granted and draw off before the granted state disappears. Launch at Login and menu checkmarks animate independently so their surrounding controls remain steady.</li>
+        <li><b>A Carefully Paced Entrance:</b> The onboarding window eases into place before its larger app icon, welcome, introduction, and remaining controls fade in from above as distinct stages. The icon receives a diagonal light sweep before the next stage and can be clicked to replay the shine. All entrance motion respects Reduce Motion.</li>
+        <li><b>A Welcome With Personality:</b> The welcome hand gives a smooth wrist-led wave every ten seconds. Click it and it expands and settles back like a tiny high five.</li>
+        <li><b>A More Celebratory Start:</b> Successful setup now produces a compact, centered menu-bar confirmation with a smooth fan of confetti that launches diagonally beyond the popover, arcs naturally, and falls away. Clicking the party popper launches another burst.</li>
+        <li><b>More Responsive Blacklist Controls:</b> Application rows can be clicked across their full width, checkmarks update without flashing, and Remove All activates or grays out immediately as the blacklist changes. Clearing the blacklist updates every visible row without closing and reopening the menu.</li>
+        <li><b>Refined Menu Details:</b> Update Frequency is more compact, menu text and symbols share cleaner alignment, checkbox hit targets are easier to use, and animated checkmarks stay crisp without flashing their rows or labels.</li>
+        <li><b>Updates Enabled From the Start:</b> Daily update checks and Check at Launch are now enabled by default for new users. Both remain independently configurable, and existing preferences are preserved.</li>
+        <li><b>Updated Documentation:</b> The README now includes quick navigation, first-launch instructions, live permission-recovery behavior, and clearer blacklist guidance.</li>
+    </ul>
+    <hr>
+
     <h3>Version 1.1.9 <span style="font-weight: normal;">(8-31-26)</span></h3>
     <ul>
         <li><b>Introducing Dock Settings:</b> The Dock controls you used to need another app for are now built right into DockAway. No Terminal side quests required. Open one beautifully organized menu to choose the Dock's position, control how quickly it moves, and decide how long it waits before appearing.

@@ -1,4 +1,6 @@
 import Cocoa
+import IOKit.hid
+import IOKit.hidsystem
 import QuartzCore
 import ServiceManagement
 import Sparkle
@@ -275,12 +277,199 @@ private final class NonHitTestingImageView: NSImageView {
     }
 }
 
+private final class AppIconShineView: NSView {
+    private let maskImage: NSImage
+    private let iconMaskLayer = CALayer()
+    private let shineLayer = CAGradientLayer()
+
+    init(maskImage: NSImage) {
+        self.maskImage = maskImage
+        super.init(frame: .zero)
+
+        wantsLayer = true
+        layer?.masksToBounds = true
+
+        shineLayer.colors = [
+            NSColor.clear.cgColor,
+            NSColor.white.withAlphaComponent(0.42).cgColor,
+            NSColor.clear.cgColor
+        ]
+        shineLayer.locations = [0, 0.5, 1]
+        shineLayer.startPoint = CGPoint(x: 1, y: 1)
+        shineLayer.endPoint = CGPoint(x: 2, y: 2)
+        shineLayer.opacity = 0
+
+        layer?.addSublayer(shineLayer)
+        layer?.mask = iconMaskLayer
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+
+        var imageRect = bounds
+        let scale = window?.backingScaleFactor
+            ?? NSScreen.main?.backingScaleFactor
+            ?? 2
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shineLayer.frame = bounds
+        iconMaskLayer.frame = bounds
+        iconMaskLayer.contents = maskImage.cgImage(
+            forProposedRect: &imageRect,
+            context: nil,
+            hints: nil
+        )
+        iconMaskLayer.contentsGravity = .resizeAspect
+        iconMaskLayer.contentsScale = scale
+        CATransaction.commit()
+    }
+
+    func play(after delay: TimeInterval) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.window != nil else { return }
+            self.layoutSubtreeIfNeeded()
+
+            let startPoint = CABasicAnimation(keyPath: "startPoint")
+            startPoint.fromValue = CGPoint(x: -1, y: -1)
+            startPoint.toValue = CGPoint(x: 1, y: 1)
+
+            let endPoint = CABasicAnimation(keyPath: "endPoint")
+            endPoint.fromValue = CGPoint(x: 0, y: 0)
+            endPoint.toValue = CGPoint(x: 2, y: 2)
+
+            let opacity = CAKeyframeAnimation(keyPath: "opacity")
+            opacity.values = [0, 1, 1, 0]
+            opacity.keyTimes = [0, 0.12, 0.78, 1]
+
+            let shine = CAAnimationGroup()
+            shine.animations = [startPoint, endPoint, opacity]
+            shine.duration = 1.28
+            shine.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+            self.shineLayer.removeAnimation(forKey: "appIconShine")
+            self.shineLayer.add(shine, forKey: "appIconShine")
+        }
+    }
+
+    @objc func replay(_ sender: Any?) {
+        play(after: 0)
+    }
+}
+
+private final class PermissionAttentionRingView: NSView {
+    private let ringLayers = (0..<2).map { _ in CAShapeLayer() }
+    private var isEmitting = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        for ringLayer in ringLayers {
+            ringLayer.fillColor = NSColor.clear.cgColor
+            ringLayer.strokeColor = NSColor.systemGreen.withAlphaComponent(0.68).cgColor
+            ringLayer.lineWidth = 1.15
+            ringLayer.opacity = 0
+            layer?.addSublayer(ringLayer)
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for ringLayer in ringLayers {
+            ringLayer.frame = bounds
+            ringLayer.path = CGPath(
+                ellipseIn: bounds.insetBy(dx: 4, dy: 4),
+                transform: nil
+            )
+        }
+        CATransaction.commit()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateEmissionAnimation()
+    }
+
+    func setEmitting(_ emitting: Bool) {
+        guard isEmitting != emitting else { return }
+        isEmitting = emitting
+        updateEmissionAnimation()
+    }
+
+    private func updateEmissionAnimation() {
+        guard
+            isEmitting,
+            window != nil,
+            !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        else {
+            for ringLayer in ringLayers {
+                ringLayer.removeAnimation(forKey: "permissionAttentionRing")
+                ringLayer.opacity = 0
+            }
+            return
+        }
+
+        guard ringLayers.contains(where: {
+            $0.animation(forKey: "permissionAttentionRing") == nil
+        }) else { return }
+
+        let duration: CFTimeInterval = 2.4
+        let interval = duration / Double(ringLayers.count)
+        let timelineStart = CACurrentMediaTime()
+
+        for (index, ringLayer) in ringLayers.enumerated() {
+            ringLayer.removeAnimation(forKey: "permissionAttentionRing")
+            ringLayer.opacity = 0
+
+            let scale = CABasicAnimation(keyPath: "transform.scale")
+            scale.fromValue = 0.82
+            scale.toValue = 1.38
+
+            let opacity = CAKeyframeAnimation(keyPath: "opacity")
+            opacity.values = [0, 0.52, 0]
+            opacity.keyTimes = [0, 0.16, 1]
+
+            let emission = CAAnimationGroup()
+            emission.animations = [scale, opacity]
+            emission.duration = duration
+            emission.beginTime = timelineStart + (Double(index) * interval)
+            emission.repeatCount = .infinity
+            emission.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            emission.fillMode = .backwards
+            ringLayer.add(emission, forKey: "permissionAttentionRing")
+        }
+    }
+}
+
 private final class DockAwayStatusView: NSView {
     private let contentView = NSView()
     private let statusDot = PulsingStatusDotView(frame: .zero)
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let labelStack = NSStackView()
+    private let permissionAttentionView = PermissionAttentionRingView(frame: .zero)
     private let pauseResumeImageView = NonHitTestingImageView()
     private var displayedActiveState: Bool?
     let pauseResumeButton = NSButton()
@@ -354,9 +543,11 @@ private final class DockAwayStatusView: NSView {
 
         pauseResumeImageView.translatesAutoresizingMaskIntoConstraints = false
         pauseResumeImageView.imageScaling = .scaleProportionallyDown
+        permissionAttentionView.translatesAutoresizingMaskIntoConstraints = false
 
         contentView.addSubview(statusDot)
         contentView.addSubview(labelStack)
+        contentView.addSubview(permissionAttentionView)
         contentView.addSubview(pauseResumeButton)
         contentView.addSubview(pauseResumeImageView)
 
@@ -374,6 +565,11 @@ private final class DockAwayStatusView: NSView {
             pauseResumeButton.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             pauseResumeButton.widthAnchor.constraint(equalToConstant: 22),
             pauseResumeButton.heightAnchor.constraint(equalToConstant: 22),
+
+            permissionAttentionView.centerXAnchor.constraint(equalTo: pauseResumeButton.centerXAnchor),
+            permissionAttentionView.centerYAnchor.constraint(equalTo: pauseResumeButton.centerYAnchor),
+            permissionAttentionView.widthAnchor.constraint(equalToConstant: 34),
+            permissionAttentionView.heightAnchor.constraint(equalToConstant: 34),
 
             pauseResumeImageView.centerXAnchor.constraint(equalTo: pauseResumeButton.centerXAnchor),
             pauseResumeImageView.centerYAnchor.constraint(equalTo: pauseResumeButton.centerYAnchor),
@@ -405,6 +601,11 @@ private final class DockAwayStatusView: NSView {
             : active
             ? (status == "Desktop" ? "Desktop" : "App: \(status)")
             : inactiveDetail
+        let permissionRequired = !active
+            && !warning
+            && inactiveTitle == "Permission Required"
+
+        permissionAttentionView.setEmitting(permissionRequired)
 
         guard displayedActiveState != active
             || titleLabel.stringValue != title
@@ -721,42 +922,89 @@ private final class DockSettingSliderView: NSView {
 
 private final class DockSettingPersistenceRowView: NSView {
     private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let indicatorBaseImageView = NonHitTestingImageView()
+    private let indicatorMarkImageView = NonHitTestingImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
     private let changeHandler: (Bool) -> Void
+    private let itemIcon: NSImage?
+    private var displayedIsOn: Bool?
+    private var controlEnabled = true
 
     init(
         title: String,
         isOn: Bool,
         width: CGFloat = 230,
         leadingInset: CGFloat = 18,
+        titleLeadingAdjustment: CGFloat = 0,
+        fullRowHitTarget: Bool = true,
         icon: NSImage? = nil,
         changeHandler: @escaping (Bool) -> Void
     ) {
+        itemIcon = icon?.copy() as? NSImage
         self.changeHandler = changeHandler
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: 26))
         wantsLayer = true
 
         checkbox.title = title
-        if let icon = icon?.copy() as? NSImage {
-            icon.size = NSSize(width: 16, height: 16)
-            let attachment = NSTextAttachment()
-            attachment.image = icon
-            attachment.bounds = NSRect(x: 0, y: -3, width: 16, height: 16)
-            let attributedTitle = NSMutableAttributedString(attachment: attachment)
-            attributedTitle.append(NSAttributedString(string: "  \(title)"))
-            checkbox.attributedTitle = attributedTitle
-        }
         checkbox.state = isOn ? .on : .off
         checkbox.target = self
         checkbox.action = #selector(toggleCheckbox(_:))
         checkbox.focusRingType = .none
+        checkbox.isTransparent = true
         checkbox.translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel.font = checkbox.font
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.setAccessibilityElement(false)
+        updateTitle(title)
+
+        for imageView in [indicatorBaseImageView, indicatorMarkImageView] {
+            imageView.imageScaling = .scaleProportionallyDown
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            imageView.setAccessibilityElement(false)
+        }
+        indicatorMarkImageView.wantsLayer = true
+
+        addSubview(indicatorBaseImageView)
+        addSubview(indicatorMarkImageView)
+        addSubview(titleLabel)
         addSubview(checkbox)
 
-        NSLayoutConstraint.activate([
-            checkbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingInset),
-            checkbox.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            checkbox.centerYAnchor.constraint(equalTo: centerYAnchor)
-        ])
+        var rowConstraints: [NSLayoutConstraint] = [
+            checkbox.leadingAnchor.constraint(equalTo: leadingAnchor),
+            checkbox.topAnchor.constraint(equalTo: topAnchor),
+            checkbox.bottomAnchor.constraint(equalTo: bottomAnchor),
+            indicatorBaseImageView.leadingAnchor.constraint(
+                equalTo: leadingAnchor,
+                constant: leadingInset
+            ),
+            indicatorBaseImageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            indicatorBaseImageView.widthAnchor.constraint(equalToConstant: 20),
+            indicatorBaseImageView.heightAnchor.constraint(equalToConstant: 20),
+            indicatorMarkImageView.centerXAnchor.constraint(equalTo: indicatorBaseImageView.centerXAnchor),
+            indicatorMarkImageView.centerYAnchor.constraint(equalTo: indicatorBaseImageView.centerYAnchor),
+            indicatorMarkImageView.widthAnchor.constraint(equalTo: indicatorBaseImageView.widthAnchor),
+            indicatorMarkImageView.heightAnchor.constraint(equalTo: indicatorBaseImageView.heightAnchor),
+            titleLabel.leadingAnchor.constraint(
+                equalTo: indicatorBaseImageView.trailingAnchor,
+                constant: 6 + titleLeadingAdjustment
+            ),
+            titleLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: trailingAnchor,
+                constant: -12
+            ),
+            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ]
+        rowConstraints.append(
+            fullRowHitTarget
+                ? checkbox.trailingAnchor.constraint(equalTo: trailingAnchor)
+                : checkbox.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 16)
+        )
+        NSLayoutConstraint.activate(rowConstraints)
+
+        updateIndicatorImages()
+        setIndicatorState(isOn, animated: false)
     }
 
     required init?(coder: NSCoder) {
@@ -764,48 +1012,171 @@ private final class DockSettingPersistenceRowView: NSView {
     }
 
     func setOn(_ isOn: Bool) {
-        checkbox.state = isOn ? .on : .off
+        setIndicatorState(isOn, animated: true)
     }
 
     func setTitle(_ title: String) {
-        checkbox.title = title
+        updateTitle(title)
     }
 
     func setControlEnabled(_ enabled: Bool) {
+        controlEnabled = enabled
         checkbox.isEnabled = enabled
-    }
-
-    func animationSnapshotImage() -> NSImage? {
-        layoutSubtreeIfNeeded()
-        let originalTitle = checkbox.title
-        let originalAttributedTitle = checkbox.attributedTitle
-        let coloredTitle = NSMutableAttributedString(
-            attributedString: originalAttributedTitle.length > 0
-                ? originalAttributedTitle
-                : NSAttributedString(string: originalTitle)
-        )
-        coloredTitle.addAttribute(
-            .foregroundColor,
-            value: NSColor.white,
-            range: NSRange(location: 0, length: coloredTitle.length)
-        )
-        checkbox.attributedTitle = coloredTitle
-        defer {
-            checkbox.title = originalTitle
-            checkbox.attributedTitle = originalAttributedTitle
-        }
-
-        guard let representation = bitmapImageRepForCachingDisplay(
-            in: bounds
-        ) else { return nil }
-        cacheDisplay(in: bounds, to: representation)
-        let image = NSImage(size: bounds.size)
-        image.addRepresentation(representation)
-        return image
+        titleLabel.alphaValue = enabled ? 1 : 0.45
+        indicatorBaseImageView.alphaValue = enabled ? 1 : 0.45
+        guard let markLayer = indicatorMarkImageView.layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        markLayer.opacity = displayedIsOn == true
+            ? (enabled ? 1 : 0.45)
+            : 0
+        CATransaction.commit()
     }
 
     @objc private func toggleCheckbox(_ sender: NSButton) {
-        changeHandler(sender.state == .on)
+        let requestedState = sender.state == .on
+        let previousDisplayedState = displayedIsOn
+        changeHandler(requestedState)
+
+        // Model-backed rows refresh synchronously through setOn(_:). Blacklist
+        // rows refresh on the next run-loop turn, so reflect their accepted
+        // native checkbox state here without disturbing radio-style rows.
+        if displayedIsOn == previousDisplayedState,
+           (checkbox.state == .on) == requestedState {
+            setIndicatorState(requestedState, animated: true)
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateIndicatorImages()
+    }
+
+    private func updateTitle(_ title: String) {
+        // Keep the native checkbox as the interaction and accessibility
+        // element. The visible title is rendered by titleLabel so its column
+        // can be aligned independently from the checkbox glyph.
+        checkbox.title = ""
+        checkbox.setAccessibilityLabel(title)
+
+        guard let icon = itemIcon?.copy() as? NSImage else {
+            titleLabel.stringValue = title
+            return
+        }
+
+        icon.size = NSSize(width: 16, height: 16)
+        let attachment = NSTextAttachment()
+        attachment.image = icon
+        attachment.bounds = NSRect(x: 0, y: -3, width: 16, height: 16)
+        let attributedTitle = NSMutableAttributedString(attachment: attachment)
+        attributedTitle.append(NSAttributedString(string: "  \(title)"))
+        titleLabel.attributedStringValue = attributedTitle
+    }
+
+    private func updateIndicatorImages() {
+        let usesAppSymbol = NSImage(
+            systemSymbolName: "checkmark.app.fill",
+            accessibilityDescription: nil
+        ) != nil
+        let baseSymbolName = usesAppSymbol ? "app.fill" : "square.fill"
+        let markSymbolName = usesAppSymbol
+            ? "checkmark.app.fill"
+            : "checkmark.square.fill"
+        let sizeConfiguration = NSImage.SymbolConfiguration(
+            pointSize: 19,
+            weight: .medium
+        )
+        let baseConfiguration = sizeConfiguration.applying(
+            NSImage.SymbolConfiguration(paletteColors: [.tertiaryLabelColor])
+        )
+        let markConfiguration = sizeConfiguration.applying(
+            NSImage.SymbolConfiguration(
+                paletteColors: [.white, .clear]
+            )
+        )
+
+        indicatorBaseImageView.image = NSImage(
+            systemSymbolName: baseSymbolName,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(baseConfiguration)
+        indicatorMarkImageView.image = NSImage(
+            systemSymbolName: markSymbolName,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(markConfiguration)
+    }
+
+    private func setIndicatorState(_ isOn: Bool, animated: Bool) {
+        let previousState = displayedIsOn
+        checkbox.state = isOn ? .on : .off
+        guard previousState != isOn else { return }
+        displayedIsOn = isOn
+
+        guard let markLayer = indicatorMarkImageView.layer else {
+            indicatorMarkImageView.alphaValue = isOn ? 1 : 0
+            return
+        }
+
+        let finalOpacity: Float = isOn ? (controlEnabled ? 1 : 0.45) : 0
+        let animationKey = "checkboxCheckmarkToggle"
+        let presentationLayer = markLayer.presentation()
+        let animationWasRunning = markLayer.animation(forKey: animationKey) != nil
+        let startingOpacity = presentationLayer?.opacity ?? markLayer.opacity
+        let presentedTransform = presentationLayer?.transform ?? markLayer.transform
+        let presentedScale = max(
+            0.01,
+            hypot(presentedTransform.m11, presentedTransform.m12)
+        )
+        let shouldAnimate = animated
+            && previousState != nil
+            && window != nil
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        markLayer.removeAnimation(forKey: animationKey)
+        markLayer.opacity = finalOpacity
+        markLayer.transform = CATransform3DIdentity
+
+        guard shouldAnimate else {
+            CATransaction.commit()
+            return
+        }
+
+        let opacity = CAKeyframeAnimation(keyPath: "opacity")
+        let scale = CAKeyframeAnimation(keyPath: "transform.scale")
+        let group = CAAnimationGroup()
+        let duration: CFTimeInterval
+
+        if isOn {
+            opacity.values = [startingOpacity, finalOpacity * 0.72, finalOpacity]
+            opacity.keyTimes = [0, 0.42, 1]
+            scale.values = [
+                animationWasRunning ? presentedScale : 0.86,
+                1.025,
+                1.0
+            ]
+            scale.keyTimes = [0, 0.68, 1]
+            scale.timingFunctions = [
+                CAMediaTimingFunction(name: .easeOut),
+                CAMediaTimingFunction(name: .easeInEaseOut)
+            ]
+            duration = 0.30
+        } else {
+            opacity.values = [startingOpacity, 0]
+            opacity.keyTimes = [0, 1]
+            scale.values = [presentedScale, 0.94]
+            scale.keyTimes = [0, 1]
+            scale.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut)]
+            duration = 0.19
+        }
+
+        opacity.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        opacity.duration = duration
+        scale.duration = duration
+        group.animations = [opacity, scale]
+        group.duration = duration
+        markLayer.add(group, forKey: animationKey)
+        CATransaction.commit()
     }
 }
 
@@ -927,7 +1298,7 @@ private final class DockSettingSectionHeaderView: NSView {
 private final class BlacklistActionMenuItemView: NSView {
     private let highlightView = NSView()
     private let titleLabel: NSTextField
-    private let controlEnabled: Bool
+    private var controlEnabled: Bool
     private let actionHandler: () -> Void
     private var trackingAreaReference: NSTrackingArea?
 
@@ -954,7 +1325,7 @@ private final class BlacklistActionMenuItemView: NSView {
         addSubview(titleLabel)
         NSLayoutConstraint.activate([
             highlightView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            highlightView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 8),
+            highlightView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             highlightView.topAnchor.constraint(equalTo: topAnchor, constant: 1),
             highlightView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 22),
@@ -1000,6 +1371,13 @@ private final class BlacklistActionMenuItemView: NSView {
         actionHandler()
     }
 
+    func setControlEnabled(_ enabled: Bool) {
+        controlEnabled = enabled
+        setHighlighted(false)
+        titleLabel.textColor = enabled ? .labelColor : .tertiaryLabelColor
+        setAccessibilityEnabled(enabled)
+    }
+
     private func setHighlighted(_ highlighted: Bool) {
         highlightView.layer?.backgroundColor = highlighted
             ? NSColor.selectedContentBackgroundColor.cgColor
@@ -1043,15 +1421,13 @@ private final class BlacklistHelpMenuItemView: NSView {
         addSubview(iconView)
         NSLayoutConstraint.activate([
             highlightView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            // A custom NSMenuItem view ends before the menu's native trailing
-            // gutter. Extend through that gutter so both visible margins match.
-            highlightView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 8),
+            highlightView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             highlightView.topAnchor.constraint(equalTo: topAnchor, constant: 2),
             highlightView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 22),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: iconView.leadingAnchor, constant: -8),
             titleLabel.centerYAnchor.constraint(equalTo: highlightView.centerYAnchor),
-            iconView.trailingAnchor.constraint(equalTo: highlightView.trailingAnchor, constant: -26),
+            iconView.trailingAnchor.constraint(equalTo: highlightView.trailingAnchor, constant: -10),
             iconView.centerYAnchor.constraint(equalTo: highlightView.centerYAnchor),
             iconView.widthAnchor.constraint(equalToConstant: 16),
             iconView.heightAnchor.constraint(equalToConstant: 16)
@@ -1169,15 +1545,624 @@ private final class BlacklistHelpMenuItemView: NSView {
     }
 }
 
+private func laterEmphasizedText(
+    _ text: String,
+    font: NSFont,
+    color: NSColor,
+    alignment: NSTextAlignment = .left
+) -> NSAttributedString {
+    let paragraphStyle = NSMutableParagraphStyle()
+    paragraphStyle.alignment = alignment
+    let attributedText = NSMutableAttributedString(
+        string: text,
+        attributes: [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: paragraphStyle
+        ]
+    )
+    for phrase in ["“Later”", "“Continue”"] {
+        let range = (text as NSString).range(of: phrase)
+        if range.location != NSNotFound {
+            attributedText.addAttribute(
+                .font,
+                value: NSFont.systemFont(ofSize: font.pointSize, weight: .bold),
+                range: range
+            )
+        }
+    }
+    return attributedText
+}
+
+private final class PermissionSetupRowView: NSView {
+    private let statusCircleImageView = NSImageView()
+    private let statusGrantedCircleImageView = NSImageView()
+    private let statusCheckmarkImageView = NSImageView()
+    private let titleLabel: NSTextField
+    private let detailLabel: NSTextField
+    private let actionButton = NSButton(title: "Allow", target: nil, action: nil)
+    private let requestAction: () -> Void
+    private var grantedState: Bool?
+    private var actionAvailable = true
+    private var checkmarkAnimationGeneration = 0
+    private var circleAnimationGeneration = 0
+
+    init(title: String, detail: String, requestAction: @escaping () -> Void) {
+        titleLabel = NSTextField(labelWithString: title)
+        detailLabel = NSTextField(wrappingLabelWithString: detail)
+        self.requestAction = requestAction
+        super.init(frame: .zero)
+
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.borderWidth = 0.5
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        layer?.backgroundColor = rowBackgroundColor(granted: false).cgColor
+
+        for imageView in [
+            statusCircleImageView,
+            statusGrantedCircleImageView,
+            statusCheckmarkImageView
+        ] {
+            imageView.imageScaling = .scaleProportionallyDown
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            imageView.setAccessibilityElement(false)
+        }
+        statusCircleImageView.image = NSImage(
+            systemSymbolName: "circle",
+            accessibilityDescription: "Permission required"
+        )
+        statusCircleImageView.contentTintColor = .secondaryLabelColor
+        statusGrantedCircleImageView.image = NSImage(
+            systemSymbolName: "circle.fill",
+            accessibilityDescription: "Granted"
+        )
+        statusGrantedCircleImageView.contentTintColor = .systemGreen
+        statusGrantedCircleImageView.alphaValue = 0
+        statusCheckmarkImageView.image = NSImage(
+            systemSymbolName: "checkmark",
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 8.5, weight: .bold)
+        )
+        statusCheckmarkImageView.contentTintColor = .white
+        statusCheckmarkImageView.isHidden = true
+
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.textColor = .labelColor
+
+        let detailFont = NSFont.systemFont(ofSize: 11.5)
+        detailLabel.font = detailFont
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.maximumNumberOfLines = 2
+        detailLabel.attributedStringValue = laterEmphasizedText(
+            detail,
+            font: detailFont,
+            color: .secondaryLabelColor
+        )
+
+        let textStack = NSStackView(views: [titleLabel, detailLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 3
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+
+        actionButton.bezelStyle = .rounded
+        actionButton.controlSize = .large
+        actionButton.target = self
+        actionButton.action = #selector(requestPermission)
+        actionButton.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(statusCircleImageView)
+        addSubview(statusGrantedCircleImageView)
+        addSubview(statusCheckmarkImageView)
+        addSubview(textStack)
+        addSubview(actionButton)
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 78),
+            statusCircleImageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            statusCircleImageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            statusCircleImageView.widthAnchor.constraint(equalToConstant: 30),
+            statusCircleImageView.heightAnchor.constraint(equalToConstant: 30),
+            statusGrantedCircleImageView.centerXAnchor.constraint(equalTo: statusCircleImageView.centerXAnchor),
+            statusGrantedCircleImageView.centerYAnchor.constraint(equalTo: statusCircleImageView.centerYAnchor),
+            statusGrantedCircleImageView.widthAnchor.constraint(equalTo: statusCircleImageView.widthAnchor),
+            statusGrantedCircleImageView.heightAnchor.constraint(equalTo: statusCircleImageView.heightAnchor),
+            statusCheckmarkImageView.centerXAnchor.constraint(equalTo: statusCircleImageView.centerXAnchor),
+            statusCheckmarkImageView.centerYAnchor.constraint(equalTo: statusCircleImageView.centerYAnchor),
+            statusCheckmarkImageView.widthAnchor.constraint(equalToConstant: 10),
+            statusCheckmarkImageView.heightAnchor.constraint(equalToConstant: 10),
+            textStack.leadingAnchor.constraint(equalTo: statusCircleImageView.trailingAnchor, constant: 11),
+            textStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            textStack.trailingAnchor.constraint(lessThanOrEqualTo: actionButton.leadingAnchor, constant: -12),
+            actionButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            actionButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            actionButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 88)
+        ])
+
+        setGranted(false)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func setGranted(_ granted: Bool) {
+        guard grantedState != granted else { return }
+        let shouldAnimate = grantedState != nil
+        grantedState = granted
+
+        guard shouldAnimate else {
+            applyGrantedAppearance(granted)
+            return
+        }
+
+        let oldBackgroundColor = layer?.backgroundColor
+        let newBackgroundColor = rowBackgroundColor(granted: granted).cgColor
+        let backgroundAnimation = CABasicAnimation(keyPath: "backgroundColor")
+        backgroundAnimation.fromValue = oldBackgroundColor
+        backgroundAnimation.toValue = newBackgroundColor
+        backgroundAnimation.duration = 0.36
+        backgroundAnimation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer?.add(backgroundAnimation, forKey: "permissionBackgroundTransition")
+        layer?.backgroundColor = newBackgroundColor
+
+        if granted {
+            applyCircleAppearance(false)
+            setCheckmarkVisible(false, animated: false)
+        } else {
+            applyCircleAppearance(true)
+            setCheckmarkVisible(true, animated: false)
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.14
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            actionButton.animator().alphaValue = 0.55
+        } completionHandler: { [weak self] in
+            guard let self, self.grantedState == granted else { return }
+            self.applyActionAppearance(granted)
+            if granted {
+                self.transitionCircleAppearance(toGranted: true) { [weak self] in
+                    guard let self, self.grantedState == true else { return }
+                    self.setCheckmarkVisible(true, animated: true)
+                }
+            } else {
+                self.setCheckmarkVisible(false, animated: true) { [weak self] in
+                    guard let self, self.grantedState == false else { return }
+                    self.transitionCircleAppearance(toGranted: false)
+                }
+            }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                self.actionButton.animator().alphaValue = 1
+            }
+        }
+    }
+
+    func setActionAvailable(_ available: Bool) {
+        guard actionAvailable != available else { return }
+        actionAvailable = available
+        applyGrantedAppearance(grantedState == true)
+    }
+
+    private func applyGrantedAppearance(
+        _ granted: Bool,
+        animateCheckmark: Bool = false
+    ) {
+        applyCircleAppearance(granted)
+        setCheckmarkVisible(granted, animated: animateCheckmark)
+        applyActionAppearance(granted)
+    }
+
+    private func applyCircleAppearance(_ granted: Bool) {
+        circleAnimationGeneration += 1
+        statusCircleImageView.alphaValue = granted ? 0 : 1
+        statusGrantedCircleImageView.alphaValue = granted ? 1 : 0
+    }
+
+    private func transitionCircleAppearance(
+        toGranted granted: Bool,
+        completion: (() -> Void)? = nil
+    ) {
+        circleAnimationGeneration += 1
+        let generation = circleAnimationGeneration
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+        guard !reduceMotion else {
+            applyCircleAppearance(granted)
+            completion?()
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.40
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            statusCircleImageView.animator().alphaValue = granted ? 0 : 1
+            statusGrantedCircleImageView.animator().alphaValue = granted ? 1 : 0
+        } completionHandler: { [weak self] in
+            guard
+                let self,
+                self.grantedState == granted,
+                self.circleAnimationGeneration == generation
+            else { return }
+            self.statusCircleImageView.alphaValue = granted ? 0 : 1
+            self.statusGrantedCircleImageView.alphaValue = granted ? 1 : 0
+            completion?()
+        }
+    }
+
+    private func applyActionAppearance(_ granted: Bool) {
+        actionButton.title = granted ? "Granted" : (actionAvailable ? "Allow" : "Next")
+        actionButton.isEnabled = !granted && actionAvailable
+        actionButton.alphaValue = granted || actionAvailable ? 1 : 0.55
+        layer?.backgroundColor = rowBackgroundColor(granted: granted).cgColor
+    }
+
+    private func setCheckmarkVisible(
+        _ visible: Bool,
+        animated: Bool,
+        completion: (() -> Void)? = nil
+    ) {
+        checkmarkAnimationGeneration += 1
+        let generation = checkmarkAnimationGeneration
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+        guard animated, !reduceMotion else {
+            statusCheckmarkImageView.isHidden = !visible
+            statusCheckmarkImageView.layer?.mask = nil
+            completion?()
+            return
+        }
+
+        statusCheckmarkImageView.isHidden = false
+        statusCheckmarkImageView.wantsLayer = true
+        guard let markLayer = statusCheckmarkImageView.layer else {
+            completion?()
+            return
+        }
+        let markSize = markLayer.bounds.size
+        let mask = CALayer()
+        mask.backgroundColor = NSColor.white.cgColor
+        mask.anchorPoint = CGPoint(x: 0, y: 0.5)
+        mask.position = CGPoint(x: 0, y: markSize.height / 2)
+        let fullBounds = CGRect(
+            x: 0,
+            y: -markSize.height / 2,
+            width: markSize.width,
+            height: markSize.height
+        )
+        let hiddenBounds = CGRect(
+            x: 0,
+            y: -markSize.height / 2,
+            width: 0,
+            height: markSize.height
+        )
+        mask.bounds = visible ? hiddenBounds : fullBounds
+        markLayer.mask = mask
+
+        let reveal = CABasicAnimation(keyPath: "bounds.size.width")
+        reveal.fromValue = visible ? 0 : markSize.width
+        reveal.toValue = visible ? markSize.width : 0
+        reveal.duration = 0.38
+        reveal.timingFunction = CAMediaTimingFunction(
+            controlPoints: 0.2,
+            0.75,
+            0.25,
+            1
+        )
+        mask.bounds = visible ? fullBounds : hiddenBounds
+        mask.add(reveal, forKey: "checkmarkDraw")
+
+        guard !visible else {
+            completion?()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + reveal.duration) { [weak self] in
+            guard
+                let self,
+                self.checkmarkAnimationGeneration == generation,
+                self.grantedState == false
+            else { return }
+            self.statusCheckmarkImageView.isHidden = true
+            completion?()
+        }
+    }
+
+    private func rowBackgroundColor(granted: Bool) -> NSColor {
+        granted
+            ? NSColor.systemGreen.withAlphaComponent(0.08)
+            : NSColor.controlBackgroundColor.withAlphaComponent(0.38)
+    }
+
+    @objc private func requestPermission() {
+        requestAction()
+    }
+}
+
+private final class PermissionSetupView: NSView {
+    private let accessibilityRow: PermissionSetupRowView
+    private let inputMonitoringRow: PermissionSetupRowView
+    private let instructionLabel = NSTextField(
+        wrappingLabelWithString: "Grant both permissions, then return here to continue."
+    )
+    private var setupStateCode = 0
+
+    var instructionView: NSTextField {
+        instructionLabel
+    }
+
+    init(
+        requestAccessibility: @escaping () -> Void,
+        requestInputMonitoring: @escaping () -> Void
+    ) {
+        accessibilityRow = PermissionSetupRowView(
+            title: "Accessibility",
+            detail: "Detects window changes and manages Dock visibility.",
+            requestAction: requestAccessibility
+        )
+        inputMonitoringRow = PermissionSetupRowView(
+            title: "Input Monitoring",
+            detail: "Enable it, then choose “Later” when macOS asks to quit.",
+            requestAction: requestInputMonitoring
+        )
+        super.init(frame: NSRect(x: 0, y: 0, width: 460, height: 165))
+
+        instructionLabel.font = .systemFont(ofSize: 11.5)
+        instructionLabel.textColor = .secondaryLabelColor
+        instructionLabel.alignment = .center
+
+        let stack = NSStackView(views: [inputMonitoringRow, accessibilityRow])
+        stack.orientation = .vertical
+        stack.alignment = .width
+        stack.spacing = 9
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    func update(
+        accessibilityGranted: Bool,
+        inputMonitoringGranted: Bool,
+        inputMonitoringRestartPending: Bool,
+        inputMonitoringSettingsOpen: Bool
+    ) {
+        accessibilityRow.setGranted(accessibilityGranted)
+        inputMonitoringRow.setGranted(
+            inputMonitoringGranted || inputMonitoringRestartPending
+        )
+        let inputMonitoringReady = inputMonitoringGranted || inputMonitoringRestartPending
+        accessibilityRow.setActionAvailable(
+            accessibilityGranted || inputMonitoringReady
+        )
+
+        let newStateCode: Int
+        if accessibilityGranted && inputMonitoringGranted {
+            newStateCode = 4
+        } else if accessibilityGranted && inputMonitoringRestartPending {
+            newStateCode = 3
+        } else if inputMonitoringReady {
+            newStateCode = 2
+        } else if inputMonitoringSettingsOpen {
+            newStateCode = 1
+        } else {
+            newStateCode = 0
+        }
+        guard newStateCode != setupStateCode else { return }
+        setupStateCode = newStateCode
+
+        if instructionLabel.alphaValue < 0.01 {
+            applyInstruction(for: newStateCode)
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.14
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            instructionLabel.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            guard let self, self.setupStateCode == newStateCode else { return }
+            self.applyInstruction(for: newStateCode)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                self.instructionLabel.animator().alphaValue = 1
+            }
+        }
+    }
+
+    private func applyInstruction(for stateCode: Int) {
+        switch stateCode {
+        case 0:
+            instructionLabel.stringValue =
+                "Start with Input Monitoring so DockAway can verify it correctly."
+            instructionLabel.textColor = .secondaryLabelColor
+        case 1:
+            let instruction =
+                "After turning DockAway on, choose “Later” in the Quit & Reopen prompt."
+            instructionLabel.attributedStringValue = laterEmphasizedText(
+                instruction,
+                font: NSFont.systemFont(ofSize: 11.5),
+                color: .secondaryLabelColor,
+                alignment: .center
+            )
+        case 2:
+            let instruction =
+                "Perfect. DockAway will restart after “Continue”. Now allow Accessibility."
+            instructionLabel.attributedStringValue = laterEmphasizedText(
+                instruction,
+                font: NSFont.systemFont(ofSize: 11.5),
+                color: .secondaryLabelColor,
+                alignment: .center
+            )
+        case 3:
+            let instruction = "You're all set! Click “Continue” to restart DockAway."
+            instructionLabel.attributedStringValue = laterEmphasizedText(
+                instruction,
+                font: NSFont.systemFont(ofSize: 11.5),
+                color: .systemGreen,
+                alignment: .center
+            )
+        default:
+            instructionLabel.stringValue = "You're all set! DockAway is ready."
+            instructionLabel.textColor = .systemGreen
+        }
+    }
+}
+
+
+private final class OnboardingPrimaryButton: NSButton {
+    private var isMouseDown = false
+    private var isHovered = false
+    private var trackingArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configure()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configure()
+    }
+
+    convenience init(title: String, target: Any?, action: Selector?) {
+        self.init(frame: .zero)
+        self.title = title
+        self.target = target as AnyObject?
+        self.action = action
+        updateVisualState(animated: false)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 88, height: 28)
+    }
+
+    private func configure() {
+        wantsLayer = true
+        isBordered = false
+        focusRingType = .none
+        layer?.cornerRadius = 14
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        updateVisualState(animated: false)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea {
+            removeTrackingArea(trackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        isHovered = true
+        updateVisualState(animated: true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        isHovered = false
+        isMouseDown = false
+        updateVisualState(animated: true)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        isMouseDown = true
+        updateVisualState(animated: false)
+        super.mouseDown(with: event)
+        isMouseDown = false
+        updateVisualState(animated: true)
+    }
+
+    override var isEnabled: Bool {
+        didSet { updateVisualState(animated: true) }
+    }
+
+    override var title: String {
+        didSet { updateVisualState(animated: false) }
+    }
+
+    private func updateVisualState(animated: Bool = true) {
+        guard let layer else { return }
+        let targetBgColor: CGColor
+        let targetTitle: NSAttributedString
+
+        if isEnabled {
+            let baseColor = NSColor.controlAccentColor
+            let color: NSColor
+            if isMouseDown {
+                color = baseColor.blended(withFraction: 0.25, of: .black) ?? baseColor
+            } else if isHovered {
+                color = baseColor.blended(withFraction: 0.15, of: .white) ?? baseColor
+            } else {
+                color = baseColor
+            }
+            targetBgColor = color.cgColor
+            targetTitle = NSAttributedString(
+                string: title,
+                attributes: [
+                    .foregroundColor: NSColor.white,
+                    .font: NSFont.systemFont(ofSize: 13, weight: .semibold)
+                ]
+            )
+        } else {
+            targetBgColor = NSColor.white.withAlphaComponent(0.08).cgColor
+            targetTitle = NSAttributedString(
+                string: title,
+                attributes: [
+                    .foregroundColor: NSColor.white.withAlphaComponent(0.35),
+                    .font: NSFont.systemFont(ofSize: 13, weight: .medium)
+                ]
+            )
+        }
+
+        if animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let anim = CABasicAnimation(keyPath: "backgroundColor")
+            anim.fromValue = layer.backgroundColor
+            anim.toValue = targetBgColor
+            anim.duration = 0.30
+            anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(anim, forKey: "colorTransition")
+        }
+        layer.backgroundColor = targetBgColor
+        attributedTitle = targetTitle
+    }
+}
+
 
 @objc class AppDelegate: NSObject, NSApplicationDelegate {
     private static let ignoredWindowBundleIdentifiersKey = "IgnoredWindowBundleIdentifiers"
-    private static let blacklistGroupSeparatorTag = 9_101
     private static let checkForUpdatesAtLaunchKey = "CheckForUpdatesAtLaunch"
     private static let keepDockSettingsAfterQuitKey = "KeepDockSettingsAfterQuit"
     private static let keepDockPositionAfterQuitKey = "KeepDockPositionAfterQuit"
     private static let keepDockAnimationAfterQuitKey = "KeepDockAnimationAfterQuit"
     private static let keepDockRevealDelayAfterQuitKey = "KeepDockRevealDelayAfterQuit"
+    private static let permissionSetupCompletedKey = "PermissionSetupCompleted"
+    private static let showStartedPopoverAfterRelaunchKey =
+        "ShowStartedPopoverAfterPermissionRelaunch"
     private static let dockPreferencesDomain = "com.apple.dock" as CFString
     private static let dockOrientationKey = "orientation"
     private static let dockAnimationDurationKey = "autohide-time-modifier"
@@ -1272,25 +2257,16 @@ private final class BlacklistHelpMenuItemView: NSView {
         let icon: NSImage?
     }
 
-    private struct BlacklistRowAnimationSnapshot {
-        let item: NSMenuItem
-        let image: NSImage
-        let oldScreenFrame: NSRect
-    }
-
-    private struct BlacklistRowAnimationOverlay {
-        let snapshot: BlacklistRowAnimationSnapshot
-        let view: NonHitTestingImageView
-    }
-
-    private struct BlacklistRowAnimationMovement {
-        let view: NonHitTestingImageView
-        let startFrame: NSRect
-        let endFrame: NSRect
-    }
-
     var isQuitting = false
     private var statusItem: NSStatusItem!
+    private var startedPopover: NSPopover?
+    private var startedPopoverCloseWorkItem: DispatchWorkItem?
+    private var startedPopoverLocalEventMonitor: Any?
+    private var startedPopoverGlobalEventMonitor: Any?
+    private weak var startedPopoverContentView: NSView?
+    private weak var startedPopoverCelebrationButton: NSButton?
+    private var startedPopoverConfettiWindows: [NSPanel] = []
+    private var startedPopoverConfettiCloseWorkItems: [DispatchWorkItem] = []
     private var dockWatcher: DockWatcher!
     private var updaterController: SPUStandardUpdaterController!
     private var updateMenuItem: NSMenuItem!
@@ -1298,12 +2274,8 @@ private final class BlacklistHelpMenuItemView: NSView {
     private var checkForUpdatesAtLaunchItem: NSMenuItem!
     private var availableUpdateVersion: String?
     private var blacklistMenu: NSMenu!
+    private weak var blacklistClearActionView: BlacklistActionMenuItemView?
     private var currentBlacklistBundleIdentifier: String?
-    private var blacklistReorderSetupTimer: Timer?
-    private var blacklistReorderAnimationTimer: Timer?
-    private var blacklistReorderOverlayWindow: NSPanel?
-    private weak var blacklistReorderOverlayParentWindow: NSWindow?
-    private var blacklistReorderHiddenItems = [NSMenuItem]()
     private var dockSettingsMenu: NSMenu!
     private var dockPositionRowView: DockPositionRowView!
     private var dockAnimationSliderView: DockSettingSliderView!
@@ -1321,9 +2293,23 @@ private final class BlacklistHelpMenuItemView: NSView {
     private var accessibilityPermissionMissing = false
     private var inputMonitoringPermissionMissing = false
     private var multitouchUnavailable = false
+    private var permissionSetupInProgress = false
+    private var permissionSetupWindow: NSPanel?
+    private var permissionSetupTimer: Timer?
+    private weak var permissionSetupContinueButton: NSButton?
+    private weak var permissionSetupLaunchAtLoginRowView: DockSettingPersistenceRowView?
+    private var inputMonitoringSettingsVisitInProgress = false
+    private var inputMonitoringSettingsWasFrontmost = false
+    private var inputMonitoringRestartPending = false
+    private var inputMonitoringPermissionProbe: Process?
+    private var inputMonitoringPermissionProbeLastRun = Date.distantPast
+    private var permissionRelaunchScheduled = false
+    private var isPermissionRelaunching = false
     private var isWaitingForAccessibility = false
     private var accessibilityWaitWorkItem: DispatchWorkItem?
     private var inputMonitoringWaitWorkItem: DispatchWorkItem?
+    private var inputMonitoringRegistrationManager: IOHIDManager?
+    private var permissionHealthTimer: Timer?
     
     // The Unix signal trapper
     private var sigtermSource: DispatchSourceSignal?
@@ -1342,10 +2328,20 @@ private final class BlacklistHelpMenuItemView: NSView {
     private var fourFingerStartedInMissionControl = false
     private let multitouch = MultitouchWatcher()
 
+    private var inputMonitoringAccessGranted: Bool {
+        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+    }
+
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         dockAwayDebugLog("🚀 APP LAUNCHED")
         NSApp.setActivationPolicy(.accessory)
+
+        // These are first-run defaults only. UserDefaults preserves any later
+        // choice the user makes in the Update Frequency menu.
+        UserDefaults.standard.register(defaults: [
+            Self.checkForUpdatesAtLaunchKey: true
+        ])
 
         setupSleepAndLockAwareness()
         
@@ -1364,15 +2360,19 @@ private final class BlacklistHelpMenuItemView: NSView {
         // The independent launch toggle can request an immediate silent check.
 
         accessibilityPermissionMissing = !AXIsProcessTrusted()
-        inputMonitoringPermissionMissing = !CGPreflightListenEventAccess()
+        inputMonitoringPermissionMissing = !inputMonitoringAccessGranted
         setupMenuBar()
         requestAccessibilityPermission()
+        startPermissionHealthMonitoring()
         
         // Arm the signal trapper
         setupSignalHandler()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        if !AXIsProcessTrusted(), !accessibilityPermissionMissing {
+            accessibilityPermissionWasRevoked()
+        }
         refreshInputMonitoringPermission()
 
         // A trackpad or private-framework failure can be corrected while
@@ -1396,9 +2396,9 @@ private final class BlacklistHelpMenuItemView: NSView {
             && !isQuitting
     }
 
-    // Input Monitoring improves gesture timing but is not required for the
-    // core Dock watcher. Keep the watcher running while still showing the
-    // user that gesture smoothing needs permission.
+    // Input Monitoring is part of DockAway's required setup for reliable
+    // gesture timing. Keep the core watcher alive only so the menu can guide
+    // the user through restoring the missing permission.
     private var statusAppearsActive: Bool {
         monitoringShouldRun && !inputMonitoringPermissionMissing
     }
@@ -1443,9 +2443,7 @@ private final class BlacklistHelpMenuItemView: NSView {
     }
 
     private var permissionActionTitle: String {
-        accessibilityPermissionMissing
-            ? "Open Accessibility Settings"
-            : "Open Input Monitoring Settings"
+        "Restore Permissions"
     }
 
     // Stops all of DockAway's active monitoring while nobody can interact
@@ -1631,7 +2629,7 @@ private final class BlacklistHelpMenuItemView: NSView {
         if dockWatcher == nil {
             dockWatcher = DockWatcher()
         }
-        inputMonitoringPermissionMissing = !CGPreflightListenEventAccess()
+        inputMonitoringPermissionMissing = !inputMonitoringAccessGranted
         dockWatcher.start()
         startMultitouchPreHide()
         applyStatusIcon(dockVisible: isDockCurrentlyVisible())
@@ -1865,7 +2863,8 @@ private final class BlacklistHelpMenuItemView: NSView {
         let launchAtLoginRowView = DockSettingPersistenceRowView(
             title: "Launch at Login",
             isOn: isLaunchAtLoginEnabled(),
-            leadingInset: 13
+            leadingInset: 11,
+            titleLeadingAdjustment: -3
         ) { [weak self] _ in
             self?.toggleLaunchAtLogin()
         }
@@ -2056,8 +3055,8 @@ private final class BlacklistHelpMenuItemView: NSView {
         let checkForUpdatesAtLaunchRowView = DockSettingPersistenceRowView(
             title: "Check at Launch",
             isOn: UserDefaults.standard.bool(forKey: Self.checkForUpdatesAtLaunchKey),
-            width: 190,
-            leadingInset: 30
+            width: 170,
+            leadingInset: 20
         ) { [weak self] enabled in
             self?.setCheckForUpdatesAtLaunch(enabled)
         }
@@ -2073,8 +3072,8 @@ private final class BlacklistHelpMenuItemView: NSView {
             item.view = DockSettingPersistenceRowView(
                 title: frequency.title,
                 isOn: false,
-                width: 190,
-                leadingInset: 30
+                width: 170,
+                leadingInset: 20
             ) { [weak self] _ in
                 self?.selectUpdateFrequency(frequency)
             }
@@ -2245,14 +3244,14 @@ private final class BlacklistHelpMenuItemView: NSView {
             && revealDelayUsesSystemDefault
         if allDockSettingsUseDefaults {
             restoreDockDefaultsRowView?.setTitle("Using macOS defaults")
-            restoreDockDefaultsRowView?.setOn(true)
             restoreDockDefaultsRowView?.setControlEnabled(false)
+            restoreDockDefaultsRowView?.setOn(true)
         } else {
             restoreDockDefaultsRowView?.setTitle("Restore macOS defaults")
-            restoreDockDefaultsRowView?.setOn(false)
             restoreDockDefaultsRowView?.setControlEnabled(
                 canRestartDock && !resettableKeys.isEmpty
             )
+            restoreDockDefaultsRowView?.setOn(false)
         }
     }
 
@@ -2667,12 +3666,12 @@ private final class BlacklistHelpMenuItemView: NSView {
             identifiers.sorted(),
             forKey: Self.ignoredWindowBundleIdentifiersKey
         )
+        blacklistClearActionView?.setControlEnabled(!identifiers.isEmpty)
         dockWatcher?.updateBlacklist(identifiers)
         dockWatcher?.resetState()
     }
 
     private func rebuildBlacklistMenu() {
-        cancelBlacklistReorderAnimation()
         guard let blacklistMenu else { return }
 
         blacklistMenu.removeAllItems()
@@ -2780,15 +3779,14 @@ private final class BlacklistHelpMenuItemView: NSView {
         blacklistMenu.addItem(chooseItem)
 
         let clearItem = NSMenuItem()
-        clearItem.view = BlacklistActionMenuItemView(
+        let clearActionView = BlacklistActionMenuItemView(
             title: "Remove All",
             isEnabled: !ignoredIdentifiers.isEmpty
-        ) { [weak self, weak blacklistMenu] in
-            blacklistMenu?.cancelTracking()
-            DispatchQueue.main.async {
-                self?.clearBlacklist()
-            }
+        ) { [weak self] in
+            self?.clearBlacklist()
         }
+        clearItem.view = clearActionView
+        blacklistClearActionView = clearActionView
         blacklistMenu.addItem(clearItem)
 
         blacklistMenu.addItem(.separator())
@@ -2824,7 +3822,6 @@ private final class BlacklistHelpMenuItemView: NSView {
 
     private func blacklistGroupSeparator() -> NSMenuItem {
         let separator = NSMenuItem()
-        separator.tag = Self.blacklistGroupSeparatorTag
         separator.isEnabled = false
         separator.view = BlacklistGroupSeparatorView(frame: .zero)
         return separator
@@ -2869,387 +3866,6 @@ private final class BlacklistHelpMenuItemView: NSView {
         }
 
         saveIgnoredWindowBundleIdentifiers(identifiers)
-        DispatchQueue.main.async { [weak self] in
-            self?.reorderBlacklistApplicationItems(using: identifiers)
-        }
-    }
-
-    private func reorderBlacklistApplicationItems(using ignoredIdentifiers: Set<String>) {
-        guard let blacklistMenu else { return }
-
-        cancelBlacklistReorderAnimation()
-
-        let movableItems = blacklistMenu.items.filter { item in
-            guard let bundleIdentifier = item.representedObject as? String else {
-                return false
-            }
-            return bundleIdentifier != currentBlacklistBundleIdentifier
-        }
-        guard !movableItems.isEmpty else { return }
-
-        let existingGroupSeparator = blacklistMenu.items.first {
-            $0.tag == Self.blacklistGroupSeparatorTag
-        }
-        let oldMenuWindow = movableItems.compactMap { $0.view?.window }.first
-        let animatedItems = movableItems + [existingGroupSeparator].compactMap { $0 }
-        let shouldAnimate = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let capturedSnapshots: [BlacklistRowAnimationSnapshot] = shouldAnimate
-            ? animatedItems.compactMap { item in
-                guard
-                    let view = item.view,
-                    let image = snapshotImage(for: view),
-                    let oldScreenFrame = menuItemScreenFrame(item)
-                else { return nil }
-                return BlacklistRowAnimationSnapshot(
-                    item: item,
-                    image: image,
-                    oldScreenFrame: oldScreenFrame
-                )
-            }
-            : []
-        let animationSnapshots = capturedSnapshots.count == animatedItems.count
-            ? capturedSnapshots
-            : []
-        let animationOverlays: [BlacklistRowAnimationOverlay]
-        if let oldMenuWindow, !animationSnapshots.isEmpty {
-            animationOverlays = primeBlacklistRowsAnimation(
-                animationSnapshots,
-                above: oldMenuWindow
-            )
-        } else {
-            animationOverlays = []
-        }
-        if !animationOverlays.isEmpty {
-            blacklistReorderHiddenItems = animatedItems
-            animatedItems.forEach {
-                $0.view?.alphaValue = 0
-            }
-            oldMenuWindow?.displayIfNeeded()
-        }
-
-        if let existingGroupSeparator {
-            blacklistMenu.removeItem(existingGroupSeparator)
-        }
-        movableItems.forEach { blacklistMenu.removeItem($0) }
-
-        let sortedItems = movableItems.sorted { first, second in
-            guard
-                let firstIdentifier = first.representedObject as? String,
-                let secondIdentifier = second.representedObject as? String
-            else { return first.title.localizedCaseInsensitiveCompare(second.title) == .orderedAscending }
-
-            let firstIsBlacklisted = ignoredIdentifiers.contains(firstIdentifier)
-            let secondIsBlacklisted = ignoredIdentifiers.contains(secondIdentifier)
-            if firstIsBlacklisted != secondIsBlacklisted {
-                return firstIsBlacklisted
-            }
-            return first.title.localizedCaseInsensitiveCompare(second.title) == .orderedAscending
-        }
-        let itemOrderChanged = zip(movableItems, sortedItems).contains { pair in
-            pair.0 !== pair.1
-        }
-        let blacklistedCount = sortedItems.prefix {
-            guard let identifier = $0.representedObject as? String else { return false }
-            return ignoredIdentifiers.contains(identifier)
-        }.count
-
-        let insertionIndex: Int
-        if let currentBlacklistBundleIdentifier,
-           let currentItem = blacklistMenu.items.first(where: {
-               $0.representedObject as? String == currentBlacklistBundleIdentifier
-           }),
-           let currentIndex = blacklistMenu.items.firstIndex(of: currentItem) {
-            insertionIndex = currentIndex + 2
-        } else {
-            insertionIndex = 0
-        }
-
-        var nextIndex = insertionIndex
-        for (index, item) in sortedItems.enumerated() {
-            if index == blacklistedCount,
-               blacklistedCount > 0,
-               blacklistedCount < sortedItems.count {
-                let separator = existingGroupSeparator ?? blacklistGroupSeparator()
-                blacklistMenu.insertItem(separator, at: nextIndex)
-                nextIndex += 1
-            }
-            blacklistMenu.insertItem(item, at: nextIndex)
-            nextIndex += 1
-        }
-        blacklistMenu.update()
-        let menuWindow = sortedItems.compactMap { $0.view?.window }.first
-        menuWindow?.contentView?.layoutSubtreeIfNeeded()
-        sortedItems.forEach { $0.view?.superview?.layoutSubtreeIfNeeded() }
-
-        if let menuWindow, !animationOverlays.isEmpty {
-            scheduleBlacklistRowsAnimation(
-                animationOverlays,
-                above: menuWindow,
-                expectsMovement: itemOrderChanged
-            )
-        } else {
-            cancelBlacklistReorderAnimation()
-        }
-    }
-
-    private func menuItemScreenFrame(_ item: NSMenuItem) -> NSRect? {
-        guard let view = item.view, let window = view.window else { return nil }
-        let windowRect = view.convert(view.bounds, to: nil)
-        return window.convertToScreen(windowRect)
-    }
-
-    private func snapshotImage(for view: NSView) -> NSImage? {
-        let capture = { () -> NSImage? in
-            guard let representation = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
-                return nil
-            }
-            view.cacheDisplay(in: view.bounds, to: representation)
-            let image = NSImage(size: view.bounds.size)
-            image.addRepresentation(representation)
-            return image
-        }
-
-        guard let rowView = view as? DockSettingPersistenceRowView else {
-            return capture()
-        }
-        return rowView.animationSnapshotImage()
-    }
-
-    private func primeBlacklistRowsAnimation(
-        _ snapshots: [BlacklistRowAnimationSnapshot],
-        above menuWindow: NSWindow
-    ) -> [BlacklistRowAnimationOverlay] {
-        var overlayScreenFrame = menuWindow.frame.insetBy(dx: -4, dy: -16)
-        snapshots.forEach {
-            overlayScreenFrame = overlayScreenFrame.union($0.oldScreenFrame)
-        }
-
-        let overlayWindow = NSPanel(
-            contentRect: overlayScreenFrame,
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        overlayWindow.isOpaque = false
-        overlayWindow.backgroundColor = .clear
-        overlayWindow.hasShadow = false
-        overlayWindow.ignoresMouseEvents = true
-        overlayWindow.hidesOnDeactivate = false
-        overlayWindow.isReleasedWhenClosed = false
-        overlayWindow.animationBehavior = .none
-        overlayWindow.collectionBehavior = [.transient, .ignoresCycle, .fullScreenAuxiliary]
-        overlayWindow.level = menuWindow.level
-
-        let overlayContentView = NSView(
-            frame: NSRect(origin: .zero, size: overlayScreenFrame.size)
-        )
-        overlayContentView.wantsLayer = true
-        overlayWindow.contentView = overlayContentView
-
-        let overlays = snapshots.map { snapshot in
-            let frame = snapshot.oldScreenFrame.offsetBy(
-                dx: -overlayScreenFrame.minX,
-                dy: -overlayScreenFrame.minY
-            )
-            let imageView = NonHitTestingImageView(frame: frame)
-            imageView.image = snapshot.image
-            imageView.imageScaling = .scaleAxesIndependently
-            overlayContentView.addSubview(imageView)
-            return BlacklistRowAnimationOverlay(snapshot: snapshot, view: imageView)
-        }
-
-        blacklistReorderOverlayWindow = overlayWindow
-        blacklistReorderOverlayParentWindow = menuWindow
-        menuWindow.addChildWindow(overlayWindow, ordered: .above)
-        overlayWindow.order(.above, relativeTo: menuWindow.windowNumber)
-        overlayWindow.displayIfNeeded()
-        CATransaction.flush()
-        return overlays
-    }
-
-    private func scheduleBlacklistRowsAnimation(
-        _ overlays: [BlacklistRowAnimationOverlay],
-        above menuWindow: NSWindow,
-        expectsMovement: Bool,
-        layoutAttempt: Int = 0
-    ) {
-        blacklistReorderSetupTimer?.invalidate()
-        let setupTimer = Timer(timeInterval: 1.0 / 120.0, repeats: false) {
-            [weak self, weak menuWindow] timer in
-            guard let self else {
-                timer.invalidate()
-                return
-            }
-            guard self.blacklistReorderSetupTimer === timer else {
-                timer.invalidate()
-                return
-            }
-            self.blacklistReorderSetupTimer = nil
-            guard let menuWindow else {
-                self.cancelBlacklistReorderAnimation()
-                return
-            }
-
-            menuWindow.contentView?.layoutSubtreeIfNeeded()
-            menuWindow.displayIfNeeded()
-            self.startBlacklistRowsAnimation(
-                overlays,
-                above: menuWindow,
-                expectsMovement: expectsMovement,
-                layoutAttempt: layoutAttempt
-            )
-        }
-        blacklistReorderSetupTimer = setupTimer
-        RunLoop.main.add(setupTimer, forMode: .eventTracking)
-        RunLoop.main.add(setupTimer, forMode: .common)
-    }
-
-    private func startBlacklistRowsAnimation(
-        _ overlays: [BlacklistRowAnimationOverlay],
-        above menuWindow: NSWindow,
-        expectsMovement: Bool,
-        layoutAttempt: Int
-    ) {
-        let destinations = overlays.map { overlay -> (BlacklistRowAnimationOverlay, NSRect?) in
-            let itemIsStillInMenu = blacklistMenu.items.contains {
-                $0 === overlay.snapshot.item
-            }
-            let newScreenFrame = itemIsStillInMenu
-                ? menuItemScreenFrame(overlay.snapshot.item)
-                : nil
-            return (overlay, newScreenFrame)
-        }
-        let hasMissingApplicationDestination = destinations.contains { overlay, frame in
-            overlay.snapshot.item.tag != Self.blacklistGroupSeparatorTag && frame == nil
-        }
-        guard !hasMissingApplicationDestination else {
-            cancelBlacklistReorderAnimation()
-            return
-        }
-
-        let hasVisibleMovement = destinations.contains { overlay, newScreenFrame in
-            guard let newScreenFrame else { return false }
-            return abs(overlay.snapshot.oldScreenFrame.midX - newScreenFrame.midX) > 0.5
-                || abs(overlay.snapshot.oldScreenFrame.midY - newScreenFrame.midY) > 0.5
-        }
-        if expectsMovement, !hasVisibleMovement {
-            if layoutAttempt < 18 {
-                scheduleBlacklistRowsAnimation(
-                    overlays,
-                    above: menuWindow,
-                    expectsMovement: true,
-                    layoutAttempt: layoutAttempt + 1
-                )
-            } else {
-                cancelBlacklistReorderAnimation()
-            }
-            return
-        }
-
-        guard
-            let overlayWindow = blacklistReorderOverlayWindow,
-            let overlayContentView = overlayWindow.contentView
-        else {
-            cancelBlacklistReorderAnimation()
-            return
-        }
-        let overlayScreenFrame = overlayWindow.frame
-        let movements = destinations.map { overlay, newScreenFrame in
-            let endScreenFrame = newScreenFrame ?? overlay.snapshot.oldScreenFrame
-            let endFrame = endScreenFrame.offsetBy(
-                dx: -overlayScreenFrame.minX,
-                dy: -overlayScreenFrame.minY
-            )
-            return BlacklistRowAnimationMovement(
-                view: overlay.view,
-                startFrame: overlay.view.frame,
-                endFrame: endFrame
-            )
-        }
-
-        let duration: CFTimeInterval = 0.64
-        let startTime = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
-            guard
-                let self,
-                let activeTimer = self.blacklistReorderAnimationTimer,
-                activeTimer === timer,
-                self.blacklistReorderOverlayWindow === overlayWindow
-            else {
-                timer.invalidate()
-                return
-            }
-
-            let linearProgress = min(
-                1,
-                max(0, (CACurrentMediaTime() - startTime) / duration)
-            )
-            let easedProgress = linearProgress * linearProgress
-                * (3 - 2 * linearProgress)
-            let progress = CGFloat(easedProgress)
-
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            for movement in movements {
-                let start = movement.startFrame
-                let end = movement.endFrame
-                movement.view.frame = NSRect(
-                    x: start.minX + (end.minX - start.minX) * progress,
-                    y: start.minY + (end.minY - start.minY) * progress,
-                    width: start.width + (end.width - start.width) * progress,
-                    height: start.height + (end.height - start.height) * progress
-                )
-            }
-            CATransaction.commit()
-            overlayContentView.needsDisplay = true
-            overlayWindow.displayIfNeeded()
-
-            if linearProgress >= 1 {
-                self.finishBlacklistReorderAnimation(timer)
-            }
-        }
-        blacklistReorderAnimationTimer = timer
-        RunLoop.main.add(timer, forMode: .eventTracking)
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    private func finishBlacklistReorderAnimation(_ timer: Timer) {
-        guard blacklistReorderAnimationTimer === timer else { return }
-        timer.invalidate()
-        blacklistReorderAnimationTimer = nil
-
-        let menuWindow = blacklistReorderHiddenItems.first?.view?.window
-        blacklistReorderHiddenItems.forEach {
-            $0.view?.alphaValue = 1
-        }
-        blacklistReorderHiddenItems.removeAll()
-        menuWindow?.displayIfNeeded()
-        if let overlayWindow = blacklistReorderOverlayWindow {
-            blacklistReorderOverlayParentWindow?.removeChildWindow(overlayWindow)
-        }
-        blacklistReorderOverlayParentWindow = nil
-        blacklistReorderOverlayWindow?.orderOut(nil)
-        blacklistReorderOverlayWindow = nil
-    }
-
-    private func cancelBlacklistReorderAnimation() {
-        blacklistReorderSetupTimer?.invalidate()
-        blacklistReorderSetupTimer = nil
-        blacklistReorderAnimationTimer?.invalidate()
-        blacklistReorderAnimationTimer = nil
-
-        let menuWindow = blacklistReorderHiddenItems.first?.view?.window
-        blacklistReorderHiddenItems.forEach {
-            $0.view?.alphaValue = 1
-        }
-        blacklistReorderHiddenItems.removeAll()
-        menuWindow?.displayIfNeeded()
-        if let overlayWindow = blacklistReorderOverlayWindow {
-            blacklistReorderOverlayParentWindow?.removeChildWindow(overlayWindow)
-        }
-        blacklistReorderOverlayParentWindow = nil
-        blacklistReorderOverlayWindow?.orderOut(nil)
-        blacklistReorderOverlayWindow = nil
     }
 
     @objc private func chooseBlacklistApplication() {
@@ -3288,17 +3904,41 @@ private final class BlacklistHelpMenuItemView: NSView {
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = "Remove All Blacklisted Apps?"
-            alert.informativeText = "Are you sure you want to remove \(applicationCount) apps from the blacklist?"
+            alert.informativeText = "Are you sure you want to\nremove \(applicationCount) apps from the blacklist?"
             alert.addButton(withTitle: "Remove All")
             alert.addButton(withTitle: "Cancel")
             alert.buttons.first?.hasDestructiveAction = true
+
+            alert.layout()
+            if let contentView = alert.window.contentView {
+                if let imageView = contentView.subviews.first(where: { $0 is NSImageView }) {
+                    imageView.frame.origin.x = floor((contentView.bounds.width - imageView.frame.width) / 2)
+                }
+                for subview in contentView.subviews {
+                    guard let textField = subview as? NSTextField,
+                          textField.stringValue == alert.messageText || textField.stringValue == alert.informativeText
+                    else { continue }
+                    textField.alignment = .center
+                    let paragraphStyle = NSMutableParagraphStyle()
+                    paragraphStyle.alignment = .center
+                    let attributed = NSMutableAttributedString(attributedString: textField.attributedStringValue)
+                    attributed.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: attributed.length))
+                    textField.attributedStringValue = attributed
+                }
+            }
 
             NSApp.activate(ignoringOtherApps: true)
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
 
         saveIgnoredWindowBundleIdentifiers([])
-        rebuildBlacklistMenu()
+        for item in blacklistMenu.items {
+            guard
+                item.representedObject is String,
+                let rowView = item.view as? DockSettingPersistenceRowView
+            else { continue }
+            rowView.setOn(false)
+        }
     }
 
     func updateStatus(_ text: String) {
@@ -3327,15 +3967,13 @@ private final class BlacklistHelpMenuItemView: NSView {
             return
         }
 
-        if dockAwayEnabled {
-            if accessibilityPermissionMissing {
-                openAccessibilitySettings()
-                return
+        if dockAwayEnabled,
+           accessibilityPermissionMissing || inputMonitoringPermissionMissing {
+            statusItem.menu?.cancelTracking()
+            DispatchQueue.main.async { [weak self] in
+                self?.requestAccessibilityPermission()
             }
-            if inputMonitoringPermissionMissing {
-                openInputMonitoringSettings()
-                return
-            }
+            return
         }
 
         if dockAwayEnabled {
@@ -3355,10 +3993,8 @@ private final class BlacklistHelpMenuItemView: NSView {
             guard AXIsProcessTrusted() else {
                 accessibilityPermissionMissing = true
                 isWaitingForAccessibility = true
-                let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true]
-                AXIsProcessTrustedWithOptions(options)
                 updateDockAwayMenuState()
-                waitForAccessibility()
+                requestAccessibilityPermission()
                 return
             }
 
@@ -3407,24 +4043,26 @@ private final class BlacklistHelpMenuItemView: NSView {
         } catch {
             dockAwayDebugLog("⚠️ Launch at login error: \(error)")
         }
-        launchAtLoginRowView?.setOn(isLaunchAtLoginEnabled())
+        let isEnabled = isLaunchAtLoginEnabled()
+        launchAtLoginRowView?.setOn(isEnabled)
+        permissionSetupLaunchAtLoginRowView?.setOn(isEnabled)
     }
 
     // MARK: - About
 
     @objc private func showAbout() {
         NSApp.activate(ignoringOtherApps: true)
-        
+
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.alignment = .center
-        
+
         let creditsText = "Copyright © Abdullah Khairaddin 2026                  All rights reserved."
-        
+
         let attributedCredits = NSAttributedString(
             string: creditsText,
             attributes: [.paragraphStyle: paragraphStyle]
         )
-        
+
         NSApp.orderFrontStandardAboutPanel(options: [
             NSApplication.AboutPanelOptionKey.applicationName: "DockAway",
             NSApplication.AboutPanelOptionKey.credits: attributedCredits
@@ -3452,98 +4090,1261 @@ private final class BlacklistHelpMenuItemView: NSView {
         }
     }
 
-    private func showWelcomeIfNeeded() {
-        let hasLaunchedBefore = UserDefaults.standard.bool(forKey: "hasLaunchedBefore")
-        guard !hasLaunchedBefore else { return }
+    // MARK: - Permission Setup
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            let alert = NSAlert()
-            alert.messageText = "Welcome to DockAway 👋"
-            alert.informativeText = "Your Dock will now automatically appear when you are on an empty desktop and hides when an app occupies the screen.\n\n• Toggle Launch at Login from the menu bar.\n• The app runs silently and efficiently in the background.\n\nEnjoy your Extra Real Estate!"
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "Let's Go!")
+    private func requestAccessibilityPermission() {
+        accessibilityPermissionMissing = !AXIsProcessTrusted()
+        inputMonitoringPermissionMissing = !inputMonitoringAccessGranted
+        updateDockAwayMenuState()
 
-            // An .accessory app is never frontmost, so a modal can open behind
-            // whatever the user is actually looking at.
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
-
-            // Mark it seen only once it HAS been seen. Setting the flag up front
-            // loses the welcome permanently if the app dies in the meantime —
-            // which is exactly what macOS does right after an Accessibility grant.
-            UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+        guard accessibilityPermissionMissing || inputMonitoringPermissionMissing else {
+            completePermissionSetup()
+            return
         }
+
+        UserDefaults.standard.set(false, forKey: Self.permissionSetupCompletedKey)
+        presentPermissionSetup()
+    }
+
+    private func presentPermissionSetup() {
+        guard !permissionSetupInProgress, !isQuitting else { return }
+        permissionSetupInProgress = true
+
+        let setupView = PermissionSetupView(
+            requestAccessibility: { [weak self] in
+                self?.openAccessibilitySettings()
+            },
+            requestInputMonitoring: { [weak self] in
+                self?.openInputMonitoringSettings()
+            }
+        )
+
+        let (
+            setupWindow,
+            continueButton,
+            entranceViews,
+            welcomeEmojiView,
+            iconShineView
+        ) = makePermissionSetupWindow(setupView: setupView)
+        permissionSetupWindow = setupWindow
+        permissionSetupContinueButton = continueButton
+        continueButton.isEnabled = false
+        var continueReady = false
+
+        let refreshSetupState = { [weak self, weak continueButton] in
+            guard let self else { return }
+            self.refreshInputMonitoringSettingsVisit()
+            let accessibilityGranted = AXIsProcessTrusted()
+            let inputMonitoringGranted = self.inputMonitoringAccessGranted
+            let inputMonitoringReady = inputMonitoringGranted
+                || self.inputMonitoringRestartPending
+            let ready = accessibilityGranted && inputMonitoringReady
+            self.accessibilityPermissionMissing = !accessibilityGranted
+            self.inputMonitoringPermissionMissing = !inputMonitoringGranted
+            self.isWaitingForAccessibility = !accessibilityGranted
+            setupView.update(
+                accessibilityGranted: accessibilityGranted,
+                inputMonitoringGranted: inputMonitoringGranted,
+                inputMonitoringRestartPending: self.inputMonitoringRestartPending,
+                inputMonitoringSettingsOpen: self.inputMonitoringSettingsVisitInProgress
+            )
+
+            if !self.permissionRelaunchScheduled, ready != continueReady {
+                continueReady = ready
+                continueButton?.isEnabled = ready
+            }
+            self.updateDockAwayMenuState()
+        }
+
+        let refreshTimer = Timer(timeInterval: 0.4, repeats: true) { _ in
+            refreshSetupState()
+        }
+        permissionSetupTimer = refreshTimer
+        RunLoop.main.add(refreshTimer, forMode: .common)
+
+        // Keep this window modeless. System Settings needs to be able to quit
+        // and reopen DockAway after Input Monitoring changes, and a nested
+        // modal application loop can interfere with that lifecycle handoff.
+        NSApp.activate(ignoringOtherApps: true)
+        setupWindow.center()
+        let finalFrame = setupWindow.frame
+        preparePermissionSetupEntrance(
+            window: setupWindow,
+            revealViews: entranceViews
+        )
+        refreshSetupState()
+        setupWindow.makeKeyAndOrderFront(nil)
+        animatePermissionSetupEntrance(
+            window: setupWindow,
+            finalFrame: finalFrame,
+            revealViews: entranceViews,
+            welcomeEmojiView: welcomeEmojiView
+        )
+        iconShineView.play(after: 1.08)
+    }
+
+    private func makePermissionSetupWindow(
+        setupView: PermissionSetupView
+    ) -> (
+        window: NSPanel,
+        continueButton: NSButton,
+        entranceViews: [NSView],
+        welcomeEmojiView: NSView,
+        iconShineView: AppIconShineView
+    ) {
+        let windowSize = NSSize(width: 540, height: 515)
+        let panelCornerRadius: CGFloat = 28
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: windowSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isMovableByWindowBackground = true
+        panel.isReleasedWhenClosed = false
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        let contentView = NSView(frame: NSRect(origin: .zero, size: windowSize))
+        let backgroundView: NSView
+        if #available(macOS 26.0, *) {
+            let glassView = NSGlassEffectView(frame: NSRect(origin: .zero, size: windowSize))
+            // The standard glass treatment gives the panel a defined rim and
+            // keeps the content behind the window visible.
+            glassView.style = .regular
+            glassView.tintColor = NSColor.white.withAlphaComponent(0.035)
+            glassView.cornerRadius = panelCornerRadius
+            glassView.wantsLayer = true
+            glassView.layer?.cornerRadius = panelCornerRadius
+            glassView.layer?.cornerCurve = .continuous
+            glassView.layer?.masksToBounds = true
+            glassView.layer?.borderWidth = 1
+            glassView.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+            if #available(macOS 27.0, *) {
+                glassView.effectIsInteractive = true
+            }
+            glassView.contentView = contentView
+            backgroundView = glassView
+        } else {
+            let effectView = NSVisualEffectView(frame: NSRect(origin: .zero, size: windowSize))
+            effectView.material = .popover
+            effectView.blendingMode = .behindWindow
+            effectView.state = .active
+            effectView.wantsLayer = true
+            effectView.layer?.cornerRadius = panelCornerRadius
+            effectView.layer?.cornerCurve = .continuous
+            effectView.layer?.masksToBounds = true
+            effectView.layer?.borderWidth = 1
+            effectView.layer?.borderColor = NSColor.white.withAlphaComponent(0.15).cgColor
+            contentView.translatesAutoresizingMaskIntoConstraints = false
+            effectView.addSubview(contentView)
+            NSLayoutConstraint.activate([
+                contentView.leadingAnchor.constraint(equalTo: effectView.leadingAnchor),
+                contentView.trailingAnchor.constraint(equalTo: effectView.trailingAnchor),
+                contentView.topAnchor.constraint(equalTo: effectView.topAnchor),
+                contentView.bottomAnchor.constraint(equalTo: effectView.bottomAnchor)
+            ])
+            backgroundView = effectView
+        }
+        backgroundView.autoresizingMask = [.width, .height]
+        panel.contentView = backgroundView
+
+        let titleLabel = NSTextField(labelWithString: "Welcome to DockAway")
+        titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        titleLabel.textColor = .labelColor
+
+        let titleEmojiLabel = NSButton(
+            title: "👋🏻",
+            target: self,
+            action: #selector(highFiveWelcomeHand(_:))
+        )
+        titleEmojiLabel.font = .systemFont(ofSize: 20)
+        titleEmojiLabel.isBordered = false
+        titleEmojiLabel.focusRingType = .none
+        if let buttonCell = titleEmojiLabel.cell as? NSButtonCell {
+            buttonCell.highlightsBy = []
+            buttonCell.showsStateBy = []
+        }
+        titleEmojiLabel.toolTip = "High five!"
+        titleEmojiLabel.setAccessibilityLabel("Wave hello to DockAway")
+        titleEmojiLabel.setAccessibilityHelp("Gives the DockAway welcome hand a high five.")
+
+        let welcomeEmojiView = NSView()
+        welcomeEmojiView.translatesAutoresizingMaskIntoConstraints = false
+        welcomeEmojiView.wantsLayer = true
+
+        let titleContainer = NSView()
+        titleContainer.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleEmojiLabel.translatesAutoresizingMaskIntoConstraints = false
+        welcomeEmojiView.addSubview(titleEmojiLabel)
+        titleContainer.addSubview(titleLabel)
+        titleContainer.addSubview(welcomeEmojiView)
+        NSLayoutConstraint.activate([
+            titleLabel.centerXAnchor.constraint(equalTo: titleContainer.centerXAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: titleContainer.centerYAnchor),
+            welcomeEmojiView.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 6),
+            welcomeEmojiView.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
+            welcomeEmojiView.widthAnchor.constraint(equalToConstant: 28),
+            welcomeEmojiView.heightAnchor.constraint(equalToConstant: 28),
+            welcomeEmojiView.trailingAnchor.constraint(
+                lessThanOrEqualTo: titleContainer.trailingAnchor
+            ),
+            titleEmojiLabel.centerXAnchor.constraint(equalTo: welcomeEmojiView.centerXAnchor),
+            titleEmojiLabel.centerYAnchor.constraint(equalTo: welcomeEmojiView.centerYAnchor),
+            titleContainer.heightAnchor.constraint(equalToConstant: 28)
+        ])
+
+        let appIconImage = NSApp.applicationIconImage
+            ?? NSImage(size: NSSize(width: 92, height: 92))
+        let iconShineView = AppIconShineView(maskImage: appIconImage)
+        iconShineView.translatesAutoresizingMaskIntoConstraints = false
+
+        let iconView = NSButton(
+            image: appIconImage,
+            target: iconShineView,
+            action: #selector(AppIconShineView.replay(_:))
+        )
+        iconView.isBordered = false
+        iconView.imagePosition = .imageOnly
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        if let buttonCell = iconView.cell as? NSButtonCell {
+            buttonCell.highlightsBy = []
+            buttonCell.showsStateBy = []
+        }
+        iconView.setAccessibilityLabel("DockAway app icon")
+        iconView.setAccessibilityHelp("Plays the icon shine animation.")
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+
+        let iconContainer = NSView()
+        iconContainer.translatesAutoresizingMaskIntoConstraints = false
+        iconContainer.addSubview(iconView)
+        iconContainer.addSubview(iconShineView)
+
+        titleLabel.alignment = .center
+        NSLayoutConstraint.activate([
+            iconContainer.heightAnchor.constraint(equalToConstant: 92),
+            iconView.widthAnchor.constraint(equalToConstant: 92),
+            iconView.heightAnchor.constraint(equalToConstant: 92),
+            iconView.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor),
+            iconView.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
+            iconShineView.leadingAnchor.constraint(equalTo: iconView.leadingAnchor),
+            iconShineView.trailingAnchor.constraint(equalTo: iconView.trailingAnchor),
+            iconShineView.topAnchor.constraint(equalTo: iconView.topAnchor),
+            iconShineView.bottomAnchor.constraint(equalTo: iconView.bottomAnchor)
+        ])
+
+        let introductionLabel = NSTextField(
+            wrappingLabelWithString: "Let's get started by setting up these two macOS permissions to unlock DockAway's window and gesture detection for a smooth experience."
+        )
+        introductionLabel.font = .systemFont(ofSize: 13)
+        introductionLabel.textColor = .labelColor
+        introductionLabel.maximumNumberOfLines = 2
+        introductionLabel.alignment = .center
+
+        let permissionHeading = NSTextField(labelWithString: "Please enable the following permissions:")
+        permissionHeading.font = .systemFont(ofSize: 13, weight: .medium)
+        permissionHeading.textColor = .labelColor
+
+        let launchAtLoginContainer = DockSettingPersistenceRowView(
+            title: "Launch DockAway at Login",
+            isOn: isLaunchAtLoginEnabled(),
+            width: 460,
+            leadingInset: 20,
+            titleLeadingAdjustment: 8,
+            fullRowHitTarget: false
+        ) { [weak self] _ in
+            self?.toggleLaunchAtLogin()
+        }
+        launchAtLoginContainer.translatesAutoresizingMaskIntoConstraints = false
+        permissionSetupLaunchAtLoginRowView = launchAtLoginContainer
+
+        let quitButton = NSButton(
+            title: "Quit",
+            target: self,
+            action: #selector(cancelPermissionSetup)
+        )
+        let continueButton = OnboardingPrimaryButton(
+            title: "Continue",
+            target: self,
+            action: #selector(continuePermissionSetup)
+        )
+        quitButton.bezelStyle = .automatic
+        quitButton.controlSize = .large
+        quitButton.translatesAutoresizingMaskIntoConstraints = false
+        quitButton.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        quitButton.keyEquivalent = "\u{1b}"
+        if #available(macOS 26.0, *) {
+            quitButton.borderShape = .capsule
+        }
+
+        continueButton.controlSize = .large
+        continueButton.translatesAutoresizingMaskIntoConstraints = false
+        continueButton.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        continueButton.keyEquivalent = "\r"
+
+        let buttonStack = NSStackView(views: [quitButton, continueButton])
+        buttonStack.orientation = .horizontal
+        buttonStack.alignment = .centerY
+        buttonStack.spacing = 10
+        buttonStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let bottomControlsSpacer = NSView()
+        bottomControlsSpacer.translatesAutoresizingMaskIntoConstraints = false
+        bottomControlsSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        bottomControlsSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let bottomControlsRow = NSStackView(
+            views: [launchAtLoginContainer, bottomControlsSpacer, buttonStack]
+        )
+        bottomControlsRow.orientation = .horizontal
+        bottomControlsRow.alignment = .centerY
+        bottomControlsRow.spacing = 0
+        bottomControlsRow.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            bottomControlsRow.heightAnchor.constraint(equalToConstant: 32),
+            launchAtLoginContainer.widthAnchor.constraint(equalToConstant: 250),
+            launchAtLoginContainer.heightAnchor.constraint(equalToConstant: 26),
+            bottomControlsSpacer.widthAnchor.constraint(greaterThanOrEqualToConstant: 14)
+        ])
+
+        let contentStack = NSStackView(
+            views: [
+                iconContainer,
+                titleContainer,
+                introductionLabel,
+                permissionHeading,
+                setupView,
+                bottomControlsRow
+            ]
+        )
+        contentStack.orientation = .vertical
+        contentStack.alignment = .leading
+        contentStack.spacing = 13
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        contentStack.setCustomSpacing(18, after: iconContainer)
+        contentStack.setCustomSpacing(16, after: introductionLabel)
+        contentStack.setCustomSpacing(14, after: setupView)
+        buttonStack.setHuggingPriority(.required, for: .horizontal)
+
+        contentView.addSubview(contentStack)
+        setupView.instructionView.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(setupView.instructionView)
+        NSLayoutConstraint.activate([
+            contentStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 34),
+            contentStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -34),
+            contentStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 30),
+            iconContainer.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            titleContainer.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            introductionLabel.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            setupView.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            bottomControlsRow.widthAnchor.constraint(
+                equalTo: contentStack.widthAnchor,
+                constant: -14
+            ),
+            setupView.instructionView.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            setupView.instructionView.centerXAnchor.constraint(equalTo: contentStack.centerXAnchor),
+            setupView.instructionView.bottomAnchor.constraint(
+                equalTo: contentView.bottomAnchor,
+                constant: -18
+            ),
+            contentStack.bottomAnchor.constraint(
+                lessThanOrEqualTo: setupView.instructionView.topAnchor,
+                constant: -12
+            )
+        ])
+
+        let entranceViews: [NSView] = [
+            iconContainer,
+            titleContainer,
+            introductionLabel,
+            permissionHeading,
+            setupView,
+            bottomControlsRow,
+            setupView.instructionView
+        ]
+        return (
+            panel,
+            continueButton,
+            entranceViews,
+            welcomeEmojiView,
+            iconShineView
+        )
+    }
+
+    private func preparePermissionSetupEntrance(
+        window: NSPanel,
+        revealViews: [NSView]
+    ) {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        window.alphaValue = 0
+        if !reduceMotion {
+            let finalFrame = window.frame
+            let zoomScale: CGFloat = 0.94
+            let initialSize = NSSize(
+                width: finalFrame.width * zoomScale,
+                height: finalFrame.height * zoomScale
+            )
+            var initialFrame = NSRect(
+                x: finalFrame.midX - (initialSize.width / 2),
+                y: finalFrame.midY - (initialSize.height / 2),
+                width: initialSize.width,
+                height: initialSize.height
+            )
+            initialFrame.origin.y -= 9
+            window.setFrame(initialFrame, display: false)
+        }
+
+        for view in revealViews {
+            view.alphaValue = 0
+            guard !reduceMotion else { continue }
+            view.wantsLayer = true
+            view.layer?.transform = CATransform3DMakeTranslation(0, 12, 0)
+        }
+    }
+
+    private func animatePermissionSetupEntrance(
+        window: NSPanel,
+        finalFrame: NSRect,
+        revealViews: [NSView],
+        welcomeEmojiView: NSView
+    ) {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let windowAnimationDuration: TimeInterval = reduceMotion ? 0.24 : 0.78
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = windowAnimationDuration
+            context.timingFunction = CAMediaTimingFunction(
+                controlPoints: 0.22,
+                0.61,
+                0.36,
+                1.00
+            )
+            window.animator().alphaValue = 1
+            if !reduceMotion {
+                window.animator().setFrame(finalFrame, display: true)
+            }
+        }
+
+        let firstStageStart: TimeInterval = reduceMotion
+            ? 0.04
+            : windowAnimationDuration + 0.06
+        let firstStageStagger: TimeInterval = reduceMotion ? 0 : 0.09
+        let firstStageDuration: TimeInterval = reduceMotion ? 0.20 : 0.72
+        let secondStageStart = firstStageStart
+            + firstStageStagger
+            + firstStageDuration
+            + (reduceMotion ? 1.08 : 1.18)
+        let thirdStageStart = secondStageStart + 2.0
+
+        for (index, view) in revealViews.enumerated() {
+            let delay: TimeInterval
+            switch index {
+            case 0:
+                delay = firstStageStart
+            case 1:
+                delay = firstStageStart + firstStageStagger
+            case 2:
+                delay = secondStageStart
+            case 3:
+                delay = thirdStageStart - 0.25
+            default:
+                let thirdStageStagger = reduceMotion
+                    ? 0
+                    : Double(index - 3) * 0.09
+                delay = thirdStageStart + thirdStageStagger
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                [weak self, weak window, weak view] in
+                guard
+                    let self,
+                    let window,
+                    let view,
+                    self.permissionSetupWindow === window
+                else { return }
+
+                if !reduceMotion, let layer = view.layer {
+                    let slideAnimation = CABasicAnimation(keyPath: "transform")
+                    slideAnimation.fromValue = CATransform3DMakeTranslation(0, 12, 0)
+                    slideAnimation.toValue = CATransform3DIdentity
+                    slideAnimation.duration = 0.72
+                    slideAnimation.timingFunction = CAMediaTimingFunction(
+                        controlPoints: 0.16,
+                        0.84,
+                        0.30,
+                        1.00
+                    )
+                    layer.transform = CATransform3DIdentity
+                    layer.add(slideAnimation, forKey: "permissionEntranceSlide")
+                }
+
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = reduceMotion ? 0.20 : 0.62
+                    context.timingFunction = CAMediaTimingFunction(
+                        controlPoints: 0.16,
+                        0.84,
+                        0.30,
+                        1.00
+                    )
+                    view.animator().alphaValue = 1
+                }
+            }
+        }
+
+        guard !reduceMotion else { return }
+        let welcomeWaveDelay = windowAnimationDuration + 0.54
+        DispatchQueue.main.asyncAfter(deadline: .now() + welcomeWaveDelay) {
+            [weak self, weak window, weak welcomeEmojiView] in
+            guard
+                let self,
+                let window,
+                let welcomeEmojiView,
+                self.permissionSetupWindow === window
+            else { return }
+            self.animateWelcomeEmojiWave(welcomeEmojiView)
+        }
+    }
+
+    private func animateWelcomeEmojiWave(_ emojiView: NSView) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+
+        emojiView.wantsLayer = true
+        emojiView.layoutSubtreeIfNeeded()
+        guard let layer = emojiView.layer else { return }
+
+        let wristAnchor = CGPoint(x: 0.46, y: -0.12)
+        let oldAnchor = layer.anchorPoint
+        let oldPosition = layer.position
+        layer.anchorPoint = wristAnchor
+        layer.position = CGPoint(
+            x: oldPosition.x + ((wristAnchor.x - oldAnchor.x) * layer.bounds.width),
+            y: oldPosition.y + ((wristAnchor.y - oldAnchor.y) * layer.bounds.height)
+        )
+
+        func cartoonHandTransform(
+            rotation: CGFloat,
+            horizontalScale: CGFloat,
+            shear: CGFloat
+        ) -> CATransform3D {
+            var transform = CGAffineTransform(rotationAngle: rotation)
+            transform = transform.concatenating(
+                CGAffineTransform(
+                    a: horizontalScale,
+                    b: shear * 0.28,
+                    c: shear,
+                    d: 1,
+                    tx: 0,
+                    ty: 0
+                )
+            )
+            return CATransform3DMakeAffineTransform(transform)
+        }
+
+        let wave = CAKeyframeAnimation(keyPath: "transform")
+        wave.values = [
+            cartoonHandTransform(rotation: 0, horizontalScale: 1, shear: 0),
+            cartoonHandTransform(rotation: -0.07, horizontalScale: 0.99, shear: -0.018),
+            cartoonHandTransform(rotation: 0.105, horizontalScale: 1.014, shear: 0.026),
+            cartoonHandTransform(rotation: -0.082, horizontalScale: 0.992, shear: -0.021),
+            cartoonHandTransform(rotation: 0.06, horizontalScale: 1.008, shear: 0.016),
+            cartoonHandTransform(rotation: -0.032, horizontalScale: 0.996, shear: -0.009),
+            cartoonHandTransform(rotation: 0.012, horizontalScale: 1.002, shear: 0.004),
+            cartoonHandTransform(rotation: 0, horizontalScale: 1, shear: 0),
+            cartoonHandTransform(rotation: 0, horizontalScale: 1, shear: 0)
+        ]
+        wave.keyTimes = [0, 0.035, 0.07, 0.105, 0.14, 0.175, 0.21, 0.235, 1]
+        wave.timingFunctions = (0..<8).map { _ in
+            CAMediaTimingFunction(name: .easeInEaseOut)
+        }
+        wave.duration = 10
+        wave.repeatCount = .infinity
+        wave.calculationMode = .cubic
+        wave.isRemovedOnCompletion = true
+        layer.add(wave, forKey: "welcomeWave")
+    }
+
+    @objc private func highFiveWelcomeHand(_ sender: NSButton) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+
+        sender.wantsLayer = true
+        guard let layer = sender.layer else { return }
+
+        let highFive = CAKeyframeAnimation(keyPath: "transform.scale")
+        highFive.values = [1, 1.28, 0.97, 1.035, 1]
+        highFive.keyTimes = [0, 0.30, 0.58, 0.80, 1]
+        highFive.timingFunctions = [
+            CAMediaTimingFunction(name: .easeOut),
+            CAMediaTimingFunction(name: .easeInEaseOut),
+            CAMediaTimingFunction(name: .easeOut),
+            CAMediaTimingFunction(name: .easeInEaseOut)
+        ]
+        highFive.duration = 0.56
+        highFive.calculationMode = .cubic
+
+        layer.removeAnimation(forKey: "welcomeHighFive")
+        layer.add(highFive, forKey: "welcomeHighFive")
+    }
+
+    @objc private func continuePermissionSetup() {
+        guard
+            AXIsProcessTrusted(),
+            inputMonitoringAccessGranted || inputMonitoringRestartPending
+        else { return }
+
+        dismissPermissionSetup()
+        UserDefaults.standard.set(
+            true,
+            forKey: Self.showStartedPopoverAfterRelaunchKey
+        )
+        completePermissionSetup(allowStartedPopover: false)
+        scheduleRelaunchAfterPermissionSetup()
+    }
+
+    @objc private func cancelPermissionSetup() {
+        dismissPermissionSetup()
+        NSApp.terminate(self)
+    }
+
+    private func dismissPermissionSetup() {
+        permissionSetupTimer?.invalidate()
+        permissionSetupTimer = nil
+        permissionSetupWindow?.orderOut(nil)
+        permissionSetupWindow = nil
+        permissionSetupContinueButton = nil
+        permissionSetupLaunchAtLoginRowView = nil
+        permissionSetupInProgress = false
+    }
+
+    private func scheduleRelaunchAfterPermissionSetup() {
+        guard !permissionRelaunchScheduled, !isQuitting else { return }
+        permissionRelaunchScheduled = true
+
+        // Give the setup window a brief moment to dismiss before the new
+        // process takes over, keeping the restart quiet and intentional.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
+            guard let self, !self.isQuitting else { return }
+
+            self.isPermissionRelaunching = true
+            do {
+                try self.launchRelaunchHelper()
+                NSApp.terminate(nil)
+            } catch {
+                self.isPermissionRelaunching = false
+                self.permissionRelaunchScheduled = false
+                UserDefaults.standard.set(
+                    false,
+                    forKey: Self.showStartedPopoverAfterRelaunchKey
+                )
+                self.showDockAwayStartedPopover()
+                dockAwayDebugLog("⚠️ Could not prepare DockAway relaunch after permission setup: \(error)")
+            }
+        }
+    }
+
+    private func launchRelaunchHelper() throws {
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+        helper.arguments = [
+            "-c",
+            """
+            old_pid="$1"
+            app_path="$2"
+            while /bin/kill -0 "$old_pid" 2>/dev/null; do
+                /bin/sleep 0.1
+            done
+            exec /usr/bin/open -n "$app_path"
+            """,
+            "DockAway-permission-relaunch",
+            String(ProcessInfo.processInfo.processIdentifier),
+            Bundle.main.bundlePath
+        ]
+        helper.standardInput = FileHandle.nullDevice
+        helper.standardOutput = FileHandle.nullDevice
+        helper.standardError = FileHandle.nullDevice
+        try helper.run()
+    }
+
+    private func completePermissionSetup(allowStartedPopover: Bool = true) {
+        let defaults = UserDefaults.standard
+        let isFirstCompletedSetup = !defaults.bool(
+            forKey: Self.permissionSetupCompletedKey
+        )
+        let shouldShowAfterRelaunch = defaults.bool(
+            forKey: Self.showStartedPopoverAfterRelaunchKey
+        )
+        let shouldShowStartedPopover = allowStartedPopover
+            && (isFirstCompletedSetup || shouldShowAfterRelaunch)
+        defaults.set(true, forKey: Self.permissionSetupCompletedKey)
+        if shouldShowStartedPopover {
+            defaults.set(false, forKey: Self.showStartedPopoverAfterRelaunchKey)
+        }
+        accessibilityPermissionMissing = false
+        inputMonitoringPermissionMissing = false
+        isWaitingForAccessibility = false
+        accessibilityWaitWorkItem?.cancel()
+        accessibilityWaitWorkItem = nil
+        inputMonitoringWaitWorkItem?.cancel()
+        inputMonitoringWaitWorkItem = nil
+
+        if dockWatcher == nil {
+            dockWatcher = DockWatcher()
+        }
+        startMonitoringIfAllowed()
+        ensureDockAwayIsOn()
+        updateDockAwayMenuState()
+
+        if shouldShowStartedPopover {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
+                self?.showDockAwayStartedPopover()
+            }
+        }
+    }
+
+    private func showDockAwayStartedPopover() {
+        showMenuBarPopover(
+            symbolName: "checkmark.circle.fill",
+            symbolDescription: "DockAway started",
+            symbolColor: .systemGreen,
+            title: "DockAway has successfully started",
+            detail: "You can manage it from the menu bar.",
+            contentSize: NSSize(width: 275, height: 60),
+            celebrationEmoji: "🎉"
+        )
+    }
+
+    private func showPermissionRevokedPopover() {
+        guard
+            !permissionSetupInProgress,
+            !permissionRelaunchScheduled,
+            UserDefaults.standard.bool(forKey: Self.permissionSetupCompletedKey)
+        else { return }
+
+        let title: String
+        let detail: String
+        if accessibilityPermissionMissing && inputMonitoringPermissionMissing {
+            title = "DockAway permissions were revoked"
+            detail = "Restore Accessibility and Input Monitoring from the menu bar."
+        } else if accessibilityPermissionMissing {
+            title = "Accessibility permission was revoked"
+            detail = "DockAway is paused. Click the menubar icon and press the resume button to restore access."
+        } else if inputMonitoringPermissionMissing {
+            title = "Input Monitoring permission was revoked"
+            detail = "Gesture detection is paused. Click the menu bar icon to restore access."
+        } else {
+            return
+        }
+
+        showMenuBarPopover(
+            symbolName: "exclamationmark.triangle.fill",
+            symbolDescription: "DockAway permission required",
+            symbolColor: .systemOrange,
+            title: title,
+            detail: detail,
+            contentSize: NSSize(width: 325, height: 76)
+        )
+    }
+
+    private func showMenuBarPopover(
+        symbolName: String,
+        symbolDescription: String,
+        symbolColor: NSColor,
+        title: String,
+        detail: String,
+        contentSize: NSSize,
+        celebrationEmoji: String? = nil
+    ) {
+        guard let statusButton = statusItem?.button else { return }
+
+        startedPopoverCloseWorkItem?.cancel()
+        startedPopover?.close()
+        closeStartedPopoverConfetti()
+
+        let statusImage = NSImageView()
+        statusImage.image = NSImage(
+            systemSymbolName: symbolName,
+            accessibilityDescription: symbolDescription
+        )
+        statusImage.contentTintColor = symbolColor
+        statusImage.imageScaling = .scaleProportionallyDown
+        statusImage.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            statusImage.widthAnchor.constraint(equalToConstant: 28),
+            statusImage.heightAnchor.constraint(equalToConstant: 28)
+        ])
+
+        let titleLabel = celebrationEmoji == nil
+            ? NSTextField(wrappingLabelWithString: title)
+            : NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.textColor = .labelColor
+        titleLabel.maximumNumberOfLines = celebrationEmoji == nil ? 2 : 1
+        if celebrationEmoji != nil {
+            titleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+
+        let titleView: NSView
+        let celebrationButton: NSButton?
+        if let celebrationEmoji {
+            let emojiButton = NSButton(
+                title: celebrationEmoji,
+                target: self,
+                action: #selector(replayStartedPopoverConfetti(_:))
+            )
+            emojiButton.font = .systemFont(ofSize: 14)
+            emojiButton.isBordered = false
+            emojiButton.focusRingType = .none
+            emojiButton.toolTip = "Celebrate again"
+            emojiButton.setAccessibilityLabel("Celebrate again")
+            emojiButton.setContentHuggingPriority(.required, for: .horizontal)
+
+            let titleStack = NSStackView(views: [titleLabel, emojiButton])
+            titleStack.orientation = .horizontal
+            titleStack.alignment = .firstBaseline
+            titleStack.spacing = 3
+            titleView = titleStack
+            celebrationButton = emojiButton
+        } else {
+            titleView = titleLabel
+            celebrationButton = nil
+        }
+
+        let detailLabel = NSTextField(wrappingLabelWithString: detail)
+        detailLabel.font = .systemFont(ofSize: 11.5)
+        detailLabel.textColor = .secondaryLabelColor
+        detailLabel.maximumNumberOfLines = 2
+
+        let textStack = NSStackView(views: [titleView, detailLabel])
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 3
+
+        let stack = NSStackView(views: [statusImage, textStack])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let contentView = NSView(frame: NSRect(origin: .zero, size: contentSize))
+        contentView.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
+            stack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor)
+        ])
+
+        let viewController = NSViewController()
+        viewController.view = contentView
+
+        let popover = NSPopover()
+        popover.animates = true
+        popover.behavior = .applicationDefined
+        popover.contentSize = contentView.frame.size
+        popover.contentViewController = viewController
+        popover.show(
+            relativeTo: statusButton.bounds,
+            of: statusButton,
+            preferredEdge: .minY
+        )
+        startedPopover = popover
+        startedPopoverContentView = contentView
+        startedPopoverCelebrationButton = celebrationButton
+        monitorStartedPopoverDismissal()
+
+        if let celebrationButton {
+            DispatchQueue.main.async { [weak self, weak celebrationButton, weak contentView, weak popover] in
+                guard
+                    let self,
+                    let celebrationButton,
+                    let contentView,
+                    let popover,
+                    self.startedPopover === popover
+                else { return }
+                contentView.layoutSubtreeIfNeeded()
+                self.animatePopoverConfetti(
+                    from: celebrationButton,
+                    in: contentView
+                )
+            }
+        }
+    }
+
+    @objc private func replayStartedPopoverConfetti(_ sender: NSButton) {
+        guard
+            sender === startedPopoverCelebrationButton,
+            let contentView = startedPopoverContentView,
+            startedPopover != nil
+        else { return }
+
+        animatePopoverConfetti(from: sender, in: contentView)
+    }
+
+    private func animatePopoverConfetti(from emojiLabel: NSView, in contentView: NSView) {
+        guard
+            !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            let popoverWindow = contentView.window
+        else { return }
+
+        let emojiFrameInWindow = emojiLabel.convert(emojiLabel.bounds, to: nil)
+        let emojiFrameOnScreen = popoverWindow.convertToScreen(emojiFrameInWindow)
+        let emitterPoint = CGPoint(
+            x: emojiFrameOnScreen.midX,
+            y: emojiFrameOnScreen.midY
+        )
+        let overlaySize = NSSize(width: 250, height: 230)
+        var overlayFrame = NSRect(
+            x: emitterPoint.x - 34,
+            y: emitterPoint.y - 112,
+            width: overlaySize.width,
+            height: overlaySize.height
+        )
+        if let screenFrame = popoverWindow.screen?.frame {
+            overlayFrame.origin.x = min(
+                max(overlayFrame.minX, screenFrame.minX),
+                screenFrame.maxX - overlayFrame.width
+            )
+            overlayFrame.origin.y = min(
+                max(overlayFrame.minY, screenFrame.minY),
+                screenFrame.maxY - overlayFrame.height
+            )
+        }
+
+        let overlayView = NSView(frame: NSRect(origin: .zero, size: overlaySize))
+        overlayView.wantsLayer = true
+        overlayView.layer?.backgroundColor = NSColor.clear.cgColor
+        overlayView.layer?.masksToBounds = true
+
+        let overlayWindow = NSPanel(
+            contentRect: overlayFrame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        overlayWindow.isOpaque = false
+        overlayWindow.backgroundColor = .clear
+        overlayWindow.hasShadow = false
+        overlayWindow.ignoresMouseEvents = true
+        overlayWindow.isReleasedWhenClosed = false
+        overlayWindow.isFloatingPanel = true
+        overlayWindow.hidesOnDeactivate = false
+        overlayWindow.animationBehavior = .none
+        overlayWindow.collectionBehavior = [
+            .canJoinAllSpaces,
+            .fullScreenAuxiliary,
+            .transient,
+            .ignoresCycle
+        ]
+        overlayWindow.level = NSWindow.Level(
+            rawValue: popoverWindow.level.rawValue + 1
+        )
+        overlayWindow.contentView = overlayView
+        overlayWindow.orderFrontRegardless()
+        startedPopoverConfettiWindows.append(overlayWindow)
+
+        let origin = CGPoint(
+            x: emitterPoint.x - overlayFrame.minX,
+            y: emitterPoint.y - overlayFrame.minY
+        )
+        let colors: [NSColor] = [
+            .systemPink,
+            .systemYellow,
+            .systemBlue,
+            .systemGreen,
+            .systemPurple,
+            .systemOrange
+        ]
+        let animationStart = CACurrentMediaTime() + 0.08
+
+        func cubicPoint(
+            from start: CGPoint,
+            control1: CGPoint,
+            control2: CGPoint,
+            to end: CGPoint,
+            progress: CGFloat
+        ) -> CGPoint {
+            let inverse = 1 - progress
+            let startWeight = inverse * inverse * inverse
+            let firstControlWeight = 3 * inverse * inverse * progress
+            let secondControlWeight = 3 * inverse * progress * progress
+            let endWeight = progress * progress * progress
+            return CGPoint(
+                x: start.x * startWeight
+                    + control1.x * firstControlWeight
+                    + control2.x * secondControlWeight
+                    + end.x * endWeight,
+                y: start.y * startWeight
+                    + control1.y * firstControlWeight
+                    + control2.y * secondControlWeight
+                    + end.y * endWeight
+            )
+        }
+
+        let particleCount = 22
+        for index in 0..<particleCount {
+            let particle = CALayer()
+            let particleSize: CGSize
+            switch index % 3 {
+            case 0:
+                let diameter = CGFloat.random(in: 3.0...4.5)
+                particleSize = CGSize(width: diameter, height: diameter)
+            case 1:
+                particleSize = CGSize(
+                    width: CGFloat.random(in: 2.5...3.8),
+                    height: CGFloat.random(in: 6.0...8.0)
+                )
+            default:
+                particleSize = CGSize(
+                    width: CGFloat.random(in: 3.0...4.5),
+                    height: CGFloat.random(in: 5.0...7.0)
+                )
+            }
+            particle.bounds = CGRect(origin: .zero, size: particleSize)
+            particle.position = origin
+            particle.backgroundColor = colors[index % colors.count].cgColor
+            particle.cornerRadius = index % 3 == 0
+                ? particleSize.width / 2
+                : min(particleSize.width, particleSize.height) * 0.34
+            overlayView.layer?.addSublayer(particle)
+
+            let fanPosition = CGFloat(index) / CGFloat(particleCount - 1)
+            let launchAngleDegrees = 18
+                + (56 * fanPosition)
+                + CGFloat.random(in: -3.5...3.5)
+            let launchAngle = launchAngleDegrees * .pi / 180
+            let launchDistance = CGFloat.random(in: 66...104)
+            let apexOffset = CGPoint(
+                x: cos(launchAngle) * launchDistance,
+                y: min(sin(launchAngle) * launchDistance, 78)
+            )
+            let fallHorizontalTravel = CGFloat.random(in: 18...44)
+            let fallDistance = CGFloat.random(in: 68...106)
+            let apex = CGPoint(
+                x: origin.x + apexOffset.x,
+                y: origin.y + apexOffset.y
+            )
+            let landing = CGPoint(
+                x: apex.x + fallHorizontalTravel,
+                y: apex.y - fallDistance
+            )
+
+            let apexTime: CGFloat = 0.46
+            let horizontalApexVelocity = CGFloat.random(in: 72...92)
+            let launchControl = CGPoint(
+                x: origin.x + apexOffset.x * 0.36,
+                y: origin.y + apexOffset.y * 0.46
+            )
+            let ascentControl = CGPoint(
+                x: apex.x - horizontalApexVelocity * apexTime / 3,
+                y: apex.y
+            )
+            let descentControl = CGPoint(
+                x: apex.x + horizontalApexVelocity * (1 - apexTime) / 3,
+                y: apex.y
+            )
+            let landingControl = CGPoint(
+                x: landing.x - fallHorizontalTravel * 0.42,
+                y: landing.y + fallDistance * 0.42
+            )
+
+            let sampleCount = 72
+            let positionValues: [NSValue] = (0...sampleCount).map { sample in
+                let progress = CGFloat(sample) / CGFloat(sampleCount)
+                let point: CGPoint
+                if progress <= apexTime {
+                    point = cubicPoint(
+                        from: origin,
+                        control1: launchControl,
+                        control2: ascentControl,
+                        to: apex,
+                        progress: progress / apexTime
+                    )
+                } else {
+                    point = cubicPoint(
+                        from: apex,
+                        control1: descentControl,
+                        control2: landingControl,
+                        to: landing,
+                        progress: (progress - apexTime) / (1 - apexTime)
+                    )
+                }
+                return NSValue(point: point)
+            }
+
+            let position = CAKeyframeAnimation(keyPath: "position")
+            position.values = positionValues
+            position.calculationMode = .linear
+
+            let opacity = CAKeyframeAnimation(keyPath: "opacity")
+            opacity.values = [0, 1, 1, 0]
+            opacity.keyTimes = [0, 0.10, 0.76, 1]
+
+            let rotation = CABasicAnimation(keyPath: "transform.rotation")
+            rotation.fromValue = 0
+            rotation.toValue = CGFloat.random(in: -2.5...2.5) * .pi
+
+            let scale = CAKeyframeAnimation(keyPath: "transform.scale")
+            scale.values = [0.72, 1, 0.92]
+            scale.keyTimes = [0, 0.28, 1]
+
+            let group = CAAnimationGroup()
+            group.animations = [position, opacity, rotation, scale]
+            group.duration = Double.random(in: 1.95...2.30)
+            group.beginTime = animationStart
+                + Double(index % 6) * 0.06
+                + Double(index / 6) * 0.13
+            group.fillMode = .backwards
+            particle.opacity = 0
+            particle.add(group, forKey: "popoverConfetti")
+        }
+
+        emojiLabel.wantsLayer = true
+        let emojiPop = CAKeyframeAnimation(keyPath: "transform.scale")
+        emojiPop.values = [1, 1.18, 0.96, 1]
+        emojiPop.keyTimes = [0, 0.34, 0.68, 1]
+        emojiPop.duration = 0.72
+        emojiPop.beginTime = animationStart
+        emojiPop.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        emojiLabel.layer?.add(emojiPop, forKey: "celebrationPop")
+
+        let closeWorkItem = DispatchWorkItem { [weak self, weak overlayWindow] in
+            guard let self, let overlayWindow else { return }
+            overlayWindow.orderOut(nil)
+            self.startedPopoverConfettiWindows.removeAll { $0 === overlayWindow }
+        }
+        startedPopoverConfettiCloseWorkItems.append(closeWorkItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.35, execute: closeWorkItem)
+    }
+
+    private func closeStartedPopoverConfetti() {
+        startedPopoverConfettiCloseWorkItems.forEach { $0.cancel() }
+        startedPopoverConfettiCloseWorkItems.removeAll()
+        startedPopoverConfettiWindows.forEach { $0.orderOut(nil) }
+        startedPopoverConfettiWindows.removeAll()
+    }
+
+    private func monitorStartedPopoverDismissal() {
+        removeStartedPopoverEventMonitors()
+
+        let mouseEvents: NSEvent.EventTypeMask = [
+            .leftMouseDown,
+            .rightMouseDown,
+            .otherMouseDown
+        ]
+        startedPopoverLocalEventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: mouseEvents
+        ) { [weak self] event in
+            if self?.startedPopoverCelebrationButtonContainsMouse() == true {
+                return event
+            }
+            // Close before returning the event so a status-item click still
+            // reaches the DockAway menu instead of being consumed.
+            let statusItemWasClicked = self?.statusItemContainsMouse() == true
+            self?.closeStartedPopover()
+            if statusItemWasClicked {
+                self?.reopenStatusMenuAfterPopoverClick()
+            }
+            return event
+        }
+        startedPopoverGlobalEventMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: mouseEvents
+        ) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let statusItemWasClicked = self.statusItemContainsMouse()
+                let shouldReopenMenu = self.startedPopover != nil && statusItemWasClicked
+                self.closeStartedPopover()
+                if shouldReopenMenu {
+                    self.reopenStatusMenuAfterPopoverClick()
+                }
+            }
+        }
+    }
+
+    private func statusItemContainsMouse() -> Bool {
+        guard
+            let button = statusItem?.button,
+            let window = button.window
+        else { return false }
+
+        let buttonFrameInWindow = button.convert(button.bounds, to: nil)
+        let buttonFrameOnScreen = window.convertToScreen(buttonFrameInWindow)
+        return buttonFrameOnScreen.contains(NSEvent.mouseLocation)
+    }
+
+    private func startedPopoverCelebrationButtonContainsMouse() -> Bool {
+        guard
+            let button = startedPopoverCelebrationButton,
+            let window = button.window
+        else { return false }
+
+        let buttonFrameInWindow = button.convert(button.bounds, to: nil)
+        let buttonFrameOnScreen = window.convertToScreen(buttonFrameInWindow)
+        return buttonFrameOnScreen.contains(NSEvent.mouseLocation)
+    }
+
+    private func reopenStatusMenuAfterPopoverClick() {
+        DispatchQueue.main.async { [weak self] in
+            guard
+                let self,
+                self.statusItem?.menu != nil,
+                let button = self.statusItem?.button
+            else { return }
+
+            // The popover normally consumes the status-item click while it is
+            // visible. Re-present the native status menu for that same click.
+            button.performClick(nil)
+        }
+    }
+
+    private func removeStartedPopoverEventMonitors() {
+        if let monitor = startedPopoverLocalEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            startedPopoverLocalEventMonitor = nil
+        }
+        if let monitor = startedPopoverGlobalEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            startedPopoverGlobalEventMonitor = nil
+        }
+    }
+
+    private func closeStartedPopover() {
+        startedPopoverCloseWorkItem?.cancel()
+        startedPopoverCloseWorkItem = nil
+        removeStartedPopoverEventMonitors()
+        closeStartedPopoverConfetti()
+        startedPopover?.close()
+        startedPopover = nil
+        startedPopoverContentView = nil
+        startedPopoverCelebrationButton = nil
     }
 
     // MARK: - Accessibility
 
-    private func requestAccessibilityPermission() {
-        if AXIsProcessTrusted() {
-            accessibilityPermissionMissing = false
-            isWaitingForAccessibility = false
-            dockWatcher = DockWatcher()
-            startMonitoringIfAllowed()
-            ensureDockAwayIsOn()
-            showWelcomeIfNeeded()
-        } else {
-            accessibilityPermissionMissing = true
-            updateDockAwayMenuState()
+    private func startPermissionHealthMonitoring() {
+        permissionHealthTimer?.invalidate()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard
+                let self,
+                !self.isQuitting,
+                !self.permissionSetupInProgress,
+                !self.permissionRelaunchScheduled
+            else { return }
 
-            let alert = NSAlert()
-            alert.messageText = "But First ☝️"
-            alert.informativeText = "Accessibility Permission is Required:\nDockAway uses Accessibility to detect window changes and manage the Dock. Input Monitoring is a separate optional permission used for early four-finger gesture detection; if it is missing, DockAway will show a direct shortcut in its menu."
-            alert.alertStyle = .informational
-            
-            alert.addButton(withTitle: "Allow Access")
-            alert.addButton(withTitle: "Quit")
-            alert.layout()
-            
-            NSApp.activate(ignoringOtherApps: true)
-            
-            if let contentView = alert.window.contentView {
-                func findTextField(in view: NSView, matching text: String) -> NSTextField? {
-                    if let textField = view as? NSTextField, textField.stringValue.contains(text) {
-                        return textField
-                    }
-                    for subview in view.subviews {
-                        if let found = findTextField(in: subview, matching: text) {
-                            return found
-                        }
-                    }
-                    return nil
-                }
-                
-                if let informativeTextField = findTextField(in: contentView, matching: "Accessibility Permission is Required:") {
-                    let fullString = informativeTextField.stringValue as NSString
-                    let targetLine = "Accessibility Permission is Required:"
-                    let firstLineRange = fullString.range(of: targetLine)
-                    let remainingRange = NSRange(location: firstLineRange.length, length: fullString.length - firstLineRange.length)
-                    
-                    let attributedString = NSMutableAttributedString(string: informativeTextField.stringValue)
-                    
-                    attributedString.addAttribute(.font, value: NSFont.boldSystemFont(ofSize: 11), range: firstLineRange)
-                    attributedString.addAttribute(.foregroundColor, value: NSColor.labelColor, range: firstLineRange)
-                    attributedString.addAttribute(.font, value: NSFont.systemFont(ofSize: 11), range: remainingRange)
-                    attributedString.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: remainingRange)
-                    
-                    let paragraphStyle = NSMutableParagraphStyle()
-                    paragraphStyle.lineSpacing = 2
-                    paragraphStyle.paragraphSpacing = 4
-                    attributedString.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: fullString.length))
-                    
-                    informativeTextField.attributedStringValue = attributedString
-                }
+            if !AXIsProcessTrusted(), !self.accessibilityPermissionMissing {
+                self.accessibilityPermissionWasRevoked()
             }
-            
-            if alert.runModal() == .alertFirstButtonReturn {
-                let options: NSDictionary = [kAXTrustedCheckOptionPrompt.takeRetainedValue(): true]
-                AXIsProcessTrustedWithOptions(options)
-                isWaitingForAccessibility = true
-                waitForAccessibility()
-            } else {
-                NSApp.terminate(nil)
+
+            let inputMonitoringShouldBeMissing = !self.inputMonitoringAccessGranted
+            if inputMonitoringShouldBeMissing != self.inputMonitoringPermissionMissing {
+                self.refreshInputMonitoringPermission()
             }
         }
+        permissionHealthTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func waitForAccessibility() {
@@ -3558,12 +5359,16 @@ private final class BlacklistHelpMenuItemView: NSView {
                 self.isWaitingForAccessibility = false
                 self.accessibilityWaitWorkItem = nil
                 dockAwayDebugLog("✅ Accessibility granted - starting detector")
+                if self.permissionSetupInProgress {
+                    self.refreshInputMonitoringPermission()
+                    self.updateDockAwayMenuState()
+                    return
+                }
                 if self.dockWatcher == nil {
                     self.dockWatcher = DockWatcher()
                 }
                 self.startMonitoringIfAllowed()
                 self.ensureDockAwayIsOn()
-                self.showWelcomeIfNeeded()
                 self.updateDockAwayMenuState()
             } else {
                 self.accessibilityPermissionMissing = true
@@ -3587,6 +5392,7 @@ private final class BlacklistHelpMenuItemView: NSView {
             self.dockWatcher?.stop()
             self.multitouch.stop()
             self.updateDockAwayMenuState()
+            self.showPermissionRevokedPopover()
             self.waitForAccessibility()
             dockAwayDebugLog("⚠️ Accessibility permission removed — DockAway paused")
         }
@@ -3599,13 +5405,6 @@ private final class BlacklistHelpMenuItemView: NSView {
     }
 
     @objc private func openAccessibilitySettings() {
-        if !AXIsProcessTrusted() {
-            let options: NSDictionary = [
-                kAXTrustedCheckOptionPrompt.takeRetainedValue(): true
-            ]
-            _ = AXIsProcessTrustedWithOptions(options)
-        }
-
         accessibilityPermissionMissing = !AXIsProcessTrusted()
         isWaitingForAccessibility = accessibilityPermissionMissing
         updateDockAwayMenuState()
@@ -3627,12 +5426,15 @@ private final class BlacklistHelpMenuItemView: NSView {
 
     @discardableResult
     private func refreshInputMonitoringPermission() -> Bool {
-        let permissionIsGranted = CGPreflightListenEventAccess()
+        let permissionWasMissing = inputMonitoringPermissionMissing
+        let permissionIsGranted = inputMonitoringAccessGranted
         inputMonitoringPermissionMissing = !permissionIsGranted
 
         if permissionIsGranted {
+            resetInputMonitoringSettingsVisit()
             inputMonitoringWaitWorkItem?.cancel()
             inputMonitoringWaitWorkItem = nil
+            stopInputMonitoringRegistrationAttempt()
             startMultitouchPreHide()
         } else {
             fourFingersDown = false
@@ -3641,7 +5443,109 @@ private final class BlacklistHelpMenuItemView: NSView {
         }
 
         updateDockAwayMenuState()
+        if !permissionIsGranted, !permissionWasMissing {
+            showPermissionRevokedPopover()
+        }
         return permissionIsGranted
+    }
+
+    private func refreshInputMonitoringSettingsVisit() {
+        guard inputMonitoringSettingsVisitInProgress else { return }
+
+        if inputMonitoringAccessGranted {
+            inputMonitoringRestartPending = false
+            return
+        }
+
+        let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let systemSettingsIsFrontmost = frontmostBundleIdentifier == "com.apple.systempreferences"
+            || frontmostBundleIdentifier == "com.apple.SystemSettings"
+
+        if systemSettingsIsFrontmost {
+            inputMonitoringSettingsWasFrontmost = true
+        }
+
+        guard inputMonitoringSettingsWasFrontmost else { return }
+        runInputMonitoringPermissionProbeIfNeeded()
+    }
+
+    private func runInputMonitoringPermissionProbeIfNeeded() {
+        guard
+            inputMonitoringPermissionProbe == nil,
+            Date().timeIntervalSince(inputMonitoringPermissionProbeLastRun) >= 0.5,
+            let executableURL = Bundle.main.executableURL
+        else { return }
+
+        inputMonitoringPermissionProbeLastRun = Date()
+        let probe = Process()
+        probe.executableURL = executableURL
+        probe.arguments = ["--dockaway-input-monitoring-probe"]
+        probe.standardInput = FileHandle.nullDevice
+        probe.standardOutput = FileHandle.nullDevice
+        probe.standardError = FileHandle.nullDevice
+        probe.terminationHandler = { [weak self, weak probe] finishedProbe in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let probe, self.inputMonitoringPermissionProbe === probe {
+                    self.inputMonitoringPermissionProbe = nil
+                }
+                guard self.inputMonitoringSettingsVisitInProgress else { return }
+
+                // The current process remains denied until it restarts, while
+                // each fresh copy sees the permission state macOS has recorded
+                // right now. Keep probing throughout onboarding so turning the
+                // switch back off immediately clears the pending grant.
+                self.inputMonitoringRestartPending =
+                    finishedProbe.terminationReason == .exit
+                    && finishedProbe.terminationStatus == EXIT_SUCCESS
+            }
+        }
+
+        inputMonitoringPermissionProbe = probe
+        do {
+            try probe.run()
+        } catch {
+            inputMonitoringPermissionProbe = nil
+            dockAwayDebugLog("⚠️ Could not run Input Monitoring permission probe: \(error)")
+        }
+    }
+
+    private func resetInputMonitoringSettingsVisit() {
+        inputMonitoringSettingsVisitInProgress = false
+        inputMonitoringSettingsWasFrontmost = false
+        inputMonitoringRestartPending = false
+    }
+
+    private func startInputMonitoringRegistrationAttempt() {
+        guard inputMonitoringRegistrationManager == nil else { return }
+
+        let manager = IOHIDManagerCreate(
+            kCFAllocatorDefault,
+            IOOptionBits(kIOHIDOptionsTypeNone)
+        )
+        IOHIDManagerSetDeviceMatching(manager, nil)
+        IOHIDManagerScheduleWithRunLoop(
+            manager,
+            CFRunLoopGetMain(),
+            CFRunLoopMode.commonModes.rawValue
+        )
+        inputMonitoringRegistrationManager = manager
+
+        // Opening a manager is the actual protected listen operation. Apple's
+        // IOHID contract requests access on the process's behalf here, which
+        // gives TCC a concrete DockAway client to add to Input Monitoring.
+        _ = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+    }
+
+    private func stopInputMonitoringRegistrationAttempt() {
+        guard let manager = inputMonitoringRegistrationManager else { return }
+        IOHIDManagerUnscheduleFromRunLoop(
+            manager,
+            CFRunLoopGetMain(),
+            CFRunLoopMode.commonModes.rawValue
+        )
+        _ = IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        inputMonitoringRegistrationManager = nil
     }
 
     private func waitForInputMonitoringPermission() {
@@ -3667,24 +5571,20 @@ private final class BlacklistHelpMenuItemView: NSView {
     }
 
     @objc private func openInputMonitoringSettings() {
-        // This user-initiated request lets macOS present its native permission
-        // prompt. The Settings link remains useful when the app is already in
-        // the list but its switch is off.
-        _ = CGRequestListenEventAccess()
-
+        // Open the native privacy pane directly. Calling IOHIDRequestAccess or
+        // opening an IOHID manager here triggers an additional protected-device
+        // consent dialog that is unnecessary because onboarding already explains
+        // how to enable Input Monitoring in System Settings.
+        inputMonitoringSettingsVisitInProgress = true
+        inputMonitoringSettingsWasFrontmost = false
+        inputMonitoringRestartPending = false
+        updateDockAwayMenuState()
         if let settingsURL = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
         ) {
             NSWorkspace.shared.open(settingsURL)
         }
-
-        inputMonitoringPermissionMissing = !CGPreflightListenEventAccess()
-        updateDockAwayMenuState()
-        if inputMonitoringPermissionMissing {
-            waitForInputMonitoringPermission()
-        } else {
-            startMultitouchPreHide()
-        }
+        waitForInputMonitoringPermission()
     }
 
     // MARK: - Unix Signal & Cleanup
@@ -3768,15 +5668,20 @@ private final class BlacklistHelpMenuItemView: NSView {
 
     func applicationWillTerminate(_ notification: Notification) {
         isQuitting = true
-        cancelBlacklistReorderAnimation()
+        closeStartedPopover()
+        permissionHealthTimer?.invalidate()
+        permissionHealthTimer = nil
         accessibilityWaitWorkItem?.cancel()
         inputMonitoringWaitWorkItem?.cancel()
+        stopInputMonitoringRegistrationAttempt()
         dockWatcher?.stop()
         multitouch.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         DistributedNotificationCenter.default().removeObserver(self)
-        restoreDockState()
-        restoreDefaultDockPreferencesBeforeExitIfNeeded()
+        if !isPermissionRelaunching {
+            restoreDockState()
+            restoreDefaultDockPreferencesBeforeExitIfNeeded()
+        }
     }
 }
 
@@ -3832,18 +5737,13 @@ extension AppDelegate: NSMenuDelegate {
         } else if menu === dockSettingsMenu {
             refreshDockSettingsMenu()
         } else if menu === statusItem.menu {
+            closeStartedPopover()
             // The menu opening is an event-driven opportunity to reflect a
             // manual Dock shortcut or a permission changed in System Settings.
             applyStatusIcon(dockVisible: isDockCurrentlyVisible())
             refreshInputMonitoringPermission()
             refreshDockSettingsMenu()
             refreshUpdateFrequencyMenu()
-        }
-    }
-
-    func menuDidClose(_ menu: NSMenu) {
-        if menu === blacklistMenu {
-            cancelBlacklistReorderAnimation()
         }
     }
 }

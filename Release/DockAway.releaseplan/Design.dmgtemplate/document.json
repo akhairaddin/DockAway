@@ -92,25 +92,37 @@
         },
         "blendMode" : "normal",
         "blurFeather" : 0,
-        "blurRadius" : 0,
+        "blurRadius" : 15.550683709869203,
         "color" : {
-          "blue" : 1,
-          "green" : 0.5982644557952881,
-          "red" : 0
+          "blue" : 0.9292758703231812,
+          "green" : 0.9728518128395081,
+          "red" : 0.8870283365249634
         },
-        "cornerRadius" : 20.222494553376904,
+        "cornerRadius" : 30.16617122473246,
         "enabled" : true,
         "glass" : {
-          "borderOpacity" : 0.5016271786492376,
+          "borderOpacity" : 0.6090142178882388,
           "borderWidth" : 1,
           "enabled" : true,
-          "innerShadowOpacity" : 1,
-          "innerShadowRadius" : 0,
+          "innerShadowOpacity" : 0.14216706302021404,
+          "innerShadowRadius" : 10.206599286563616,
           "lightAngle" : 90.36764705882352,
-          "saturation" : 2
+          "saturation" : 1.154522146254459
         },
-        "opacity" : 0,
-        "padding" : 10.122549019607844
+        "opacity" : 0.15632213051689162,
+        "padding" : 10.384108359951195,
+        "shadow" : {
+          "color" : {
+            "blue" : 0,
+            "green" : 0,
+            "red" : 0
+          },
+          "enabled" : true,
+          "offsetX" : 0,
+          "offsetY" : 8,
+          "opacity" : 0.2813986325802616,
+          "radius" : 16.293697978596906
+        }
       },
       "id" : "4216D79E-8D08-4A60-ABFB-2D77FEFD6C1D",
       "isPlaceholder" : false,
@@ -132,25 +144,37 @@
         },
         "blendMode" : "normal",
         "blurFeather" : 0,
-        "blurRadius" : 0,
+        "blurRadius" : 15.550683709869203,
         "color" : {
-          "blue" : 1,
-          "green" : 0.5982644557952881,
-          "red" : 0
+          "blue" : 0.9292758703231812,
+          "green" : 0.9728518128395081,
+          "red" : 0.8870283365249634
         },
-        "cornerRadius" : 20.222494553376904,
+        "cornerRadius" : 30.16617122473246,
         "enabled" : true,
         "glass" : {
-          "borderOpacity" : 0.5016271786492376,
+          "borderOpacity" : 0.6090142178882388,
           "borderWidth" : 1,
           "enabled" : true,
-          "innerShadowOpacity" : 1,
-          "innerShadowRadius" : 0,
+          "innerShadowOpacity" : 0.14216706302021404,
+          "innerShadowRadius" : 10.206599286563616,
           "lightAngle" : 90.36764705882352,
-          "saturation" : 2
+          "saturation" : 1.154522146254459
         },
-        "opacity" : 0,
-        "padding" : 10.122549019607844
+        "opacity" : 0.15632213051689162,
+        "padding" : 10.384108359951195,
+        "shadow" : {
+          "color" : {
+            "blue" : 0,
+            "green" : 0,
+            "red" : 0
+          },
+          "enabled" : true,
+          "offsetX" : 0,
+          "offsetY" : 8,
+          "opacity" : 0.2813986325802616,
+          "radius" : 16.293697978596906
+        }
       },
       "id" : "9A29DBD5-1BAF-4667-9B1E-6B172ECB8443",
       "isPlaceholder" : true,
@@ -228,7 +252,7 @@
       "isItalic" : false,
       "position" : [
         280,
-        335
+        345
       ],
       "text" : "Copyright © 2026 Abdullah Khairaddin All rights reserved."
     }

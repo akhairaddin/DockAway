@@ -7,7 +7,8 @@
 A tiny macOS menu-bar utility that keeps your Dock out of the way. It shows the Dock on an empty desktop and normally hides it when an app window occupies the active display. Applications you add to the blacklist can keep the Dock shown while they are in front.
 
 <p align="center">
-  <a href="https://github.com/akhairaddin/DockAway/releases/latest">Install</a> ·
+  <a href="https://github.com/akhairaddin/DockAway/releases/latest">Download (Latest Version)</a> ·
+  <a href="#first-launch-and-permissions">Setup</a> ·
   <a href="#features">Features</a> ·
   <a href="#privacy">Privacy</a> ·
   <a href="changelog.html">Changelog</a> ·
@@ -31,10 +32,17 @@ A tiny macOS menu-bar utility that keeps your Dock out of the way. It shows the 
 
 DockAway uses the system shortcut **⌘⌥D** (Command+Option+D), the same shortcut you can press manually to toggle Dock auto-hide. Before acting, it checks the live Dock state to avoid unnecessary or duplicate toggles.
 
+## First launch and permissions
+
+DockAway opens a guided setup the first time it runs. Begin with **Input Monitoring**, enable DockAway in System Settings, and choose **Later** if macOS asks whether to quit and reopen the app. Then grant **Accessibility** and return to DockAway. The **Continue** button becomes available once both permissions are ready, and DockAway performs the required restart for you.
+
+Permission status remains live while setup and System Settings are open. If access is switched off again, DockAway immediately returns that step to its incomplete state. If either permission is revoked later, DockAway pauses safely, identifies the missing permission in its menu, and guides you back through setup when you press Resume.
+
 ## Features
 
 - A lightweight, native Swift menu-bar app.
 - Official releases are signed with an Apple Developer ID and notarized by Apple.
+- Includes guided first-launch setup with live Input Monitoring and Accessibility status, a clear primary action, and automatic restart when setup is complete.
 - Works well alongside window-management apps such as Rectangle by Ryan Hanson and Swish by Christian Renninger.
 - Responds to app switches, window changes, and Space or desktop swipes.
 - Detects the desktop state on the display under your pointer, rather than just checking Finder. This correctly handles minimizing an app's last window, tiled/split-screen layouts, trackpad gesture minimizing, and multi-display setups.
@@ -51,17 +59,17 @@ DockAway uses the system shortcut **⌘⌥D** (Command+Option+D), the same short
 ## Menu bar
 
 - **Status**: Shows the active app and whether DockAway is currently running. If a required permission is unavailable, the header displays **Permission Required** and identifies the missing access.
-- **Stop / Resume**: Temporarily pauses DockAway and restores normal Dock visibility, then resumes monitoring from the same media-style control. When permission is missing, the resume button requests it and opens the appropriate System Settings page.
+- **Stop / Resume**: Temporarily pauses DockAway and restores normal Dock visibility, then resumes monitoring from the same media-style control. When permission is missing, the resume control draws attention gently and reopens guided setup so access can be restored.
 - **Blacklist**: Check running apps directly or choose installed apps from Finder so their windows do not hide the Dock.
 - **Dock Settings**: Move the Dock to the left, bottom, or right; tune animation speed and reveal delay; choose which settings remain after quitting; or restore the macOS defaults.
 - **Launch at Login Toggle**: Activates via `SMAppService`, with no System Settings round-trip needed.
-- **Update Frequency**: Choose Daily, Every 3 Days, Weekly, or Manual Only. Sparkle remembers the selection, and manual update checks remain available with every option.
+- **Update Frequency**: Daily checks and Check at Launch are enabled by default. You can choose Daily, Every 3 Days, Weekly, or Manual Only, and disable launch checks independently. Sparkle remembers both selections, and manual update checks remain available with every option.
 - **About DockAway**: Opens the standard macOS About panel.
 - **Quit**: Resets Dock auto-hide to off and restores the Dock to its normal visible state.
 
 ## Application Blacklist
 
-By default, every standard app window counts as an occupied display. Open **Blacklist** from DockAway's menu-bar menu and check any running app that should keep the Dock shown while it is in front. Use **Choose Application…** to select an app that is not currently open. Blacklisted apps remain listed with a checkmark and can be removed individually, or all at once with **Remove All**. When another app is brought in front of a blacklisted app, DockAway resumes its normal hiding behavior.
+By default, every standard app window counts as an occupied display. Open **Blacklist** from DockAway's menu-bar menu and click anywhere across an application row to keep the Dock shown while that app is in front. Use **Choose Application…** to select an app that is not currently open. Blacklisted apps remain grouped at the top and can be removed individually, or all at once with **Remove All**. The rows and **Remove All** update immediately as the blacklist changes. When another app is brought in front of a blacklisted app, DockAway resumes its normal hiding behavior.
 
 ## Requirements
 
