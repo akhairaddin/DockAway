@@ -3555,7 +3555,7 @@ private final class OnboardingPrimaryButton: NSButton {
 
         let updateIsAvailable = availableUpdateVersion != nil
         if let version = availableUpdateVersion {
-            updateMenuItem.title = "Update Available — v\(version)"
+            updateMenuItem.title = "Update Available v\(version)"
             updateMenuItem.toolTip = "Install DockAway \(version)"
         } else {
             updateMenuItem.title = "Check for Updates..."
@@ -3563,7 +3563,7 @@ private final class OnboardingPrimaryButton: NSButton {
         }
 
         let symbolName = updateIsAvailable
-            ? "arrow.down.circle.fill"
+            ? "arrow.down"
             : "arrow.triangle.2.circlepath"
         updateMenuItem.state = .on
         updateMenuItem.onStateImage = menuIcon(from: NSImage(
@@ -5694,6 +5694,22 @@ extension AppDelegate: SPUUpdaterDelegate {
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         showAvailableUpdate(item)
     }
+
+    func updater(
+        _ updater: SPUUpdater,
+        userDidMake choice: SPUUserUpdateChoice,
+        forUpdate item: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        switch choice {
+        case .skip:
+            clearAvailableUpdateIndicator()
+        case .dismiss, .install:
+            showAvailableUpdate(item)
+        @unknown default:
+            showAvailableUpdate(item)
+        }
+    }
 }
 
 // MARK: - Sparkle Gentle Reminders
@@ -5703,13 +5719,14 @@ extension AppDelegate: SPUStandardUserDriverDelegate {
         true
     }
 
-    // Scheduled checks never steal focus. Sparkle keeps the update session
-    // ready, while DockAway changes its menu item into the gentle reminder.
+    // Let Sparkle present its native update window when a scheduled or
+    // launch-time check finds an update. DockAway still mirrors the available
+    // version in its menu so the update remains easy to return to later.
     func standardUserDriverShouldHandleShowingScheduledUpdate(
         _ update: SUAppcastItem,
         andInImmediateFocus immediateFocus: Bool
     ) -> Bool {
-        false
+        true
     }
 
     func standardUserDriverWillHandleShowingUpdate(
@@ -5721,13 +5738,6 @@ extension AppDelegate: SPUStandardUserDriverDelegate {
         showAvailableUpdate(update)
     }
 
-    func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
-        clearAvailableUpdateIndicator()
-    }
-
-    func standardUserDriverWillFinishUpdateSession() {
-        clearAvailableUpdateIndicator()
-    }
 }
 
 extension AppDelegate: NSMenuDelegate {
