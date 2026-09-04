@@ -74,6 +74,13 @@ download_prefix="https://github.com/$github_repo/releases/download/$version/"
     "$stage_dir"
 
 generated_appcast="$stage_dir/appcast.xml"
+# DockAway uses one public changelog page for each update item. Sparkle's
+# full-release-notes option emits a channel-level companion link, so convert it
+# to the per-update release notes link that the updater displays.
+sed -i '' \
+    's#sparkle:fullReleaseNotesLink#sparkle:releaseNotesLink#g' \
+    "$generated_appcast"
+
 expected_version="<sparkle:shortVersionString>$version</sparkle:shortVersionString>"
 expected_download="$download_prefix$dmg_name"
 
@@ -81,6 +88,9 @@ grep -F "$expected_version" "$generated_appcast" >/dev/null \
     || fail "Generated appcast does not contain version $version."
 grep -F "$expected_download" "$generated_appcast" >/dev/null \
     || fail "Generated appcast does not contain the GitHub DMG URL."
+grep -F "<sparkle:releaseNotesLink>$release_notes_url</sparkle:releaseNotesLink>" \
+    "$generated_appcast" >/dev/null \
+    || fail "Generated appcast does not contain the changelog link."
 grep -F 'sparkle:edSignature=' "$generated_appcast" >/dev/null \
     || fail "Generated appcast does not contain a Sparkle signature."
 

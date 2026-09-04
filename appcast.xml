@@ -2,15 +2,15 @@
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>DockAway</title>
-        <!-- 1.1.9 RELEASE -->
+        <!-- RELEASES -->
         <item>
             <title>1.2</title>
-            <pubDate>Fri, 04 Sep 2026 05:53:20 -0400</pubDate>
-            <sparkle:fullReleaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:fullReleaseNotesLink>
-            <sparkle:version>13</sparkle:version>
+            <pubDate>Fri, 04 Sep 2026 06:05:38 -0400</pubDate>
+            <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
+            <sparkle:version>12</sparkle:version>
             <sparkle:shortVersionString>1.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.2/DockAway-1.2.dmg" length="4133329" type="application/octet-stream" sparkle:edSignature="UZQ32DjwVLC+zDFW6ZsCslQtR55QbvlW85TRsV0DvhdhMV3VPL75NQ3JX5Ia/hV+/dq20dDkP8XWIs/zLyoCCA=="/>
+            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.2/DockAway-1.2.dmg" length="4130749" type="application/octet-stream" sparkle:edSignature="5XqbEUQMgA4P5D6T7tybJBCzg1Vfoeq19d9aZFy/wl/XqT02R9JluxovIKetHzUkHAgLnsGlFbVAzxqntNa0Bw=="/>
         </item>
         <item>
             <title>1.1.9</title>
