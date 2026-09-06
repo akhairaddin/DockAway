@@ -26,12 +26,12 @@ A tiny macOS menu-bar utility that keeps your Dock out of the way when you don't
     <tr><th>What is on the active display?</th><th>DockAway's response</th></tr>
   </thead>
   <tbody>
-    <tr><td>An empty desktop with no app windows</td><td>Dock shown</td></tr>
-    <tr><td>One or more app windows</td><td>Dock hidden</td></tr>
-    <tr><td>A blacklisted app is frontmost</td><td>Dock shown</td></tr>
-    <tr><td>A blacklisted app is visible, but a non-blacklisted app is in front</td><td>Dock hidden</td></tr>
-    <tr><td>The only or last window is minimized</td><td>Dock shown</td></tr>
-    <tr><td>One of multiple windows is minimized</td><td>Dock remains hidden</td></tr>
+    <tr><td>An empty desktop with no app windows</td><td align="center">Dock shown</td></tr>
+    <tr><td>One or more app windows</td><td align="center">Dock hidden</td></tr>
+    <tr><td>A blacklisted app is frontmost</td><td align="center">Dock shown</td></tr>
+    <tr><td>A blacklisted app is visible, but a non-blacklisted app is in front</td><td align="center">Dock hidden</td></tr>
+    <tr><td>The only or last window is minimized</td><td align="center">Dock shown</td></tr>
+    <tr><td>One of multiple windows is minimized</td><td align="center">Dock remains hidden</td></tr>
   </tbody>
 </table>
 
