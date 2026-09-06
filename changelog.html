@@ -8,8 +8,11 @@
     </style>
 </head>
 <body>
-    <h3>Unreleased</h3>
+    <h3>Version 1.2.1 <span style="font-weight: normal;">(9-6-26)</span></h3>
     <ul>
+        <li><b>Native Liquid Glass Sliders:</b> Dock Settings sliders now use the system renderer for their interactive Liquid Glass pills on supported macOS versions. Filled tracks follow the system accent color, while snapping and haptic feedback remain. Custom checkpoint dots and imitation glass drawing have been removed.</li>
+        <li><b>Less Work on the UI Thread:</b> Repeated Mission Control Accessibility queries now run on a dedicated background worker. Requests coalesce instead of piling up, obsolete results are discarded, and startup guards keep Dock decisions protected until the initial state is resolved. Animation timings are unchanged.</li>
+        <li><b>Small Efficiency Improvements:</b> Blacklist menus reuse live application metadata instead of repeating bundle and icon lookups for the same rows. Permission health checks allow timer coalescing while retaining their existing polling policy.</li>
         <li><b>More Reliable Live Permissions:</b> Accessibility and Input Access are now rechecked throughout onboarding, even after a grant and when System Settings was opened separately. Fresh checks replace cached grants, outdated results are ignored, and failed or stalled authorization checks leave Continue unavailable while DockAway retries.</li>
         <li><b>Restart Only When Needed:</b> Continue verifies authorization, checks access in the running app, and revalidates authorization before finishing. Setup completes in place when access is usable and monitoring starts successfully. An automatic restart remains a fallback for confirmed access that cannot be activated; missing or unconfirmed authorization keeps onboarding open.</li>
         <li><b>Responsive Permission Checks:</b> Potentially blocking access checks now run off the UI thread. Checks are serialized, timeouts are handled safely, and canceled or outdated results cannot complete setup after it has been interrupted.</li>

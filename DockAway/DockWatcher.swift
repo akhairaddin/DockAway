@@ -302,6 +302,9 @@ final class DockWatcher {
     private var visibleHoldDestinationTimer: Timer?
     private var accessibilityObservations = [pid_t: DockWatcherAXObservation]()
     private var dockAccessibilityObservation: DockWatcherAXObservation?
+    private let missionControlProbe = MissionControlProbe()
+    private var missionControlNeedsBootstrap = true
+    private var missionControlFallbackRequested = false
     private var missionControlIsActive = false
     private var desktopTransitionPhase: DesktopTransitionPhase = .idle
     private var desktopTransitionGeneration = 0
@@ -385,6 +388,7 @@ final class DockWatcher {
 
     private var isDesktopTransitionProtected: Bool {
         desktopTransitionPhase != .idle || missionControlIsActive
+            || (isRunning && missionControlNeedsBootstrap)
     }
 
     private var isHoldingHidden: Bool {
@@ -920,6 +924,7 @@ final class DockWatcher {
             pendingDockObserverRetry = nil
             dockObserverRetryAttempt = 0
             installDockAccessibilityObserver()
+            refreshMissionControlState(allowWindowServerFallback: true)
             scheduleMissionControlRefresh(after: missionControlActiveProbeInterval)
             return
         }
@@ -1051,7 +1056,6 @@ final class DockWatcher {
         if let observation = dockAccessibilityObservation,
            observation.context.processIdentifier == processIdentifier {
             registerDockMissionControlNotificationIfNeeded(for: observation)
-            refreshMissionControlState(allowWindowServerFallback: false)
             return
         }
 
@@ -1096,7 +1100,6 @@ final class DockWatcher {
         )
         registerDockMissionControlNotificationIfNeeded(for: observation)
         nextMissionControlProbeAt = .distantPast
-        refreshMissionControlState(allowWindowServerFallback: true)
     }
 
     private func registerDockMissionControlNotificationIfNeeded(
@@ -1150,6 +1153,7 @@ final class DockWatcher {
             self.pendingDockObserverRetry = nil
             guard self.isRunning else { return }
             self.installDockAccessibilityObserver()
+            self.refreshMissionControlState(allowWindowServerFallback: true)
         }
         pendingDockObserverRetry = work
         DispatchQueue.main.asyncAfter(
@@ -1159,6 +1163,9 @@ final class DockWatcher {
     }
 
     private func removeDockAccessibilityObserver() {
+        missionControlProbe.invalidate()
+        missionControlNeedsBootstrap = true
+        missionControlFallbackRequested = false
         guard let observation = dockAccessibilityObservation else { return }
 
         CFRunLoopRemoveSource(
@@ -1183,7 +1190,10 @@ final class DockWatcher {
             CFEqual(observation.observer, observer)
         else { return }
 
-        refreshMissionControlState(allowWindowServerFallback: true)
+        refreshMissionControlState(
+            allowWindowServerFallback: true,
+            invalidatingInFlightResult: true
+        )
         scheduleMissionControlRefresh(after: missionControlActiveProbeInterval)
     }
 
@@ -1218,80 +1228,75 @@ final class DockWatcher {
         )
     }
 
-    private func refreshMissionControlState(allowWindowServerFallback: Bool) {
+    private func refreshMissionControlState(
+        allowWindowServerFallback: Bool,
+        invalidatingInFlightResult: Bool = false
+    ) {
         guard isRunning else { return }
 
         if dockAccessibilityObservation == nil {
             installDockAccessibilityObserver()
         }
 
-        let axState = missionControlAXState()
-        var isActive = axState.isActive
-        if !isActive,
-           allowWindowServerFallback
-                || !axState.querySucceeded
-                || missionControlIsActive
-                || desktopTransitionPhase != .idle
-                || isHoldingHidden
-                || isHoldingVisible {
-            isActive = missionControlWindowServerState()
+        // Coalescing a periodic tick must not discard an earlier notification's
+        // request for a fresh WindowServer cross-check.
+        missionControlFallbackRequested = missionControlFallbackRequested
+            || allowWindowServerFallback || invalidatingInFlightResult
+        if invalidatingInFlightResult {
+            // A real Dock state edge makes the previous snapshot uncertain.
+            // Protect decisions until its replacement arrives, not the UI thread.
+            missionControlNeedsBootstrap = true
         }
 
-        updateMissionControlState(isActive)
-    }
-
-    private func missionControlAXState() -> (
-        isActive: Bool,
-        querySucceeded: Bool
-    ) {
-        guard let applicationElement = dockAccessibilityObservation?.applicationElement else {
-            return (false, false)
-        }
-
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(
-            applicationElement,
-            kAXChildrenAttribute as CFString,
-            &value
-        )
-        guard result == .success, let children = value as? [AXUIElement] else {
-            return (false, false)
-        }
-
-        var hadTransientIdentifierFailure = false
-        for child in children {
-            AXUIElementSetMessagingTimeout(child, 0.10)
-            var identifierValue: CFTypeRef?
-            let identifierResult = AXUIElementCopyAttributeValue(
-                child,
-                kAXIdentifierAttribute as CFString,
-                &identifierValue
-            )
-            guard identifierResult == .success else {
-                if identifierResult == .cannotComplete
-                    || identifierResult == .invalidUIElement
-                    || identifierResult == .apiDisabled
-                    || identifierResult == .failure {
-                    hadTransientIdentifierFailure = true
-                }
-                continue
-            }
-
-            if identifierValue as? String == "mc" {
-                return (true, true)
+        // Startup must protect the Dock before the first occupancy decision.
+        // A notification also gets an immediate entry check while AX runs off
+        // the UI thread. Never interpret a failed snapshot as an empty desktop.
+        if missionControlNeedsBootstrap || invalidatingInFlightResult {
+            let snapshot = missionControlWindowServerStateSnapshot()
+            if snapshot == true {
+                updateMissionControlState(true)
             }
         }
 
-        return (false, !hadTransientIdentifierFailure)
+        guard let pid = dockAccessibilityObservation?.context.processIdentifier else {
+            if let snapshot = missionControlWindowServerStateSnapshot() {
+                missionControlNeedsBootstrap = false
+                updateMissionControlState(snapshot)
+            }
+            return
+        }
+
+        missionControlProbe.request(
+            pid: pid,
+            invalidatingInFlightResult: invalidatingInFlightResult
+        ) { [weak self] result in
+            guard let self, self.isRunning,
+                  self.dockAccessibilityObservation?.context.processIdentifier == pid else { return }
+            var fallback: Bool?
+            if !result.isActive,
+               self.missionControlFallbackRequested || !result.querySucceeded
+                    || self.missionControlIsActive || self.desktopTransitionPhase != .idle
+                    || self.isHoldingHidden || self.isHoldingVisible {
+                fallback = self.missionControlWindowServerStateSnapshot()
+            }
+            guard let isActive = result.resolve(windowServer: fallback) else {
+                // Both sources are uncertain. Keep protection and retry on
+                // the existing timer instead of publishing a false exit.
+                return
+            }
+            let wasBootstrapping = self.missionControlNeedsBootstrap
+            self.missionControlNeedsBootstrap = false
+            self.missionControlFallbackRequested = false
+            self.updateMissionControlState(isActive)
+            if wasBootstrapping {
+                self.scheduleAccessibilityEvaluation(includeSettleRecheck: true)
+            }
+        }
     }
 
     // Tahoe and the current beta expose a WindowManager "Spaces Bar" at
     // layer 14 only for Mission Control (not App Exposé or Show Desktop).
     // This is an undocumented fallback used only when AX is late or unavailable.
-    private func missionControlWindowServerState() -> Bool {
-        missionControlWindowServerStateSnapshot() ?? false
-    }
-
     private func missionControlWindowServerStateSnapshot() -> Bool? {
         let options: CGWindowListOption = [.optionOnScreenOnly]
         guard let windows = CGWindowListCopyWindowInfo(
@@ -1703,6 +1708,7 @@ final class DockWatcher {
     // use the stable build's early HIDE timing, while an empty destination can
     // keep the Dock continuously visible.
     func prepareHorizontalSpacePredictionAtGestureStart() {
+        guard !missionControlNeedsBootstrap else { return }
         cancelDockDisplayHandoff()
         horizontalSpacePrediction = nil
         let predictionStartedAt = ProcessInfo.processInfo.systemUptime
@@ -2371,8 +2377,9 @@ final class DockWatcher {
     // Captures the already-maintained Mission Control state on first contact.
     // This must remain a cache read: synchronous AX/Window Server work here
     // delays the following motion callback until the Space animation begins.
-    func missionControlActiveAtGestureStart() -> Bool {
-        isRunning && missionControlIsActive
+    func missionControlActiveAtGestureStart() -> Bool? {
+        guard isRunning, !missionControlNeedsBootstrap else { return nil }
+        return missionControlIsActive
     }
 
     // Keeps the Dock visible through a horizontal swipe only when the cached
@@ -2383,6 +2390,7 @@ final class DockWatcher {
         movingToNextSpace: Bool,
         maximum: TimeInterval = 5.0
     ) -> Bool {
+        guard !missionControlNeedsBootstrap else { return false }
         let sourceDisplayID = displayIDUnderPointer()
         guard
             isRunning,
@@ -2430,6 +2438,7 @@ final class DockWatcher {
     func beginVisibleHoldForMissionControlExitIfNeeded(
         maximum: TimeInterval = 5.0
     ) -> Bool {
+        guard !missionControlNeedsBootstrap else { return false }
         let destinationDisplayID = displayIDUnderPointer()
         guard
             isRunning,
@@ -2479,7 +2488,7 @@ final class DockWatcher {
         missionControlWasActiveAtContact: Bool,
         maximum: TimeInterval = 5.0
     ) -> Bool {
-        guard isRunning else { return false }
+        guard isRunning, !missionControlNeedsBootstrap else { return false }
 
         cancelDockDisplayHandoff()
 

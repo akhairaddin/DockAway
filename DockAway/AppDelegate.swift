@@ -2605,6 +2605,7 @@ private final class OnboardingPrimaryButton: NSButton {
     // Keep SHOW suppressed while the destination Space finishes landing.
     private let preHideRelease: TimeInterval = 0.60
     private var fourFingersDown = false
+    private var fourFingerStartedWithKnownState = false
     private var fourFingerStartedInMissionControl = false
     private let multitouch = MultitouchWatcher()
 
@@ -2983,8 +2984,14 @@ private final class OnboardingPrimaryButton: NSButton {
                 if fingers >= self.fourFingerThreshold {
                     guard !self.fourFingersDown else { return }
                     self.fourFingersDown = true
-                    self.fourFingerStartedInMissionControl =
-                        watcher.missionControlActiveAtGestureStart()
+                    self.fourFingerStartedWithKnownState = false
+                    // Do not guess which direction this gesture means while
+                    // the initial/changed Mission Control state is unresolved.
+                    // Keep the contact latched and skip its motion until lift.
+                    guard let beganInMissionControl =
+                        watcher.missionControlActiveAtGestureStart() else { return }
+                    self.fourFingerStartedWithKnownState = true
+                    self.fourFingerStartedInMissionControl = beganInMissionControl
                     dockAwayDebugLog(
                         self.fourFingerStartedInMissionControl
                             ? "  🧭 Four-finger gesture began in Mission Control"
@@ -2995,6 +3002,7 @@ private final class OnboardingPrimaryButton: NSButton {
                     }
                 } else if self.fourFingersDown {
                     self.fourFingersDown = false
+                    self.fourFingerStartedWithKnownState = false
                     self.fourFingerStartedInMissionControl = false
                     watcher.endHorizontalSpacePredictionAtGestureEnd()
                     let releasingPreHide = watcher.endHoldHidden(
@@ -3018,6 +3026,7 @@ private final class OnboardingPrimaryButton: NSButton {
                     self.monitoringShouldRun,
                     self.hideOnFourFingerTouch,
                     self.fourFingersDown,
+                    self.fourFingerStartedWithKnownState,
                     let watcher = self.dockWatcher
                 else { return }
 
@@ -4045,13 +4054,6 @@ private final class OnboardingPrimaryButton: NSButton {
         }
         currentBlacklistBundleIdentifier = currentApplication?.bundleIdentifier
 
-        // Keep previously blacklisted apps visible even when they are not running.
-        for bundleIdentifier in ignoredIdentifiers {
-            applicationsByIdentifier[bundleIdentifier] = applicationInfo(
-                forBundleIdentifier: bundleIdentifier
-            )
-        }
-
         // Mos uses the same useful shortcut: show regular running apps first,
         // then offer Finder for anything that is not currently open.
         for application in NSWorkspace.shared.runningApplications {
@@ -4066,6 +4068,17 @@ private final class OnboardingPrimaryButton: NSButton {
                 bundleIdentifier: bundleIdentifier,
                 name: application.localizedName ?? bundleIdentifier,
                 icon: application.icon
+            )
+        }
+
+        // Keep previously blacklisted apps visible even when they are not running.
+        // Running and current apps already have live metadata, so avoid looking
+        // up bundle metadata and file icons that would immediately be replaced.
+        for bundleIdentifier in ignoredIdentifiers
+        where applicationsByIdentifier[bundleIdentifier] == nil
+            && bundleIdentifier != currentApplication?.bundleIdentifier {
+            applicationsByIdentifier[bundleIdentifier] = applicationInfo(
+                forBundleIdentifier: bundleIdentifier
             )
         }
 
@@ -5229,8 +5242,8 @@ private final class OnboardingPrimaryButton: NSButton {
             symbolName: "checkmark.circle.fill",
             symbolDescription: "DockAway started",
             symbolColor: .systemGreen,
-            title: "DockAway has successfully started",
-            detail: "You can manage it from the menu bar.",
+            title: "DockAway has successfully started ",
+            detail: "You can manage it here from the menu bar.",
             contentSize: NSSize(width: 275, height: 60),
             celebrationEmoji: "🎉"
         )
@@ -5250,10 +5263,10 @@ private final class OnboardingPrimaryButton: NSButton {
             detail = "Restore Accessibility and Input Monitoring from the menu bar by pressing the resume button."
         } else if accessibilityPermissionMissing {
             title = "Accessibility permission was revoked"
-            detail = "DockAway is paused. Click the menubar icon and press the resume button to restore access."
+            detail = "Restore Accessibility from the menu bar by pressing the resume button to restore access."
         } else if inputMonitoringPermissionMissing {
             title = "Input Monitoring permission was revoked"
-            detail = "Gesture detection is paused. Click the menu bar icon to restore access."
+            detail = "Gesture detection is paused. Click the menu bar icon and press the resume button to restore access."
         } else {
             return
         }
@@ -5821,6 +5834,8 @@ private final class OnboardingPrimaryButton: NSButton {
                 )
             }
         }
+        // Allow system timer coalescing without changing the polling interval.
+        timer.tolerance = 0.05
         permissionHealthTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
