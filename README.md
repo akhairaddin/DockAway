@@ -21,14 +21,19 @@ A tiny macOS menu-bar utility that keeps your Dock out of the way when you don't
 
 ## When it's hidden and when it's shown
 
-| What is on the active display? | DockAway's response |
-| --- | --- |
-| An empty desktop with no app windows | Dock shown |
-| One or more app windows | Dock hidden |
-| A blacklisted app is frontmost | Dock shown |
-| A blacklisted app is visible, but a non-blacklisted app is in front | Dock hidden |
-| The only or last window is minimized | Dock shown |
-| One of multiple windows is minimized | Dock remains hidden |
+<table align="center">
+  <thead>
+    <tr><th>What is on the active display?</th><th>DockAway's response</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>An empty desktop with no app windows</td><td>Dock shown</td></tr>
+    <tr><td>One or more app windows</td><td>Dock hidden</td></tr>
+    <tr><td>A blacklisted app is frontmost</td><td>Dock shown</td></tr>
+    <tr><td>A blacklisted app is visible, but a non-blacklisted app is in front</td><td>Dock hidden</td></tr>
+    <tr><td>The only or last window is minimized</td><td>Dock shown</td></tr>
+    <tr><td>One of multiple windows is minimized</td><td>Dock remains hidden</td></tr>
+  </tbody>
+</table>
 
 DockAway uses your configured system shortcut for toggling Dock auto-hide: **⌘⌥D** (Command+Option+D) by default, or whatever you've set it to. Before acting, it checks the live Dock state to avoid unnecessary or duplicate toggles. If the shortcut is disabled, DockAway shows guidance for enabling it in System Settings.
 
