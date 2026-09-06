@@ -10,7 +10,7 @@
             <sparkle:version>13</sparkle:version>
             <sparkle:shortVersionString>1.2.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.2.1/DockAway-1.2.1-45b486697c08aa689eb9b421cf8240839a05df5e27cf6262900b7377b1d9a989.dmg" length="4179038" type="application/octet-stream" sparkle:edSignature="EAdOKxTEhsWjWXXG73aoRnYBgBPnZoi5dRtd70dDoK8zldPJcBwiYexqLnEMEhHcLWoLNFIAgWIMjMa5kMrqDA==" />
+            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/1.2.1/DockAway-1.2.1.dmg" length="4179038" type="application/octet-stream" sparkle:edSignature="EAdOKxTEhsWjWXXG73aoRnYBgBPnZoi5dRtd70dDoK8zldPJcBwiYexqLnEMEhHcLWoLNFIAgWIMjMa5kMrqDA==" />
             <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
         </item>
         <!-- 1.2 RELEASE -->

@@ -20,7 +20,7 @@ class WorkflowTests(unittest.TestCase):
         self.bin.mkdir()
         for name in ("update-appcast.sh", "release_metadata.py"):
             shutil.copyfile(ROOT / "Release" / name, self.root / "Release" / name)
-        (self.root / "changelog.html").write_text('<h3>Version 1.2</h3><ul><li>Everything changed.</li></ul>')
+        (self.root / "changelog.html").write_text('<h3>Version 1.2 (9-4-26)</h3><ul><li>Everything changed.</li></ul>')
         (self.root / "appcast.xml").write_text('<rss><channel /></rss>')
         self.archive = self.root / "input.dmg"
         self.archive.write_bytes(b"archive")

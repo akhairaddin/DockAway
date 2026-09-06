@@ -39,10 +39,11 @@ class MetadataTests(unittest.TestCase):
     def normalize(self):
         metadata.normalize_feed(self.feed, "1.2", self.archive, self.url, self.notes)
 
-    def test_changed_bytes_get_a_new_url(self):
+    def test_asset_name_follows_version_convention(self):
         before = metadata.asset_name("1.2", self.archive)
+        self.assertEqual(before, "DockAway-1.2.dmg")
         self.archive.write_bytes(b"new bytes")
-        self.assertNotEqual(before, metadata.asset_name("1.2", self.archive))
+        self.assertEqual(before, metadata.asset_name("1.2", self.archive))
 
     def test_complete_changelog_and_exact_version(self):
         notes = metadata.release_notes(ROOT / "changelog.html", "1.2")
@@ -56,6 +57,19 @@ class MetadataTests(unittest.TestCase):
         notes = metadata.release_notes(ROOT / "changelog.html", "1.1.9")
         self.assertIn("  - Dock Position:", notes)
         self.assertIn("Updated Menu Preview", notes)
+
+    def test_github_heading_uses_html_date_without_changing_html(self):
+        changelog = ROOT / "changelog.html"
+        before = changelog.read_bytes()
+        notes = metadata.release_notes(changelog, "1.2")
+        self.assertTrue(notes.startswith("## What's New: Version 1.2 (9-4-26)\n"))
+        self.assertEqual(before, changelog.read_bytes())
+
+    def test_missing_heading_date_is_rejected(self):
+        changelog = self.root / "changelog.html"
+        changelog.write_text('<h3>Version 1.2</h3><ul><li>Details</li></ul>')
+        with self.assertRaisesRegex(ValueError, "Missing changelog date"):
+            metadata.release_notes(changelog, "1.2")
 
     def test_valid_item_and_idempotent_markers(self):
         self.write_feed(self.item(), self.item("1.1.9", "11"))

@@ -24,13 +24,14 @@ def digest(path):
 def asset_name(version, archive):
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version):
         raise ValueError("Release version must contain only numbers and dots")
-    return f"DockAway-{version}-{digest(archive)}.dmg"
+    return f"DockAway-{version}.dmg"
 
 
 class ChangelogParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.sections = {}
+        self.dates = {}
         self.heading = None
         self.version = None
         self.depth = 0
@@ -49,8 +50,8 @@ class ChangelogParser(HTMLParser):
 
     def handle_endtag(self, tag):
         if tag == "h3" and self.heading is not None:
-            match = re.match(r"Version\s+([0-9]+(?:\.[0-9]+)*)(?:\s|$)",
-                             "".join(self.heading).strip())
+            heading = "".join(self.heading).strip()
+            match = re.match(r"Version\s+([0-9]+(?:\.[0-9]+)*)(?:\s|$)", heading)
             self.heading = None
             if match:
                 self.version = match[1]
@@ -58,6 +59,9 @@ class ChangelogParser(HTMLParser):
                     raise ValueError(f"Duplicate changelog version {self.version}")
                 self.lines = []
                 self.sections[self.version] = self.lines
+                date = re.search(r"\((\d{1,2}-\d{1,2}-\d{2})\)", heading)
+                if date:
+                    self.dates[self.version] = date[1]
         elif tag == "ul":
             self.depth -= 1
 
@@ -74,7 +78,10 @@ def release_notes(changelog, version):
     lines = parser.sections.get(version)
     if not lines:
         raise ValueError(f"No complete changelog section for Version {version}")
-    return f"## DockAway {version}\n\n" + "\n".join(
+    date = parser.dates.get(version)
+    if not date:
+        raise ValueError(f"Missing changelog date for Version {version}")
+    return f"## What's New: Version {version} ({date})\n\n" + "\n".join(
         prefix + " ".join("".join(parts).split()) for prefix, parts in lines
     ) + "\n"
 

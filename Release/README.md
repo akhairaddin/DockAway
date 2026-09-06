@@ -21,6 +21,12 @@ Run this harmless preflight whenever the signing setup changes:
 
 ## Publishing a release
 
+GitHub release-note headings use `What's New: Version 1.2.1 (9-5-26)`,
+substituting the release version and date in `M-D-YY` format. This applies
+only to GitHub notes, not the HTML changelog headings. The generator reads
+the version and date from the matching HTML section.
+Version 1.0 is the exception: retain its original Official Release heading.
+
 1. Commit the DockAway source, changelog, README, and release notes you want to ship.
 2. Open `Release/DockAway.releaseplan` in Rilmazafone.
 3. Confirm the proposed patch version and build number.
@@ -36,8 +42,10 @@ and validates the release entry. Missing changelog sections fail this preflight.
 It then pushes the version commit and creates the GitHub release using the
 existing unprefixed tag convention, such as `1.2`.
 
-DMG asset names contain their SHA-256 digest. Changed binaries get new URLs;
-previous assets are retained so cached appcasts remain usable. Existing tags
+DMG asset names follow `DockAway-VERSION.dmg`, such as `DockAway-1.2.1.dmg`.
+Checksums validate downloads but do not appear in filenames. Different bytes
+under an already published filename are rejected; use a new release version
+instead of replacing an existing download. Existing tags
 must point at the release commit. The scripts never silently move tags or
 replace existing download bytes. A mismatched tag requires an explicit decision
 before retrying, usually publishing a new version.
