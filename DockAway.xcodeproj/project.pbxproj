@@ -26,12 +26,9 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				.gitignore,
-				AppDelegate.swift,
-				Assets.xcassets,
-				DockAwayIcon.icon,
-				DockWatcher.swift,
-				main.swift,
-				MultitouchWatcher.swift,
+				dist,
+				docs,
+				Info.plist,
 			);
 			target = B8DCC9352FDE8291000500D4 /* DockAway */;
 		};
@@ -42,6 +39,10 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				B83463642FE3D9EC008B6B98 /* Exceptions for "DockAway" folder in "DockAway" target */,
+			);
+			explicitFolders = (
+				dist,
+				docs,
 			);
 			path = DockAway;
 			sourceTree = "<group>";
@@ -86,6 +87,9 @@
 			buildRules = (
 			);
 			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				B834635D2FE3D866008B6B98 /* DockAway */,
 			);
 			name = DockAway;
 			packageProductDependencies = (

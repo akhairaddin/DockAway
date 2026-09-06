@@ -1482,7 +1482,9 @@ final class DockWatcher {
         let bundleID = app.bundleIdentifier ?? ""
         let activeDisplayID = displayIDUnderPointer()
         let activeDisplay = CGDisplayBounds(activeDisplayID)
-        let windowState = displayWindowState(on: activeDisplay)
+        // A failed WindowServer read is not evidence of an empty desktop.
+        // Preserve the last confirmed decision; the safety timer will retry.
+        guard let windowState = displayWindowState(on: activeDisplay) else { return }
         lastEvaluatedDisplayID = activeDisplayID
         lastEvaluatedWindowState = windowState
 
@@ -1606,10 +1608,10 @@ final class DockWatcher {
     // blacklisted window cannot override the app actually in front of it. A
     // small edge overlap is ignored so window shadows across a monitor boundary
     // cannot hide the Dock.
-    private func displayWindowState(on displayBounds: CGRect) -> DisplayWindowState {
+    private func displayWindowState(on displayBounds: CGRect) -> DisplayWindowState? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return .empty
+            return nil
         }
 
         return classifyWindowState(in: list, on: displayBounds) ?? .empty
@@ -2610,7 +2612,7 @@ final class DockWatcher {
             return
         }
 
-        let windowState = displayWindowState(on: CGDisplayBounds(displayID))
+        guard let windowState = displayWindowState(on: CGDisplayBounds(displayID)) else { return }
         lastEvaluatedDisplayID = displayID
         lastEvaluatedWindowState = windowState
         _ = handOffVisibleHoldToHiddenIfNeeded(
@@ -2762,26 +2764,30 @@ final class DockWatcher {
 
     @discardableResult
     private func simulateOptionCommandD() -> Bool {
+        guard let shortcut = DockShortcut.current() else {
+            (NSApp.delegate as? AppDelegate)?.updateDockShortcutWarning(
+                "Enable the Dock hiding shortcut"
+            )
+            return false
+        }
+        (NSApp.delegate as? AppDelegate)?.updateDockShortcutWarning(nil)
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             dockAwayDebugLog("  ⚠️ Could not create CGEventSource")
             return false
         }
 
-        let keyD: CGKeyCode = 2
-
         guard
-            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyD, keyDown: true),
-            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyD, keyDown: false)
+            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: true),
+            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: shortcut.keyCode, keyDown: false)
         else { return false }
 
-        let modifiers: CGEventFlags = [.maskAlternate, .maskCommand]
-        keyDown.flags = modifiers
-        keyUp.flags = modifiers
+        keyDown.flags = shortcut.modifiers
+        keyUp.flags = shortcut.modifiers
 
         keyDown.post(tap: .cgSessionEventTap)
         keyUp.post(tap: .cgSessionEventTap)
 
-        dockAwayDebugLog("  ⌨️ Sent ⌘⌥D")
+        dockAwayDebugLog("  ⌨️ Sent configured Dock shortcut")
         return true
     }
 
@@ -2860,9 +2866,9 @@ final class DockWatcher {
 
     private func sendDockToggle(towardVisible visible: Bool, reason: String) {
         dockAwayDebugLog("  ⚡ \(reason) \(visible ? "SHOW" : "HIDE")")
-        lastToggleTime = Date()
-        lastCommandedDockVisibility = visible
         if simulateOptionCommandD() {
+            lastToggleTime = Date()
+            lastCommandedDockVisibility = visible
             postDockVisibility(visible)
         }
     }

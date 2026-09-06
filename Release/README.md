@@ -10,6 +10,7 @@ It embeds the current DMG design and keeps credentials out of the repository.
 - `gh auth status` succeeds for `akhairaddin/DockAway`.
 - Sparkle's `generate_appcast` tool exists in Xcode DerivedData.
 - Sparkle's private EdDSA key remains in the login keychain.
+- Python 3.9 or later is available for offline release metadata validation.
 
 Run this harmless preflight whenever the signing setup changes:
 
@@ -23,18 +24,34 @@ Run this harmless preflight whenever the signing setup changes:
 1. Commit the DockAway source, changelog, README, and release notes you want to ship.
 2. Open `Release/DockAway.releaseplan` in Rilmazafone.
 3. Confirm the proposed patch version and build number.
-4. Press Publish and provide the GitHub release notes when prompted.
+4. Press Publish. Any notes you supply supplement the complete matching section
+   of `changelog.html`, which is always included automatically.
 
 Rilmazafone bumps the patch version and build number, archives the universal
 app, signs it, notarizes and staples the app, builds the embedded DMG design,
 notarizes and staples the DMG, verifies the mounted result, and archives dSYMs.
 
-The Script publish stage then pushes the version commit and creates the GitHub
-release using DockAway's existing unprefixed tag convention, such as `1.2`.
-The post-publish stage runs Sparkle's official appcast generator, commits
-`appcast.xml`, and pushes the update feed only after the DMG is on GitHub.
+Before publishing anything, the Script stage runs Sparkle's appcast generator
+and validates the release entry. Missing changelog sections fail this preflight.
+It then pushes the version commit and creates the GitHub release using the
+existing unprefixed tag convention, such as `1.2`.
 
-If no release notes are supplied, GitHub generates them automatically.
+DMG asset names contain their SHA-256 digest. Changed binaries get new URLs;
+previous assets are retained so cached appcasts remain usable. Existing tags
+must point at the release commit. The scripts never silently move tags or
+replace existing download bytes. A mismatched tag requires an explicit decision
+before retrying, usually publishing a new version.
+
+The post-publish stage downloads the GitHub asset and verifies that its bytes
+match the local archive before committing and pushing `appcast.xml`. Validation
+checks version, build order, URL, size, and signature on the same item. Release
+separators and the per-item changelog link are restored automatically.
+
+Run the offline metadata tests with:
+
+```sh
+python3 -B -m unittest discover -s Tests -p '*_tests.py'
+```
 
 ## Post-release development version
 

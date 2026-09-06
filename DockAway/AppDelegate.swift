@@ -644,17 +644,9 @@ private final class DockAwayStatusView: NSView {
     }
 }
 
-private final class DockSliderMarkerOverlayView: NSView {
-    private weak var slider: NSSlider?
-
-    init(slider: NSSlider) {
-        self.slider = slider
-        super.init(frame: .zero)
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
+private final class DockSliderTrackAccentView: NSView {
+    override var isFlipped: Bool { true }
+    weak var slider: DockSettingSlider?
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
@@ -665,22 +657,199 @@ private final class DockSliderMarkerOverlayView: NSView {
 
         guard let slider, let sliderCell = slider.cell as? NSSliderCell else { return }
         let trackRect = sliderCell.barRect(flipped: slider.isFlipped)
+        let knobRect = sliderCell.knobRect(flipped: slider.isFlipped)
+
+        let fillWidth: CGFloat
+        if slider.doubleValue <= slider.minValue {
+            fillWidth = 0
+        } else if slider.doubleValue >= slider.maxValue {
+            fillWidth = trackRect.width
+        } else {
+            fillWidth = max(0, knobRect.midX - trackRect.minX)
+        }
+
+        if fillWidth > 0 {
+            let fillRect = NSRect(x: trackRect.minX, y: trackRect.minY, width: fillWidth, height: trackRect.height)
+            let radius = trackRect.height / 2
+            let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius)
+            let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let baseColor = slider.isEnabled
+                ? NSColor.controlAccentColor
+                : NSColor.controlAccentColor.withAlphaComponent(0.4)
+
+            let accentColor: NSColor
+            if let rgb = baseColor.usingColorSpace(.deviceRGB) {
+                if isDark {
+                    let alpha: CGFloat = 0.14
+                    let r = max(0, min(1, (rgb.redComponent - alpha) / (1 - alpha)))
+                    let g = max(0, min(1, (rgb.greenComponent - alpha) / (1 - alpha)))
+                    let b = max(0, min(1, (rgb.blueComponent - alpha) / (1 - alpha)))
+                    accentColor = NSColor(deviceRed: r, green: g, blue: b, alpha: rgb.alphaComponent)
+                } else {
+                    let alpha: CGFloat = 0.14
+                    let r = max(0, min(1, rgb.redComponent / (1 - alpha)))
+                    let g = max(0, min(1, rgb.greenComponent / (1 - alpha)))
+                    let b = max(0, min(1, rgb.blueComponent / (1 - alpha)))
+                    accentColor = NSColor(deviceRed: r, green: g, blue: b, alpha: rgb.alphaComponent)
+                }
+            } else {
+                accentColor = baseColor
+            }
+
+            accentColor.setFill()
+            fillPath.fill()
+        }
+
         let knobTravelStart = trackRect.minX + sliderCell.knobThickness / 2
         let knobTravelWidth = max(0, trackRect.width - sliderCell.knobThickness)
-        NSColor.white.setFill()
-        for position in [CGFloat(0.25), 0.5, 0.75] {
-            let markerRect = NSRect(
-                x: knobTravelStart + knobTravelWidth * position - 1.25,
-                y: trackRect.midY - 1.25,
-                width: 2.5,
-                height: 2.5
+        let knobTravelEnd = knobTravelStart + knobTravelWidth
+
+        // Endpoint label dots (positioned between track and endpoint labels, matching stock macOS)
+        let dotRadius: CGFloat = 1.0
+        let dotCenterY = trackRect.maxY + 4.0
+        NSColor.tertiaryLabelColor.setFill()
+        for cx in [knobTravelStart, knobTravelEnd] {
+            if abs(knobRect.midX - cx) <= (sliderCell.knobThickness / 2 - 1.0) {
+                continue
+            }
+            let dotRect = NSRect(
+                x: cx - dotRadius,
+                y: dotCenterY - dotRadius,
+                width: dotRadius * 2,
+                height: dotRadius * 2
             )
-            NSBezierPath(ovalIn: markerRect).fill()
+            NSBezierPath(ovalIn: dotRect).fill()
+        }
+
+        guard slider.isDragging else { return }
+
+        let markerRadius: CGFloat = 1.6
+
+        for pos in [CGFloat(0.25), 0.50, 0.75] {
+            let cx = knobTravelStart + knobTravelWidth * pos
+            let cy = trackRect.midY
+
+            // Hide checkpoint if covered by the knob pill
+            if abs(cx - knobRect.midX) <= (sliderCell.knobThickness / 2 - 1.0) {
+                continue
+            }
+
+            let markerRect = NSRect(
+                x: cx - markerRadius,
+                y: cy - markerRadius,
+                width: markerRadius * 2,
+                height: markerRadius * 2
+            )
+
+            if fillWidth > 0 && cx <= knobRect.midX {
+                NSColor.white.withAlphaComponent(0.85).setFill()
+                NSBezierPath(ovalIn: markerRect).fill()
+            } else {
+                let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                let markerColor = isDark
+                    ? NSColor.white.withAlphaComponent(0.45)
+                    : NSColor.black.withAlphaComponent(0.30)
+                markerColor.setFill()
+                NSBezierPath(ovalIn: markerRect).fill()
+            }
         }
     }
 }
 
 private final class DockSettingSlider: NSSlider {
+    private let trackAccentView = DockSliderTrackAccentView()
+
+    override var doubleValue: Double {
+        didSet {
+            trackAccentView.needsDisplay = true
+            suppressNativeTrackFill()
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupTrackAccentView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupTrackAccentView()
+    }
+
+    convenience init(
+        value: Double,
+        minValue: Double,
+        maxValue: Double,
+        target: Any?,
+        action: Selector?
+    ) {
+        self.init(frame: .zero)
+        self.minValue = minValue
+        self.maxValue = maxValue
+        self.doubleValue = value
+        self.target = target as AnyObject?
+        self.action = action
+    }
+
+    private func setupTrackAccentView() {
+        trackAccentView.slider = self
+        trackAccentView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(trackAccentView, positioned: .below, relativeTo: nil)
+        NSLayoutConstraint.activate([
+            trackAccentView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            trackAccentView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            trackAccentView.topAnchor.constraint(equalTo: topAnchor),
+            trackAccentView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: 6)
+        ])
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        suppressNativeTrackFill()
+        DispatchQueue.main.async { [weak self] in
+            self?.suppressNativeTrackFill()
+        }
+    }
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        suppressNativeTrackFill()
+        DispatchQueue.main.async { [weak self] in
+            self?.suppressNativeTrackFill()
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        suppressNativeTrackFill()
+    }
+
+    private func suppressNativeTrackFill() {
+        guard let root = layer else { return }
+        func hideIn(_ layer: CALayer) {
+            if let sublayers = layer.sublayers, sublayers.count == 3 {
+                let h0 = sublayers[0].bounds.height
+                let h1 = sublayers[1].bounds.height
+                let h2 = sublayers[2].bounds.height
+                if abs(h0 - 6.0) < 1.0 && abs(h1 - 6.0) < 1.0 && abs(h2 - 6.0) < 1.0 {
+                    if !sublayers[1].isHidden {
+                        sublayers[1].isHidden = true
+                        sublayers[1].opacity = 0
+                    }
+                    if !sublayers[2].isHidden {
+                        sublayers[2].isHidden = true
+                        sublayers[2].opacity = 0
+                    }
+                    return
+                }
+            }
+            for sub in layer.sublayers ?? [] {
+                hideIn(sub)
+            }
+        }
+        hideIn(root)
+    }
+
     var commitHandler: ((Double) -> Void)?
     var interactionChangedHandler: ((Bool) -> Void)?
     private let snapMarkerValues = [25.0, 50.0, 75.0]
@@ -693,7 +862,7 @@ private final class DockSettingSlider: NSSlider {
     private var pendingHapticCount = 0
     private var hapticDrainTimer: Timer?
     private var lastHapticTime: CFTimeInterval = -Double.greatestFiniteMagnitude
-    private var isDragging = false
+    private(set) var isDragging = false
 
     private func setInteractionActive(_ active: Bool) {
         interactionChangedHandler?(active)
@@ -702,6 +871,7 @@ private final class DockSettingSlider: NSSlider {
     override func mouseDown(with event: NSEvent) {
         resetHapticQueue()
         isDragging = true
+        trackAccentView.needsDisplay = true
         previousDragValue = doubleValue
         snappedMarkerValue = nil
         setInteractionActive(true)
@@ -714,14 +884,19 @@ private final class DockSettingSlider: NSSlider {
         isDragging = false
         previousDragValue = nil
         snappedMarkerValue = nil
+        trackAccentView.needsDisplay = true
         commitHandler?(doubleValue)
     }
 
     override func sendAction(_ action: Selector?, to target: Any?) -> Bool {
-        if isDragging, let previousDragValue {
-            applyMarkerSnap()
-            performMarkerHapticsIfNeeded(from: previousDragValue, to: doubleValue)
-            self.previousDragValue = doubleValue
+        suppressNativeTrackFill()
+        if isDragging {
+            if let previousDragValue {
+                applyMarkerSnap()
+                performMarkerHapticsIfNeeded(from: previousDragValue, to: doubleValue)
+                self.previousDragValue = doubleValue
+            }
+            trackAccentView.needsDisplay = true
         }
         return super.sendAction(action, to: target)
     }
@@ -732,6 +907,7 @@ private final class DockSettingSlider: NSSlider {
         super.keyDown(with: event)
         setInteractionActive(false)
         if doubleValue != previousValue {
+            trackAccentView.needsDisplay = true
             commitHandler?(doubleValue)
         }
     }
@@ -826,6 +1002,8 @@ private final class DockSettingSlider: NSSlider {
 }
 
 private final class DockSettingSliderView: NSView {
+    override var isFlipped: Bool { true }
+
     let slider = DockSettingSlider(
         value: 50,
         minValue: 0,
@@ -833,71 +1011,98 @@ private final class DockSettingSliderView: NSView {
         target: nil,
         action: nil
     )
+    private let titleLabel: NSTextField
+    private let leadingLabel: NSTextField
+    private let trailingLabel: NSTextField
     private let valueLabel = NSTextField(labelWithString: "macOS Default")
 
     init(
+        title: String,
         leadingTitle: String,
         trailingTitle: String,
         accessibilityLabel: String,
         accessibilityHelp: String
     ) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 232, height: 56))
+        titleLabel = NSTextField(labelWithString: title)
+        leadingLabel = NSTextField(labelWithString: leadingTitle)
+        trailingLabel = NSTextField(labelWithString: trailingTitle)
+        super.init(frame: NSRect(x: 0, y: 0, width: 232, height: 62))
 
-        let leadingLabel = NSTextField(labelWithString: leadingTitle)
-        let trailingLabel = NSTextField(labelWithString: trailingTitle)
+        titleLabel.font = .menuFont(ofSize: 0)
+        titleLabel.textColor = .labelColor
+        titleLabel.setContentHuggingPriority(.required, for: .vertical)
+        titleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+
         for label in [leadingLabel, trailingLabel] {
-            label.font = .systemFont(ofSize: 9)
-            label.textColor = .white
+            label.font = .systemFont(ofSize: 10)
+            label.textColor = .labelColor
+            label.setContentHuggingPriority(.required, for: .vertical)
+            label.setContentCompressionResistancePriority(.required, for: .vertical)
+            label.translatesAutoresizingMaskIntoConstraints = false
         }
+        trailingLabel.alignment = .right
 
         valueLabel.font = .monospacedDigitSystemFont(ofSize: 9.5, weight: .medium)
-        valueLabel.textColor = .white
+        valueLabel.textColor = .labelColor
         valueLabel.alignment = .center
+        valueLabel.setContentHuggingPriority(.required, for: .vertical)
+        valueLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
 
         slider.minValue = 0
         slider.maxValue = 100
         slider.doubleValue = 50
-        slider.controlSize = .large
+        slider.controlSize = .regular
         slider.isContinuous = true
         slider.numberOfTickMarks = 0
-        slider.allowsTickMarkValuesOnly = false
-        let markerOverlay = DockSliderMarkerOverlayView(slider: slider)
-        markerOverlay.translatesAutoresizingMaskIntoConstraints = false
-        slider.addSubview(markerOverlay)
-        NSLayoutConstraint.activate([
-            markerOverlay.leadingAnchor.constraint(equalTo: slider.leadingAnchor),
-            markerOverlay.trailingAnchor.constraint(equalTo: slider.trailingAnchor),
-            markerOverlay.topAnchor.constraint(equalTo: slider.topAnchor),
-            markerOverlay.bottomAnchor.constraint(equalTo: slider.bottomAnchor)
-        ])
+        slider.trackFillColor = .controlAccentColor
         if #available(macOS 26.0, *) {
-            slider.neutralValue = 0
-            slider.tintProminence = .none
+            // Ask the native renderer to show the accent-colored track even
+            // in a menu, without replacing the interactive glass knob.
+            slider.tintProminence = .primary
         }
         slider.setAccessibilityLabel(accessibilityLabel)
         slider.setAccessibilityHelp(accessibilityHelp)
         slider.interactionChangedHandler = { [weak self] active in
             self?.setInteractionAppearance(active)
         }
+        slider.setContentHuggingPriority(.required, for: .vertical)
+        slider.setContentCompressionResistancePriority(.required, for: .vertical)
+        slider.translatesAutoresizingMaskIntoConstraints = false
 
-        let sliderRow = NSStackView(views: [leadingLabel, slider, trailingLabel])
-        sliderRow.orientation = .horizontal
-        sliderRow.alignment = .centerY
-        sliderRow.spacing = 7
+        addSubview(titleLabel)
+        addSubview(slider)
+        addSubview(leadingLabel)
+        addSubview(valueLabel)
+        addSubview(trailingLabel)
 
-        let stack = NSStackView(views: [valueLabel, sliderRow])
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 1
-        addSubview(stack)
+        let leadingInset: CGFloat = 20
+        let trailingInset: CGFloat = -14
+
+        let bottomConstraint = leadingLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6)
+        bottomConstraint.priority = .defaultLow
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 5),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            slider.widthAnchor.constraint(greaterThanOrEqualToConstant: 126)
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingInset),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: trailingInset),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 4),
+
+            slider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingInset),
+            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: trailingInset),
+            slider.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+
+            leadingLabel.leadingAnchor.constraint(equalTo: slider.leadingAnchor),
+            leadingLabel.topAnchor.constraint(equalTo: slider.bottomAnchor, constant: 4),
+            bottomConstraint,
+
+            trailingLabel.trailingAnchor.constraint(equalTo: slider.trailingAnchor),
+            trailingLabel.centerYAnchor.constraint(equalTo: leadingLabel.centerYAnchor),
+
+            valueLabel.centerXAnchor.constraint(equalTo: slider.centerXAnchor),
+            valueLabel.centerYAnchor.constraint(equalTo: leadingLabel.centerYAnchor),
+            valueLabel.leadingAnchor.constraint(greaterThanOrEqualTo: leadingLabel.trailingAnchor, constant: 4),
+            valueLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingLabel.leadingAnchor, constant: -4)
         ])
 
         setInteractionAppearance(false)
@@ -907,16 +1112,21 @@ private final class DockSettingSliderView: NSView {
         nil
     }
 
+    override func mouseDown(with event: NSEvent) {
+        // Container consumes clicks outside the slider control so the menu remains open.
+    }
+
     func setPercentage(_ percentage: Double, usesSystemDefault: Bool) {
         let roundedPercentage = min(100, max(0, percentage.rounded()))
         slider.doubleValue = roundedPercentage
+        slider.needsDisplay = true
         valueLabel.stringValue = usesSystemDefault
             ? "macOS Default"
             : "\(Int(roundedPercentage))%"
     }
 
     private func setInteractionAppearance(_ active: Bool) {
-        valueLabel.textColor = .white
+        valueLabel.textColor = .labelColor
     }
 }
 
@@ -1021,6 +1231,7 @@ private final class DockSettingPersistenceRowView: NSView {
 
     func setControlEnabled(_ enabled: Bool) {
         controlEnabled = enabled
+        enclosingMenuItem?.isEnabled = enabled
         checkbox.isEnabled = enabled
         titleLabel.alphaValue = enabled ? 1 : 0.45
         indicatorBaseImageView.alphaValue = enabled ? 1 : 0.45
@@ -1305,6 +1516,7 @@ private final class BlacklistActionMenuItemView: NSView {
     init(
         title: String,
         isEnabled: Bool = true,
+        titleLeadingInset: CGFloat = 22,
         actionHandler: @escaping () -> Void
     ) {
         titleLabel = NSTextField(labelWithString: title)
@@ -1328,7 +1540,7 @@ private final class BlacklistActionMenuItemView: NSView {
             highlightView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             highlightView.topAnchor.constraint(equalTo: topAnchor, constant: 1),
             highlightView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 22),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: titleLeadingInset),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
@@ -1367,8 +1579,17 @@ private final class BlacklistActionMenuItemView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard controlEnabled else { return }
+        _ = accessibilityPerformPress()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard controlEnabled else { return false }
         actionHandler()
+        return true
+    }
+
+    @objc func performMenuAction(_ sender: Any?) {
+        _ = accessibilityPerformPress()
     }
 
     func setControlEnabled(_ enabled: Bool) {
@@ -1387,6 +1608,8 @@ private final class BlacklistActionMenuItemView: NSView {
             : controlEnabled ? .labelColor : .tertiaryLabelColor
     }
 }
+
+private typealias MenuActionItemView = BlacklistActionMenuItemView
 
 private final class BlacklistHelpMenuItemView: NSView {
     private static let helpText = "A blacklisted app keeps the Dock shown while it is the frontmost app on the active display. When another app moves in front, DockAway hides the Dock normally."
@@ -1471,9 +1694,18 @@ private final class BlacklistHelpMenuItemView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        _ = accessibilityPerformPress()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
         hoverWorkItem?.cancel()
         hoverWorkItem = nil
         showPopover()
+        return true
+    }
+
+    @objc func performMenuAction(_ sender: Any?) {
+        _ = accessibilityPerformPress()
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
@@ -1509,7 +1741,7 @@ private final class BlacklistHelpMenuItemView: NSView {
     }
 
     private func makeHelpPopover() -> NSPopover {
-        let title = NSTextField(labelWithString: "How Blacklist Works")
+        let title = NSTextField(labelWithString: "How 'Blacklist' Works")
         title.font = .systemFont(ofSize: 12, weight: .semibold)
         title.textColor = .labelColor
 
@@ -1582,15 +1814,17 @@ private final class PermissionSetupRowView: NSView {
     private let detailLabel: NSTextField
     private let actionButton = NSButton(title: "Allow", target: nil, action: nil)
     private let requestAction: () -> Void
+    private let grantedTitle: String
     private var grantedState: Bool?
     private var actionAvailable = true
     private var checkmarkAnimationGeneration = 0
     private var circleAnimationGeneration = 0
 
-    init(title: String, detail: String, requestAction: @escaping () -> Void) {
+    init(title: String, detail: String, grantedTitle: String = "Granted", requestAction: @escaping () -> Void) {
         titleLabel = NSTextField(labelWithString: title)
         detailLabel = NSTextField(wrappingLabelWithString: detail)
         self.requestAction = requestAction
+        self.grantedTitle = grantedTitle
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -1615,7 +1849,7 @@ private final class PermissionSetupRowView: NSView {
         statusCircleImageView.contentTintColor = .secondaryLabelColor
         statusGrantedCircleImageView.image = NSImage(
             systemSymbolName: "circle.fill",
-            accessibilityDescription: "Granted"
+            accessibilityDescription: grantedTitle
         )
         statusGrantedCircleImageView.contentTintColor = .systemGreen
         statusGrantedCircleImageView.alphaValue = 0
@@ -1794,8 +2028,17 @@ private final class PermissionSetupRowView: NSView {
         }
     }
 
+    func setDetail(_ detail: String) {
+        guard detailLabel.stringValue != detail else { return }
+        detailLabel.attributedStringValue = laterEmphasizedText(
+            detail,
+            font: detailLabel.font ?? .systemFont(ofSize: 11.5),
+            color: .secondaryLabelColor
+        )
+    }
+
     private func applyActionAppearance(_ granted: Bool) {
-        actionButton.title = granted ? "Granted" : (actionAvailable ? "Allow" : "Next")
+        actionButton.title = granted ? grantedTitle : (actionAvailable ? "Allow" : "Next")
         actionButton.isEnabled = !granted && actionAvailable
         actionButton.alphaValue = granted || actionAvailable ? 1 : 0.55
         layer?.backgroundColor = rowBackgroundColor(granted: granted).cgColor
@@ -1886,7 +2129,7 @@ private final class PermissionSetupView: NSView {
     private let accessibilityRow: PermissionSetupRowView
     private let inputMonitoringRow: PermissionSetupRowView
     private let instructionLabel = NSTextField(
-        wrappingLabelWithString: "Grant both permissions, then return here to continue."
+        wrappingLabelWithString: "Start with Accessibility so DockAway can manage Dock visibility."
     )
     private var setupStateCode = 0
 
@@ -1900,12 +2143,13 @@ private final class PermissionSetupView: NSView {
     ) {
         accessibilityRow = PermissionSetupRowView(
             title: "Accessibility",
-            detail: "Detects window changes and manages Dock visibility.",
+            detail: "Allows DockAway to detect window changes and manage Dock visibility.",
             requestAction: requestAccessibility
         )
         inputMonitoringRow = PermissionSetupRowView(
-            title: "Input Monitoring",
-            detail: "Enable it, then choose “Later” when macOS asks to quit.",
+            title: "Input Access",
+            detail: "Checks whether macOS allows the input access used by DockAway.",
+            grantedTitle: "Available",
             requestAction: requestInputMonitoring
         )
         super.init(frame: NSRect(x: 0, y: 0, width: 460, height: 165))
@@ -1914,7 +2158,7 @@ private final class PermissionSetupView: NSView {
         instructionLabel.textColor = .secondaryLabelColor
         instructionLabel.alignment = .center
 
-        let stack = NSStackView(views: [inputMonitoringRow, accessibilityRow])
+        let stack = NSStackView(views: [accessibilityRow, inputMonitoringRow])
         stack.orientation = .vertical
         stack.alignment = .width
         stack.spacing = 9
@@ -1937,28 +2181,43 @@ private final class PermissionSetupView: NSView {
         accessibilityGranted: Bool,
         inputMonitoringGranted: Bool,
         inputMonitoringRestartPending: Bool,
-        inputMonitoringSettingsOpen: Bool
+        inputMonitoringSettingsOpen: Bool,
+        checkingPermissions: Bool = false
     ) {
         accessibilityRow.setGranted(accessibilityGranted)
         inputMonitoringRow.setGranted(
             inputMonitoringGranted || inputMonitoringRestartPending
         )
         let inputMonitoringReady = inputMonitoringGranted || inputMonitoringRestartPending
-        accessibilityRow.setActionAvailable(
+        if checkingPermissions {
+            inputMonitoringRow.setDetail("Checking input access…")
+        } else if inputMonitoringReady {
+            inputMonitoringRow.setDetail("Input access is already available. No additional permission is needed.")
+        } else if accessibilityGranted {
+            inputMonitoringRow.setDetail("Enable Input Monitoring in System Settings. Choose “Later” if macOS asks to quit and reopen.")
+        } else {
+            inputMonitoringRow.setDetail("Checks whether macOS allows the input access used by DockAway.")
+        }
+        accessibilityRow.setActionAvailable(true)
+        inputMonitoringRow.setActionAvailable(
             accessibilityGranted || inputMonitoringReady
         )
 
         let newStateCode: Int
-        if accessibilityGranted && inputMonitoringGranted {
+        if checkingPermissions {
+            newStateCode = -1
+        } else if !accessibilityGranted {
+            // Recovery can leave Input Monitoring granted already. Never
+            // block repairing Accessibility or imply both permissions are ready.
+            newStateCode = 0
+        } else if inputMonitoringGranted {
             newStateCode = 4
-        } else if accessibilityGranted && inputMonitoringRestartPending {
+        } else if inputMonitoringRestartPending {
             newStateCode = 3
-        } else if inputMonitoringReady {
-            newStateCode = 2
         } else if inputMonitoringSettingsOpen {
             newStateCode = 1
         } else {
-            newStateCode = 0
+            newStateCode = 2
         }
         guard newStateCode != setupStateCode else { return }
         setupStateCode = newStateCode
@@ -1985,13 +2244,16 @@ private final class PermissionSetupView: NSView {
 
     private func applyInstruction(for stateCode: Int) {
         switch stateCode {
+        case -1:
+            instructionLabel.stringValue = "Checking access… Please wait."
+            instructionLabel.textColor = .secondaryLabelColor
         case 0:
             instructionLabel.stringValue =
-                "Start with Input Monitoring so DockAway can verify it correctly."
+                "Start with Accessibility so DockAway can manage Dock visibility."
             instructionLabel.textColor = .secondaryLabelColor
         case 1:
             let instruction =
-                "After turning DockAway on, choose “Later” in the Quit & Reopen prompt."
+                "Enable Input Monitoring, then choose “Later” if macOS asks to quit and reopen."
             instructionLabel.attributedStringValue = laterEmphasizedText(
                 instruction,
                 font: NSFont.systemFont(ofSize: 11.5),
@@ -2000,24 +2262,21 @@ private final class PermissionSetupView: NSView {
             )
         case 2:
             let instruction =
-                "Perfect. DockAway will restart after “Continue”. Now allow Accessibility."
+                "Accessibility is ready. Enable Input Monitoring in System Settings."
             instructionLabel.attributedStringValue = laterEmphasizedText(
                 instruction,
                 font: NSFont.systemFont(ofSize: 11.5),
                 color: .secondaryLabelColor,
                 alignment: .center
             )
-        case 3:
-            let instruction = "You're all set! Click “Continue” to restart DockAway."
+        default:
+            let instruction = "You’re ready. Click “Continue” to finish setup."
             instructionLabel.attributedStringValue = laterEmphasizedText(
                 instruction,
                 font: NSFont.systemFont(ofSize: 11.5),
                 color: .systemGreen,
                 alignment: .center
             )
-        default:
-            instructionLabel.stringValue = "You're all set! DockAway is ready."
-            instructionLabel.textColor = .systemGreen
         }
     }
 }
@@ -2105,6 +2364,13 @@ private final class OnboardingPrimaryButton: NSButton {
         didSet { updateVisualState(animated: false) }
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            updateVisualState(animated: false)
+        }
+    }
+
     private func updateVisualState(animated: Bool = true) {
         guard let layer else { return }
         let targetBgColor: CGColor
@@ -2129,11 +2395,11 @@ private final class OnboardingPrimaryButton: NSButton {
                 ]
             )
         } else {
-            targetBgColor = NSColor.white.withAlphaComponent(0.08).cgColor
+            targetBgColor = NSColor.quaternaryLabelColor.cgColor
             targetTitle = NSAttributedString(
                 string: title,
                 attributes: [
-                    .foregroundColor: NSColor.white.withAlphaComponent(0.35),
+                    .foregroundColor: NSColor.disabledControlTextColor,
                     .font: NSFont.systemFont(ofSize: 13, weight: .medium)
                 ]
             )
@@ -2161,6 +2427,7 @@ private final class OnboardingPrimaryButton: NSButton {
     private static let keepDockAnimationAfterQuitKey = "KeepDockAnimationAfterQuit"
     private static let keepDockRevealDelayAfterQuitKey = "KeepDockRevealDelayAfterQuit"
     private static let permissionSetupCompletedKey = "PermissionSetupCompleted"
+    private static let initialRevealDelayHandledKey = "InitialRevealDelayHandled"
     private static let showStartedPopoverAfterRelaunchKey =
         "ShowStartedPopoverAfterPermissionRelaunch"
     private static let dockPreferencesDomain = "com.apple.dock" as CFString
@@ -2293,22 +2560,35 @@ private final class OnboardingPrimaryButton: NSButton {
     private var accessibilityPermissionMissing = false
     private var inputMonitoringPermissionMissing = false
     private var multitouchUnavailable = false
+    private var dockShortcutWarning: String?
+
+    private var dockShortcutWarningVisible: Bool {
+        statusAppearsActive && dockShortcutWarning != nil
+    }
+
+    func updateDockShortcutWarning(_ message: String?) {
+        guard dockShortcutWarning != message else { return }
+        dockShortcutWarning = message
+        updateDockAwayMenuState()
+    }
     private var permissionSetupInProgress = false
     private var permissionSetupWindow: NSPanel?
+    private weak var permissionSetupView: PermissionSetupView?
+    private let permissionMonitor = PermissionMonitor()
+    private let runtimePermissionAccess = RuntimePermissionAccess()
+    private var permissionContinuePending = false
+    private var permissionContinueGeneration = 0
+    private var permissionSetupRequested = false
     private var permissionSetupTimer: Timer?
     private weak var permissionSetupContinueButton: NSButton?
     private weak var permissionSetupLaunchAtLoginRowView: DockSettingPersistenceRowView?
     private var inputMonitoringSettingsVisitInProgress = false
-    private var inputMonitoringSettingsWasFrontmost = false
-    private var inputMonitoringRestartPending = false
-    private var inputMonitoringPermissionProbe: Process?
-    private var inputMonitoringPermissionProbeLastRun = Date.distantPast
+    private var inputMonitoringRestartPending: Bool {
+        permissionMonitor.snapshot?.inputMonitoringGranted == true
+            && !processInputMonitoringAccessGranted
+    }
     private var permissionRelaunchScheduled = false
     private var isPermissionRelaunching = false
-    private var isWaitingForAccessibility = false
-    private var accessibilityWaitWorkItem: DispatchWorkItem?
-    private var inputMonitoringWaitWorkItem: DispatchWorkItem?
-    private var inputMonitoringRegistrationManager: IOHIDManager?
     private var permissionHealthTimer: Timer?
     
     // The Unix signal trapper
@@ -2328,8 +2608,28 @@ private final class OnboardingPrimaryButton: NSButton {
     private var fourFingerStartedInMissionControl = false
     private let multitouch = MultitouchWatcher()
 
+    private var processInputMonitoringAccessGranted: Bool {
+        runtimePermissionAccess.snapshot?.inputMonitoringGranted == true
+    }
+
     private var inputMonitoringAccessGranted: Bool {
-        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+        permissionMonitor.snapshot?.inputMonitoringGranted == true
+            && processInputMonitoringAccessGranted
+    }
+
+    private var accessibilityAccessGranted: Bool {
+        permissionMonitor.snapshot?.accessibilityGranted == true
+            && runtimePermissionAccess.snapshot?.accessibilityGranted == true
+    }
+
+    private var permissionRestartRequired: Bool {
+        permissionMonitor.snapshot?.allGranted == true
+            && (!accessibilityAccessGranted || !inputMonitoringAccessGranted)
+    }
+
+    private var permissionRecoveryRequired: Bool {
+        permissionMonitor.snapshot == nil || accessibilityPermissionMissing
+            || inputMonitoringPermissionMissing || permissionRestartRequired
     }
 
 
@@ -2359,21 +2659,32 @@ private final class OnboardingPrimaryButton: NSButton {
         // Sparkle owns the selected schedule and remembers the last check date.
         // The independent launch toggle can request an immediate silent check.
 
-        accessibilityPermissionMissing = !AXIsProcessTrusted()
+        accessibilityPermissionMissing = true
         inputMonitoringPermissionMissing = !inputMonitoringAccessGranted
         setupMenuBar()
-        requestAccessibilityPermission()
         startPermissionHealthMonitoring()
+        runtimePermissionAccess.start { [weak self] in
+            guard let self, !self.isQuitting else { return }
+            // A local capability result must never replace the independently
+            // observed System Settings state, or force an early setup decision.
+            if self.permissionMonitor.snapshot != nil || !self.permissionMonitor.state.isChecking {
+                self.applyPermissionSnapshot(self.permissionMonitor.snapshot)
+            }
+        }
+        requestAccessibilityPermission()
         
         // Arm the signal trapper
         setupSignalHandler()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        if !AXIsProcessTrusted(), !accessibilityPermissionMissing {
-            accessibilityPermissionWasRevoked()
+        if !permissionContinuePending {
+            permissionMonitor.refresh(force: true)
         }
-        refreshInputMonitoringPermission()
+        if dockShortcutWarning != nil, DockShortcut.current() != nil {
+            updateDockShortcutWarning(nil)
+            dockWatcher?.resetState()
+        }
 
         // A trackpad or private-framework failure can be corrected while
         // DockAway is running. Retry when the app becomes active again so the
@@ -2391,14 +2702,18 @@ private final class OnboardingPrimaryButton: NSButton {
     private var monitoringShouldRun: Bool {
         dockAwayEnabled
             && !accessibilityPermissionMissing
+            && !inputMonitoringPermissionMissing
+            && accessibilityAccessGranted
+            && inputMonitoringAccessGranted
+            && !permissionSetupInProgress
+            && !permissionRelaunchScheduled
             && automaticSuspensionReasons.isEmpty
             && !dockSettingsRestartInProgress
             && !isQuitting
     }
 
-    // Input Monitoring is part of DockAway's required setup for reliable
-    // gesture timing. Keep the core watcher alive only so the menu can guide
-    // the user through restoring the missing permission.
+    // Both permissions are required. The menu remains available for recovery
+    // while the watcher and gesture monitoring are stopped.
     private var statusAppearsActive: Bool {
         monitoringShouldRun && !inputMonitoringPermissionMissing
     }
@@ -2412,6 +2727,12 @@ private final class OnboardingPrimaryButton: NSButton {
     private var automaticSuspensionDetail: String {
         if dockSettingsRestartInProgress {
             return "Applying Dock settings"
+        }
+        if permissionMonitor.snapshot == nil {
+            return "Unable to confirm permissions. Checking again…"
+        }
+        if permissionRestartRequired {
+            return "Finish setup to activate access"
         }
         if accessibilityPermissionMissing {
             return "Accessibility access is off"
@@ -2436,14 +2757,14 @@ private final class OnboardingPrimaryButton: NSButton {
         if dockSettingsRestartInProgress {
             return "DockAway: Applying Settings"
         }
-        return (accessibilityPermissionMissing || inputMonitoringPermissionMissing)
+        return permissionRecoveryRequired
             && dockAwayEnabled
             ? "Permission Required"
             : "DockAway: Paused"
     }
 
     private var permissionActionTitle: String {
-        "Restore Permissions"
+        permissionRestartRequired ? "Finish Permission Setup" : "Restore Permissions"
     }
 
     // Stops all of DockAway's active monitoring while nobody can interact
@@ -2566,10 +2887,13 @@ private final class OnboardingPrimaryButton: NSButton {
         fourFingerStartedInMissionControl = false
         dockWatcher?.stop()
         multitouch.stop()
-        accessibilityWaitWorkItem?.cancel()
-        accessibilityWaitWorkItem = nil
-        inputMonitoringWaitWorkItem?.cancel()
-        inputMonitoringWaitWorkItem = nil
+        permissionMonitor.stop()
+        permissionContinueGeneration += 1
+        if runtimePermissionAccess.isChecking {
+            runtimePermissionAccess.invalidate()
+        }
+        permissionContinuePending = false
+        renderPermissionSetupState()
         updateDockAwayMenuState()
         dockAwayDebugLog("🌙 DockAway monitoring suspended: \(automaticSuspensionDetail)")
     }
@@ -2594,21 +2918,7 @@ private final class OnboardingPrimaryButton: NSButton {
             return
         }
 
-        if isWaitingForAccessibility, !AXIsProcessTrusted() {
-            waitForAccessibility()
-            updateDockAwayMenuState()
-            return
-        }
-
-        guard AXIsProcessTrusted() else {
-            accessibilityPermissionWasRevoked()
-            return
-        }
-        accessibilityPermissionMissing = false
-        isWaitingForAccessibility = false
-        refreshInputMonitoringPermission()
-
-        startMonitoringIfAllowed(resetState: true)
+        permissionMonitor.refresh(force: true)
 
         // Window Server can still be settling immediately after unlock. The
         // first check is instant; this quiet second pass corrects a stale list.
@@ -2621,7 +2931,7 @@ private final class OnboardingPrimaryButton: NSButton {
 
     private func startMonitoringIfAllowed(resetState: Bool = false) {
         guard monitoringShouldRun else { return }
-        guard AXIsProcessTrusted() else {
+        guard accessibilityAccessGranted else {
             accessibilityPermissionWasRevoked()
             return
         }
@@ -2629,7 +2939,6 @@ private final class OnboardingPrimaryButton: NSButton {
         if dockWatcher == nil {
             dockWatcher = DockWatcher()
         }
-        inputMonitoringPermissionMissing = !inputMonitoringAccessGranted
         dockWatcher.start()
         startMultitouchPreHide()
         applyStatusIcon(dockVisible: isDockCurrentlyVisible())
@@ -2841,7 +3150,7 @@ private final class OnboardingPrimaryButton: NSButton {
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
                 : "App detection paused",
-            inactiveActionTitle: (accessibilityPermissionMissing || inputMonitoringPermissionMissing)
+            inactiveActionTitle: permissionRecoveryRequired
                 && dockAwayEnabled
                 ? permissionActionTitle
                 : "Resume DockAway",
@@ -2895,7 +3204,7 @@ private final class OnboardingPrimaryButton: NSButton {
         dockSettingsMenu.delegate = self
 
         let positionItem = NSMenuItem()
-        positionItem.view = DockSettingSectionHeaderView(title: "Dock Position:")
+        positionItem.view = DockSettingSectionHeaderView(title: "Dock Position")
         let dockPositionDisplayOrder: [DockPosition] = [.left, .bottom, .right]
         let positionRowView = DockPositionRowView(
             options: dockPositionDisplayOrder.map {
@@ -2908,11 +3217,8 @@ private final class OnboardingPrimaryButton: NSButton {
         let positionRowItem = NSMenuItem()
         positionRowItem.view = positionRowView
 
-        let animationSpeedItem = NSMenuItem()
-        animationSpeedItem.view = DockSettingSectionHeaderView(
-            title: "Animation Speed:"
-        )
         let animationSliderView = DockSettingSliderView(
+            title: "Animation Speed",
             leadingTitle: "Slow",
             trailingTitle: "Instant",
             accessibilityLabel: "Dock animation speed",
@@ -2926,11 +3232,8 @@ private final class OnboardingPrimaryButton: NSButton {
         let animationSliderItem = NSMenuItem()
         animationSliderItem.view = animationSliderView
 
-        let revealDelayItem = NSMenuItem()
-        revealDelayItem.view = DockSettingSectionHeaderView(
-            title: "Reveal Delay:"
-        )
         let revealDelaySliderView = DockSettingSliderView(
+            title: "Reveal Delay",
             leadingTitle: "None",
             trailingTitle: "Long",
             accessibilityLabel: "Dock reveal delay",
@@ -2993,10 +3296,21 @@ private final class OnboardingPrimaryButton: NSButton {
         dockSettingsMenu.addItem(positionItem)
         dockSettingsMenu.addItem(positionRowItem)
         dockSettingsMenu.addItem(.separator())
-        dockSettingsMenu.addItem(animationSpeedItem)
         dockSettingsMenu.addItem(animationSliderItem)
-        dockSettingsMenu.addItem(revealDelayItem)
         dockSettingsMenu.addItem(revealDelaySliderItem)
+        let moreSettingsItem = NSMenuItem()
+        moreSettingsItem.title = "More Dock Settings..."
+        let moreSettingsView = MenuActionItemView(
+            title: "More Dock Settings...",
+            titleLeadingInset: 20
+        ) { [weak self, weak dockSettingsMenu] in
+            dockSettingsMenu?.cancelTracking()
+            self?.openDesktopAndDockSettings()
+        }
+        moreSettingsItem.view = moreSettingsView
+        moreSettingsItem.target = moreSettingsView
+        moreSettingsItem.action = #selector(MenuActionItemView.performMenuAction(_:))
+        dockSettingsMenu.addItem(moreSettingsItem)
         dockSettingsMenu.addItem(.separator())
         dockSettingsMenu.addItem(keepDockSettingsAfterQuitItem)
         dockSettingsPersistenceItems.forEach { dockSettingsMenu.addItem($0) }
@@ -3098,6 +3412,21 @@ private final class OnboardingPrimaryButton: NSButton {
     }
 
     // MARK: - Dock Settings
+
+    @objc private func openDesktopAndDockSettings() {
+        openSystemSettingsPane("com.apple.Desktop-Settings.extension")
+    }
+
+    private func openSystemSettingsPane(_ identifier: String) {
+        statusItem.menu?.cancelTracking()
+        guard let url = URL(string: "x-apple.systempreferences:\(identifier)") else { return }
+        if !NSWorkspace.shared.open(url),
+           let settingsURL = NSWorkspace.shared.urlForApplication(
+               withBundleIdentifier: "com.apple.systempreferences"
+           ) {
+            NSWorkspace.shared.open(settingsURL)
+        }
+    }
 
     private var dockSettingsCanRestartDock: Bool {
         guard !dockSettingsRestartInProgress, !fourFingersDown else { return false }
@@ -3331,6 +3660,8 @@ private final class OnboardingPrimaryButton: NSButton {
     }
 
     private func commitDockRevealDelaySlider(_ value: Double) {
+        // An explicit choice always takes precedence over first-run setup.
+        UserDefaults.standard.set(true, forKey: Self.initialRevealDelayHandledKey)
         let percentage = normalizedDockSliderPercentage(value)
         let usesSystemDefault = dockSliderUsesSystemDefault(percentage)
         dockRevealDelaySliderView?.setPercentage(
@@ -3362,10 +3693,31 @@ private final class OnboardingPrimaryButton: NSButton {
         ])
     }
 
-    private func applyDockPreferenceChanges(_ requestedChanges: [DockPreferenceChange]) {
+    private func removeInitialDockRevealDelayIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.initialRevealDelayHandledKey) else { return }
+
+        // Do not override managed preferences or introduce a preference where
+        // none exists. This is a one-time adjustment, not a settings watchdog.
+        guard !dockPreferenceIsForced(Self.dockRevealDelayKey),
+              let delay = dockPreferenceDouble(forKey: Self.dockRevealDelayKey),
+              delay.isFinite, delay > 0 else {
+            defaults.set(true, forKey: Self.initialRevealDelayHandledKey)
+            return
+        }
+        guard dockSettingsCanRestartDock else { return }
+        if applyDockPreferenceChanges([
+            DockPreferenceChange(key: Self.dockRevealDelayKey, value: NSNumber(value: 0))
+        ]) {
+            defaults.set(true, forKey: Self.initialRevealDelayHandledKey)
+        }
+    }
+
+    @discardableResult
+    private func applyDockPreferenceChanges(_ requestedChanges: [DockPreferenceChange]) -> Bool {
         guard dockSettingsCanRestartDock else {
             NSSound.beep()
-            return
+            return false
         }
 
         let changes = requestedChanges.filter {
@@ -3377,7 +3729,7 @@ private final class OnboardingPrimaryButton: NSButton {
         }
         guard !changes.isEmpty else {
             refreshDockSettingsMenu()
-            return
+            return true
         }
 
         dockSettingsRestartInProgress = true
@@ -3410,12 +3762,13 @@ private final class OnboardingPrimaryButton: NSButton {
                 generation: restartGeneration,
                 errorMessage: "macOS could not save the Dock settings."
             )
-            return
+            return false
         }
 
         restartDock(
             generation: restartGeneration
         )
+        return true
     }
 
     private func dockPreferenceValuesMatch(_ lhs: Any?, _ rhs: Any?) -> Bool {
@@ -3768,6 +4121,7 @@ private final class OnboardingPrimaryButton: NSButton {
         blacklistMenu.addItem(.separator())
 
         let chooseItem = NSMenuItem()
+        chooseItem.title = "Choose Application…"
         chooseItem.view = BlacklistActionMenuItemView(
             title: "Choose Application…"
         ) { [weak self, weak blacklistMenu] in
@@ -3776,9 +4130,12 @@ private final class OnboardingPrimaryButton: NSButton {
                 self?.chooseBlacklistApplication()
             }
         }
+        chooseItem.target = chooseItem.view
+        chooseItem.action = #selector(BlacklistActionMenuItemView.performMenuAction(_:))
         blacklistMenu.addItem(chooseItem)
 
         let clearItem = NSMenuItem()
+        clearItem.title = "Remove All"
         let clearActionView = BlacklistActionMenuItemView(
             title: "Remove All",
             isEnabled: !ignoredIdentifiers.isEmpty
@@ -3786,13 +4143,19 @@ private final class OnboardingPrimaryButton: NSButton {
             self?.clearBlacklist()
         }
         clearItem.view = clearActionView
+        clearItem.isEnabled = !ignoredIdentifiers.isEmpty
+        clearItem.target = clearActionView
+        clearItem.action = #selector(BlacklistActionMenuItemView.performMenuAction(_:))
         blacklistClearActionView = clearActionView
         blacklistMenu.addItem(clearItem)
 
         blacklistMenu.addItem(.separator())
 
         let helpItem = NSMenuItem()
+        helpItem.title = "About Blacklist"
         helpItem.view = BlacklistHelpMenuItemView()
+        helpItem.target = helpItem.view
+        helpItem.action = #selector(BlacklistHelpMenuItemView.performMenuAction(_:))
         blacklistMenu.addItem(helpItem)
     }
 
@@ -3904,7 +4267,7 @@ private final class OnboardingPrimaryButton: NSButton {
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = "Remove All Blacklisted Apps?"
-            alert.informativeText = "Are you sure you want to\nremove \(applicationCount) apps from the blacklist?"
+            alert.informativeText = "Are you sure you want to:\nRemove \(applicationCount) apps from the blacklist?"
             alert.addButton(withTitle: "Remove All")
             alert.addButton(withTitle: "Cancel")
             alert.buttons.first?.hasDestructiveAction = true
@@ -3962,13 +4325,30 @@ private final class OnboardingPrimaryButton: NSButton {
             return
         }
 
+        if dockShortcutWarningVisible {
+            statusItem.menu?.cancelTracking()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let alert = NSAlert()
+                alert.messageText = "Enable the Dock Keyboard Shortcut"
+                alert.informativeText = "In System Settings, open Keyboard > Keyboard Shortcuts > Mission Control and enable ‘Turn Dock hiding on/off’. DockAway uses your chosen key combination and will resume Dock changes once it is enabled."
+                alert.addButton(withTitle: "Open Keyboard Settings")
+                alert.addButton(withTitle: "Cancel")
+                NSApp.activate(ignoringOtherApps: true)
+                if alert.runModal() == .alertFirstButtonReturn {
+                    self.openSystemSettingsPane("com.apple.Keyboard-Settings.extension")
+                }
+            }
+            return
+        }
+
         if dockAwayEnabled, multitouchWarningVisible {
             retryMultitouchSupport()
             return
         }
 
         if dockAwayEnabled,
-           accessibilityPermissionMissing || inputMonitoringPermissionMissing {
+           !accessibilityAccessGranted || !inputMonitoringAccessGranted {
             statusItem.menu?.cancelTracking()
             DispatchQueue.main.async { [weak self] in
                 self?.requestAccessibilityPermission()
@@ -3982,26 +4362,14 @@ private final class OnboardingPrimaryButton: NSButton {
             fourFingerStartedInMissionControl = false
             dockWatcher?.stop()
             multitouch.stop()
-            inputMonitoringWaitWorkItem?.cancel()
-            inputMonitoringWaitWorkItem = nil
             updateDockAwayMenuState()
             restoreDockState()
             applyStatusIcon(dockVisible: isDockCurrentlyVisible())
             dockAwayDebugLog("🔴 DockAway inactive")
         } else {
             dockAwayEnabled = true
-            guard AXIsProcessTrusted() else {
-                accessibilityPermissionMissing = true
-                isWaitingForAccessibility = true
-                updateDockAwayMenuState()
-                requestAccessibilityPermission()
-                return
-            }
-
-            accessibilityPermissionMissing = false
-            startMonitoringIfAllowed(resetState: true)
+            requestAccessibilityPermission()
             updateDockAwayMenuState()
-            dockAwayDebugLog("🟢 DockAway active")
         }
     }
 
@@ -4013,11 +4381,14 @@ private final class OnboardingPrimaryButton: NSButton {
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
                 : "App detection paused",
-            inactiveActionTitle: (accessibilityPermissionMissing || inputMonitoringPermissionMissing)
+            inactiveActionTitle: permissionRecoveryRequired
                 && dockAwayEnabled
                 ? permissionActionTitle
                 : "Resume DockAway",
-            warning: multitouchWarningVisible
+            warning: dockShortcutWarningVisible || multitouchWarningVisible,
+            warningTitle: dockShortcutWarningVisible ? "Dock Shortcut Required" : "No Multitouch Support:",
+            warningDetail: dockShortcutWarningVisible ? (dockShortcutWarning ?? "") : "4-finger gestures off",
+            warningActionTitle: dockShortcutWarningVisible ? "Open Keyboard Settings" : "Retry Gesture Support"
         )
         dockAwayStatusView?.pauseResumeButton.isEnabled = !dockSettingsRestartInProgress
     }
@@ -4093,17 +4464,14 @@ private final class OnboardingPrimaryButton: NSButton {
     // MARK: - Permission Setup
 
     private func requestAccessibilityPermission() {
-        accessibilityPermissionMissing = !AXIsProcessTrusted()
-        inputMonitoringPermissionMissing = !inputMonitoringAccessGranted
-        updateDockAwayMenuState()
-
-        guard accessibilityPermissionMissing || inputMonitoringPermissionMissing else {
-            completePermissionSetup()
+        guard !isQuitting, !permissionContinuePending, !permissionRelaunchScheduled else { return }
+        if permissionSetupInProgress {
+            permissionSetupWindow?.makeKeyAndOrderFront(nil)
+            permissionMonitor.refresh(force: true)
             return
         }
-
-        UserDefaults.standard.set(false, forKey: Self.permissionSetupCompletedKey)
-        presentPermissionSetup()
+        permissionSetupRequested = true
+        permissionMonitor.refresh(force: true)
     }
 
     private func presentPermissionSetup() {
@@ -4118,6 +4486,7 @@ private final class OnboardingPrimaryButton: NSButton {
                 self?.openInputMonitoringSettings()
             }
         )
+        permissionSetupView = setupView
 
         let (
             setupWindow,
@@ -4129,35 +4498,15 @@ private final class OnboardingPrimaryButton: NSButton {
         permissionSetupWindow = setupWindow
         permissionSetupContinueButton = continueButton
         continueButton.isEnabled = false
-        var continueReady = false
+        renderPermissionSetupState()
 
-        let refreshSetupState = { [weak self, weak continueButton] in
-            guard let self else { return }
-            self.refreshInputMonitoringSettingsVisit()
-            let accessibilityGranted = AXIsProcessTrusted()
-            let inputMonitoringGranted = self.inputMonitoringAccessGranted
-            let inputMonitoringReady = inputMonitoringGranted
-                || self.inputMonitoringRestartPending
-            let ready = accessibilityGranted && inputMonitoringReady
-            self.accessibilityPermissionMissing = !accessibilityGranted
-            self.inputMonitoringPermissionMissing = !inputMonitoringGranted
-            self.isWaitingForAccessibility = !accessibilityGranted
-            setupView.update(
-                accessibilityGranted: accessibilityGranted,
-                inputMonitoringGranted: inputMonitoringGranted,
-                inputMonitoringRestartPending: self.inputMonitoringRestartPending,
-                inputMonitoringSettingsOpen: self.inputMonitoringSettingsVisitInProgress
-            )
-
-            if !self.permissionRelaunchScheduled, ready != continueReady {
-                continueReady = ready
-                continueButton?.isEnabled = ready
+        let refreshTimer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+            // This timer is registered exclusively on the main run loop.
+            MainActor.assumeIsolated {
+                guard let self, !self.permissionContinuePending,
+                      self.automaticSuspensionReasons.isEmpty, !self.isQuitting else { return }
+                self.permissionMonitor.refresh()
             }
-            self.updateDockAwayMenuState()
-        }
-
-        let refreshTimer = Timer(timeInterval: 0.4, repeats: true) { _ in
-            refreshSetupState()
         }
         permissionSetupTimer = refreshTimer
         RunLoop.main.add(refreshTimer, forMode: .common)
@@ -4172,7 +4521,7 @@ private final class OnboardingPrimaryButton: NSButton {
             window: setupWindow,
             revealViews: entranceViews
         )
-        refreshSetupState()
+        permissionMonitor.refresh()
         setupWindow.makeKeyAndOrderFront(nil)
         animatePermissionSetupEntrance(
             window: setupWindow,
@@ -4194,7 +4543,7 @@ private final class OnboardingPrimaryButton: NSButton {
     ) {
         let windowSize = NSSize(width: 540, height: 515)
         let panelCornerRadius: CGFloat = 28
-        let panel = NSPanel(
+        let panel = PermissionSetupPanel(
             contentRect: NSRect(origin: .zero, size: windowSize),
             styleMask: [.borderless],
             backing: .buffered,
@@ -4340,14 +4689,14 @@ private final class OnboardingPrimaryButton: NSButton {
         ])
 
         let introductionLabel = NSTextField(
-            wrappingLabelWithString: "Let's get started by setting up these two macOS permissions to unlock DockAway's window and gesture detection for a smooth experience."
+            wrappingLabelWithString: "Let’s get DockAway ready. Enable Accessibility first. DockAway will then check whether any additional input access is needed."
         )
         introductionLabel.font = .systemFont(ofSize: 13)
         introductionLabel.textColor = .labelColor
         introductionLabel.maximumNumberOfLines = 2
         introductionLabel.alignment = .center
 
-        let permissionHeading = NSTextField(labelWithString: "Please enable the following permissions:")
+        let permissionHeading = NSTextField(labelWithString: "Here’s what DockAway checks:")
         permissionHeading.font = .systemFont(ofSize: 13, weight: .medium)
         permissionHeading.textColor = .labelColor
 
@@ -4691,18 +5040,80 @@ private final class OnboardingPrimaryButton: NSButton {
     }
 
     @objc private func continuePermissionSetup() {
-        guard
-            AXIsProcessTrusted(),
-            inputMonitoringAccessGranted || inputMonitoringRestartPending
-        else { return }
+        guard permissionSetupInProgress, !permissionContinuePending,
+              !permissionRelaunchScheduled, !isQuitting,
+              automaticSuspensionReasons.isEmpty else { return }
+        permissionContinueGeneration += 1
+        let generation = permissionContinueGeneration
+        permissionContinuePending = true
+        renderPermissionSetupState()
+        // Check authorization first, then actual access in this running process.
+        permissionMonitor.refresh(force: true) { [weak self] snapshot in
+            guard let self, self.isPermissionCompletionCurrent(generation) else { return }
+            guard snapshot?.allGranted == true else {
+                self.finishPermissionCompletionAttempt()
+                return
+            }
+            self.runtimePermissionAccess.refresh { [weak self] in
+                guard let self, self.isPermissionCompletionCurrent(generation) else { return }
+                // Authorization may have changed while the local API was busy.
+                self.confirmPermissionCompletion(generation: generation)
+            }
+        }
+    }
 
-        dismissPermissionSetup()
-        UserDefaults.standard.set(
-            true,
-            forKey: Self.showStartedPopoverAfterRelaunchKey
-        )
-        completePermissionSetup(allowStartedPopover: false)
-        scheduleRelaunchAfterPermissionSetup()
+    private func isPermissionCompletionCurrent(_ generation: Int) -> Bool {
+        permissionContinueGeneration == generation && permissionContinuePending
+            && permissionSetupInProgress && !permissionRelaunchScheduled
+            && !isQuitting && automaticSuspensionReasons.isEmpty
+    }
+
+    private func finishPermissionCompletionAttempt() {
+        permissionContinuePending = false
+        permissionContinueGeneration += 1
+        renderPermissionSetupState()
+        updateDockAwayMenuState()
+    }
+
+    private func confirmPermissionCompletion(generation: Int, initializationFailed: Bool = false) {
+        permissionMonitor.refresh(force: true) { [weak self] snapshot in
+            guard let self, self.isPermissionCompletionCurrent(generation) else { return }
+            let decision = PermissionCompletionDecision.decide(
+                authorization: snapshot,
+                runtime: initializationFailed ? nil : self.runtimePermissionAccess.snapshot
+            )
+            switch decision {
+            case .remainInSetup:
+                self.finishPermissionCompletionAttempt()
+            case .continueInPlace:
+                self.finishPermissionSetupInPlace(generation: generation)
+            case .restart:
+                UserDefaults.standard.set(true, forKey: Self.permissionSetupCompletedKey)
+                UserDefaults.standard.set(true, forKey: Self.showStartedPopoverAfterRelaunchKey)
+                self.dismissPermissionSetup()
+                self.scheduleRelaunchAfterPermissionSetup()
+            }
+        }
+    }
+
+    private func finishPermissionSetupInPlace(generation: Int) {
+        guard isPermissionCompletionCurrent(generation) else { return }
+        // Allow initialization only during this synchronous, user-approved
+        // handoff. Keep the window available until monitoring has started.
+        permissionSetupInProgress = false
+        startMonitoringIfAllowed(resetState: true)
+        permissionSetupInProgress = true
+        guard dockWatcher?.isRunning == true,
+              accessibilityAccessGranted, inputMonitoringAccessGranted else {
+            dockWatcher?.stop()
+            multitouch.stop()
+            // Initialization failure is not evidence of a permission grant.
+            // Reconfirm before falling back, rather than blindly restarting.
+            confirmPermissionCompletion(generation: generation, initializationFailed: true)
+            return
+        }
+        dismissPermissionSetup(preservingPermissionState: true)
+        completePermissionSetup(forceStartedPopover: true)
     }
 
     @objc private func cancelPermissionSetup() {
@@ -4710,14 +5121,21 @@ private final class OnboardingPrimaryButton: NSButton {
         NSApp.terminate(self)
     }
 
-    private func dismissPermissionSetup() {
+    private func dismissPermissionSetup(preservingPermissionState: Bool = false) {
         permissionSetupTimer?.invalidate()
         permissionSetupTimer = nil
         permissionSetupWindow?.orderOut(nil)
         permissionSetupWindow = nil
+        permissionSetupView = nil
         permissionSetupContinueButton = nil
         permissionSetupLaunchAtLoginRowView = nil
         permissionSetupInProgress = false
+        permissionContinuePending = false
+        permissionContinueGeneration += 1
+        if !preservingPermissionState {
+            permissionMonitor.stop()
+            runtimePermissionAccess.invalidate()
+        }
     }
 
     private func scheduleRelaunchAfterPermissionSetup() {
@@ -4740,7 +5158,8 @@ private final class OnboardingPrimaryButton: NSButton {
                     false,
                     forKey: Self.showStartedPopoverAfterRelaunchKey
                 )
-                self.showDockAwayStartedPopover()
+                self.presentPermissionSetup()
+                self.permissionMonitor.refresh(force: true)
                 dockAwayDebugLog("⚠️ Could not prepare DockAway relaunch after permission setup: \(error)")
             }
         }
@@ -4769,7 +5188,9 @@ private final class OnboardingPrimaryButton: NSButton {
         try helper.run()
     }
 
-    private func completePermissionSetup(allowStartedPopover: Bool = true) {
+    private func completePermissionSetup(allowStartedPopover: Bool = true, forceStartedPopover: Bool = false) {
+        guard permissionMonitor.snapshot?.allGranted == true,
+              accessibilityAccessGranted, inputMonitoringAccessGranted else { return }
         let defaults = UserDefaults.standard
         let isFirstCompletedSetup = !defaults.bool(
             forKey: Self.permissionSetupCompletedKey
@@ -4778,21 +5199,19 @@ private final class OnboardingPrimaryButton: NSButton {
             forKey: Self.showStartedPopoverAfterRelaunchKey
         )
         let shouldShowStartedPopover = allowStartedPopover
-            && (isFirstCompletedSetup || shouldShowAfterRelaunch)
+            && (isFirstCompletedSetup || shouldShowAfterRelaunch || forceStartedPopover)
         defaults.set(true, forKey: Self.permissionSetupCompletedKey)
         if shouldShowStartedPopover {
             defaults.set(false, forKey: Self.showStartedPopoverAfterRelaunchKey)
         }
-        accessibilityPermissionMissing = false
-        inputMonitoringPermissionMissing = false
-        isWaitingForAccessibility = false
-        accessibilityWaitWorkItem?.cancel()
-        accessibilityWaitWorkItem = nil
-        inputMonitoringWaitWorkItem?.cancel()
-        inputMonitoringWaitWorkItem = nil
 
         if dockWatcher == nil {
             dockWatcher = DockWatcher()
+        }
+        // Apply only after this process has usable access, whether onboarding
+        // completed in place or a fallback relaunch was needed.
+        if allowStartedPopover {
+            removeInitialDockRevealDelayIfNeeded()
         }
         startMonitoringIfAllowed()
         ensureDockAwayIsOn()
@@ -4828,7 +5247,7 @@ private final class OnboardingPrimaryButton: NSButton {
         let detail: String
         if accessibilityPermissionMissing && inputMonitoringPermissionMissing {
             title = "DockAway permissions were revoked"
-            detail = "Restore Accessibility and Input Monitoring from the menu bar."
+            detail = "Restore Accessibility and Input Monitoring from the menu bar by pressing the resume button."
         } else if accessibilityPermissionMissing {
             title = "Accessibility permission was revoked"
             detail = "DockAway is paused. Click the menubar icon and press the resume button to restore access."
@@ -5322,269 +5741,130 @@ private final class OnboardingPrimaryButton: NSButton {
         startedPopoverCelebrationButton = nil
     }
 
-    // MARK: - Accessibility
+    // MARK: - Live Permission Observation
+
+    private func renderPermissionSetupState() {
+        let snapshot = permissionMonitor.snapshot
+        permissionSetupView?.update(
+            accessibilityGranted: snapshot?.accessibilityGranted == true,
+            inputMonitoringGranted: inputMonitoringAccessGranted,
+            inputMonitoringRestartPending: inputMonitoringRestartPending,
+            inputMonitoringSettingsOpen: inputMonitoringSettingsVisitInProgress,
+            checkingPermissions: snapshot == nil || permissionContinuePending
+        )
+        permissionSetupContinueButton?.isEnabled = snapshot?.allGranted == true
+            && !permissionContinuePending && !permissionRelaunchScheduled
+    }
+
+    private func applyPermissionSnapshot(_ snapshot: PermissionSnapshot?) {
+        guard !isQuitting else { return }
+        let previouslyGranted = !accessibilityPermissionMissing && !inputMonitoringPermissionMissing
+        // A failed or timed-out check is unknown, never a cached grant.
+        accessibilityPermissionMissing = snapshot?.accessibilityGranted != true
+        inputMonitoringPermissionMissing = snapshot?.inputMonitoringGranted != true
+        if let snapshot, !snapshot.allGranted {
+            // Drop obsolete runtime grants. Continue can reacquire them with
+            // a new serialized local check, or use a restart as a fallback.
+            runtimePermissionAccess.invalidate()
+        }
+
+        if !accessibilityAccessGranted || !inputMonitoringAccessGranted {
+            fourFingersDown = false
+            fourFingerStartedInMissionControl = false
+            dockWatcher?.stop()
+            multitouch.stop()
+        }
+        renderPermissionSetupState()
+        updateDockAwayMenuState()
+
+        if permissionSetupRequested {
+            if snapshot?.allGranted == true, runtimePermissionAccess.isChecking {
+                return
+            }
+            permissionSetupRequested = false
+            if snapshot?.allGranted == true,
+               accessibilityAccessGranted, inputMonitoringAccessGranted {
+                completePermissionSetup()
+            } else {
+                presentPermissionSetup()
+            }
+            return
+        }
+        guard !permissionSetupInProgress, !permissionContinuePending,
+              !permissionRelaunchScheduled else { return }
+        if monitoringShouldRun, dockWatcher?.isRunning != true {
+            startMonitoringIfAllowed(resetState: true)
+        }
+        if previouslyGranted, let snapshot, !snapshot.allGranted {
+            showPermissionRevokedPopover()
+        }
+    }
 
     private func startPermissionHealthMonitoring() {
+        permissionMonitor.onChange = { [weak self] snapshot in
+            self?.applyPermissionSnapshot(snapshot)
+        }
         permissionHealthTimer?.invalidate()
-        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard
-                let self,
-                !self.isQuitting,
-                !self.permissionSetupInProgress,
-                !self.permissionRelaunchScheduled
-            else { return }
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.isQuitting, !self.permissionRelaunchScheduled,
+                      !self.permissionContinuePending,
+                      self.automaticSuspensionReasons.isEmpty else { return }
 
-            if !AXIsProcessTrusted(), !self.accessibilityPermissionMissing {
-                self.accessibilityPermissionWasRevoked()
-            }
-
-            let inputMonitoringShouldBeMissing = !self.inputMonitoringAccessGranted
-            if inputMonitoringShouldBeMissing != self.inputMonitoringPermissionMissing {
-                self.refreshInputMonitoringPermission()
+                let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                let settingsIsFrontmost = frontmost == "com.apple.systempreferences"
+                    || frontmost == "com.apple.SystemSettings"
+                // Remain responsive in onboarding and Settings, even if Settings
+                // was opened independently. Quiet background operation polls less.
+                self.permissionMonitor.refresh(
+                    minimumInterval: self.permissionSetupInProgress || settingsIsFrontmost ? 0.4 : 3
+                )
             }
         }
         permissionHealthTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
-    private func waitForAccessibility() {
-        guard !isQuitting, automaticSuspensionReasons.isEmpty else { return }
-
-        accessibilityWaitWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self, !self.isQuitting, self.automaticSuspensionReasons.isEmpty else { return }
-
-            if AXIsProcessTrusted() {
-                self.accessibilityPermissionMissing = false
-                self.isWaitingForAccessibility = false
-                self.accessibilityWaitWorkItem = nil
-                dockAwayDebugLog("✅ Accessibility granted - starting detector")
-                if self.permissionSetupInProgress {
-                    self.refreshInputMonitoringPermission()
-                    self.updateDockAwayMenuState()
-                    return
-                }
-                if self.dockWatcher == nil {
-                    self.dockWatcher = DockWatcher()
-                }
-                self.startMonitoringIfAllowed()
-                self.ensureDockAwayIsOn()
-                self.updateDockAwayMenuState()
-            } else {
-                self.accessibilityPermissionMissing = true
-                self.updateDockAwayMenuState()
-                self.waitForAccessibility()
-            }
-        }
-        accessibilityWaitWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
-    }
-
     func accessibilityPermissionWasRevoked() {
-        let handleLoss = { [weak self] in
-            guard let self, !self.isQuitting else { return }
-            guard !self.accessibilityPermissionMissing else { return }
-
-            self.accessibilityPermissionMissing = true
-            self.isWaitingForAccessibility = true
-            self.fourFingersDown = false
-            self.fourFingerStartedInMissionControl = false
-            self.dockWatcher?.stop()
-            self.multitouch.stop()
-            self.updateDockAwayMenuState()
-            self.showPermissionRevokedPopover()
-            self.waitForAccessibility()
-            dockAwayDebugLog("⚠️ Accessibility permission removed — DockAway paused")
+        guard !isQuitting else { return }
+        // A failed protected operation is a reason to revalidate, not permission
+        // to publish a cached API result as the System Settings switch state.
+        runtimePermissionAccess.invalidate()
+        fourFingersDown = false
+        fourFingerStartedInMissionControl = false
+        dockWatcher?.stop()
+        multitouch.stop()
+        if !permissionContinuePending {
+            permissionMonitor.refresh(force: true)
+            renderPermissionSetupState()
         }
-
-        if Thread.isMainThread {
-            handleLoss()
-        } else {
-            DispatchQueue.main.async(execute: handleLoss)
-        }
+        updateDockAwayMenuState()
     }
 
     @objc private func openAccessibilitySettings() {
-        accessibilityPermissionMissing = !AXIsProcessTrusted()
-        isWaitingForAccessibility = accessibilityPermissionMissing
-        updateDockAwayMenuState()
-
+        if !permissionContinuePending {
+            permissionMonitor.refresh()
+        }
         if let settingsURL = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         ) {
             NSWorkspace.shared.open(settingsURL)
         }
-
-        if accessibilityPermissionMissing {
-            waitForAccessibility()
-        } else {
-            startMonitoringIfAllowed(resetState: true)
-        }
-    }
-
-    // MARK: - Input Monitoring Permission
-
-    @discardableResult
-    private func refreshInputMonitoringPermission() -> Bool {
-        let permissionWasMissing = inputMonitoringPermissionMissing
-        let permissionIsGranted = inputMonitoringAccessGranted
-        inputMonitoringPermissionMissing = !permissionIsGranted
-
-        if permissionIsGranted {
-            resetInputMonitoringSettingsVisit()
-            inputMonitoringWaitWorkItem?.cancel()
-            inputMonitoringWaitWorkItem = nil
-            stopInputMonitoringRegistrationAttempt()
-            startMultitouchPreHide()
-        } else {
-            fourFingersDown = false
-            fourFingerStartedInMissionControl = false
-            multitouch.stop()
-        }
-
-        updateDockAwayMenuState()
-        if !permissionIsGranted, !permissionWasMissing {
-            showPermissionRevokedPopover()
-        }
-        return permissionIsGranted
-    }
-
-    private func refreshInputMonitoringSettingsVisit() {
-        guard inputMonitoringSettingsVisitInProgress else { return }
-
-        if inputMonitoringAccessGranted {
-            inputMonitoringRestartPending = false
-            return
-        }
-
-        let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        let systemSettingsIsFrontmost = frontmostBundleIdentifier == "com.apple.systempreferences"
-            || frontmostBundleIdentifier == "com.apple.SystemSettings"
-
-        if systemSettingsIsFrontmost {
-            inputMonitoringSettingsWasFrontmost = true
-        }
-
-        guard inputMonitoringSettingsWasFrontmost else { return }
-        runInputMonitoringPermissionProbeIfNeeded()
-    }
-
-    private func runInputMonitoringPermissionProbeIfNeeded() {
-        guard
-            inputMonitoringPermissionProbe == nil,
-            Date().timeIntervalSince(inputMonitoringPermissionProbeLastRun) >= 0.5,
-            let executableURL = Bundle.main.executableURL
-        else { return }
-
-        inputMonitoringPermissionProbeLastRun = Date()
-        let probe = Process()
-        probe.executableURL = executableURL
-        probe.arguments = ["--dockaway-input-monitoring-probe"]
-        probe.standardInput = FileHandle.nullDevice
-        probe.standardOutput = FileHandle.nullDevice
-        probe.standardError = FileHandle.nullDevice
-        probe.terminationHandler = { [weak self, weak probe] finishedProbe in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let probe, self.inputMonitoringPermissionProbe === probe {
-                    self.inputMonitoringPermissionProbe = nil
-                }
-                guard self.inputMonitoringSettingsVisitInProgress else { return }
-
-                // The current process remains denied until it restarts, while
-                // each fresh copy sees the permission state macOS has recorded
-                // right now. Keep probing throughout onboarding so turning the
-                // switch back off immediately clears the pending grant.
-                self.inputMonitoringRestartPending =
-                    finishedProbe.terminationReason == .exit
-                    && finishedProbe.terminationStatus == EXIT_SUCCESS
-            }
-        }
-
-        inputMonitoringPermissionProbe = probe
-        do {
-            try probe.run()
-        } catch {
-            inputMonitoringPermissionProbe = nil
-            dockAwayDebugLog("⚠️ Could not run Input Monitoring permission probe: \(error)")
-        }
-    }
-
-    private func resetInputMonitoringSettingsVisit() {
-        inputMonitoringSettingsVisitInProgress = false
-        inputMonitoringSettingsWasFrontmost = false
-        inputMonitoringRestartPending = false
-    }
-
-    private func startInputMonitoringRegistrationAttempt() {
-        guard inputMonitoringRegistrationManager == nil else { return }
-
-        let manager = IOHIDManagerCreate(
-            kCFAllocatorDefault,
-            IOOptionBits(kIOHIDOptionsTypeNone)
-        )
-        IOHIDManagerSetDeviceMatching(manager, nil)
-        IOHIDManagerScheduleWithRunLoop(
-            manager,
-            CFRunLoopGetMain(),
-            CFRunLoopMode.commonModes.rawValue
-        )
-        inputMonitoringRegistrationManager = manager
-
-        // Opening a manager is the actual protected listen operation. Apple's
-        // IOHID contract requests access on the process's behalf here, which
-        // gives TCC a concrete DockAway client to add to Input Monitoring.
-        _ = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-    }
-
-    private func stopInputMonitoringRegistrationAttempt() {
-        guard let manager = inputMonitoringRegistrationManager else { return }
-        IOHIDManagerUnscheduleFromRunLoop(
-            manager,
-            CFRunLoopGetMain(),
-            CFRunLoopMode.commonModes.rawValue
-        )
-        _ = IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
-        inputMonitoringRegistrationManager = nil
-    }
-
-    private func waitForInputMonitoringPermission() {
-        guard
-            !isQuitting,
-            dockAwayEnabled,
-            automaticSuspensionReasons.isEmpty,
-            inputMonitoringPermissionMissing
-        else { return }
-
-        inputMonitoringWaitWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self, !self.isQuitting else { return }
-            self.inputMonitoringWaitWorkItem = nil
-            if !self.refreshInputMonitoringPermission() {
-                self.waitForInputMonitoringPermission()
-            } else {
-                dockAwayDebugLog("✅ Input Monitoring granted - gesture smoothing enabled")
-            }
-        }
-        inputMonitoringWaitWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
     }
 
     @objc private func openInputMonitoringSettings() {
-        // Open the native privacy pane directly. Calling IOHIDRequestAccess or
-        // opening an IOHID manager here triggers an additional protected-device
-        // consent dialog that is unnecessary because onboarding already explains
-        // how to enable Input Monitoring in System Settings.
+        // Open the native pane without an additional permission request alert.
+        // This flag controls instructions only, never permission observations.
         inputMonitoringSettingsVisitInProgress = true
-        inputMonitoringSettingsWasFrontmost = false
-        inputMonitoringRestartPending = false
-        updateDockAwayMenuState()
+        renderPermissionSetupState()
+        if !permissionContinuePending {
+            permissionMonitor.refresh()
+        }
         if let settingsURL = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
         ) {
             NSWorkspace.shared.open(settingsURL)
         }
-        waitForInputMonitoringPermission()
     }
 
     // MARK: - Unix Signal & Cleanup
@@ -5598,6 +5878,10 @@ private final class OnboardingPrimaryButton: NSButton {
         source.setEventHandler { [weak self] in
             dockAwayDebugLog("  ⚠️ Caught Unix SIGTERM (Activity Monitor)")
             self?.isQuitting = true
+            self?.permissionMonitor.stop()
+            self?.runtimePermissionAccess.invalidate()
+            self?.permissionSetupTimer?.invalidate()
+            self?.permissionHealthTimer?.invalidate()
             self?.restoreDockState()
             self?.restoreDefaultDockPreferencesBeforeExitIfNeeded()
             
@@ -5671,9 +5955,11 @@ private final class OnboardingPrimaryButton: NSButton {
         closeStartedPopover()
         permissionHealthTimer?.invalidate()
         permissionHealthTimer = nil
-        accessibilityWaitWorkItem?.cancel()
-        inputMonitoringWaitWorkItem?.cancel()
-        stopInputMonitoringRegistrationAttempt()
+        permissionSetupTimer?.invalidate()
+        permissionSetupTimer = nil
+        permissionContinuePending = false
+        permissionMonitor.stop()
+        runtimePermissionAccess.invalidate()
         dockWatcher?.stop()
         multitouch.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -5751,7 +6037,12 @@ extension AppDelegate: NSMenuDelegate {
             // The menu opening is an event-driven opportunity to reflect a
             // manual Dock shortcut or a permission changed in System Settings.
             applyStatusIcon(dockVisible: isDockCurrentlyVisible())
-            refreshInputMonitoringPermission()
+            if !permissionContinuePending {
+                permissionMonitor.refresh(force: true)
+            }
+            if dockShortcutWarning != nil, DockShortcut.current() != nil {
+                updateDockShortcutWarning(nil)
+            }
             refreshDockSettingsMenu()
             refreshUpdateFrequencyMenu()
         }

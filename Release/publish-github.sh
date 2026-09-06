@@ -40,36 +40,49 @@ remote_url="$(git remote get-url "$remote_name")"
     || fail "Refusing to publish through unexpected remote: $remote_url"
 
 commit_sha="$(git rev-parse HEAD)"
-dmg_name="$(basename "$dmg_path")"
+metadata="$repo_root/Release/release_metadata.py"
+stage_dir="$(mktemp -d /private/tmp/DockAway-publish-XXXXXX)"
+trap 'rm -rf "$stage_dir"' EXIT
+dmg_name="$(python3 "$metadata" asset-name "$version" "$dmg_path")"
+python3 "$metadata" notes changelog.html "$version" "$stage_dir/notes.md"
+if [[ -n "$release_notes" ]]; then
+    print >> "$stage_dir/notes.md"
+    print -r -- "$release_notes" >> "$stage_dir/notes.md"
+fi
+cp "$dmg_path" "$stage_dir/$dmg_name"
+DOCKAWAY_PREPARE_ONLY=1 /bin/zsh "$repo_root/Release/update-appcast.sh"
+
+release_exists=false
+if gh release view "$version" --repo "$github_repo" >/dev/null 2>&1; then
+    release_exists=true
+fi
+# A tag can exist even when no GitHub release has been created for it yet.
+if gh api "repos/$github_repo/git/ref/tags/$version" >/dev/null 2>&1; then
+    tag_commit="$(gh api "repos/$github_repo/commits/$version" --jq .sha)"
+    [[ "$tag_commit" == "$commit_sha" ]] \
+        || fail "Tag $version points to $tag_commit, not HEAD. Use a new version or explicitly reconcile the tag first."
+fi
 
 print "Pushing release commit $commit_sha to $remote_name/main"
 git push "$remote_name" HEAD:main
 
-if gh release view "$version" --repo "$github_repo" >/dev/null 2>&1; then
-    print "Release $version already exists. Replacing $dmg_name."
-    gh release upload "$version" "$dmg_path" --repo "$github_repo" --clobber
-    if [[ -n "$release_notes" ]]; then
-        gh release edit "$version" \
-            --repo "$github_repo" \
-            --target "$commit_sha" \
-            --title "DockAway $version" \
-            --notes "$release_notes"
+if $release_exists; then
+    if gh release view "$version" --repo "$github_repo" --json assets \
+        --jq '.assets[].name' | grep -Fx "$dmg_name" >/dev/null; then
+        mkdir "$stage_dir/download"
+        gh release download "$version" --repo "$github_repo" --pattern "$dmg_name" \
+            --dir "$stage_dir/download"
+        python3 "$metadata" verify-archive "$dmg_path" "$stage_dir/download/$dmg_name"
+    else
+        gh release upload "$version" "$stage_dir/$dmg_name" --repo "$github_repo"
     fi
+    gh release edit "$version" --repo "$github_repo" \
+        --title "DockAway $version" --notes-file "$stage_dir/notes.md"
 else
     print "Creating GitHub release $version"
-    if [[ -n "$release_notes" ]]; then
-        gh release create "$version" "$dmg_path" \
-            --repo "$github_repo" \
-            --target "$commit_sha" \
-            --title "DockAway $version" \
-            --notes "$release_notes"
-    else
-        gh release create "$version" "$dmg_path" \
-            --repo "$github_repo" \
-            --target "$commit_sha" \
-            --title "DockAway $version" \
-            --generate-notes
-    fi
+    gh release create "$version" "$stage_dir/$dmg_name" \
+        --repo "$github_repo" --target "$commit_sha" \
+        --title "DockAway $version" --notes-file "$stage_dir/notes.md"
 fi
 
 gh release view "$version" --repo "$github_repo" --json assets \

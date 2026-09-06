@@ -8,6 +8,26 @@
     </style>
 </head>
 <body>
+    <h3>Unreleased</h3>
+    <ul>
+        <li><b>More Reliable Live Permissions:</b> Accessibility and Input Access are now rechecked throughout onboarding, even after a grant and when System Settings was opened separately. Fresh checks replace cached grants, outdated results are ignored, and failed or stalled authorization checks leave Continue unavailable while DockAway retries.</li>
+        <li><b>Restart Only When Needed:</b> Continue verifies authorization, checks access in the running app, and revalidates authorization before finishing. Setup completes in place when access is usable and monitoring starts successfully. An automatic restart remains a fallback for confirmed access that cannot be activated; missing or unconfirmed authorization keeps onboarding open.</li>
+        <li><b>Responsive Permission Checks:</b> Potentially blocking access checks now run off the UI thread. Checks are serialized, timeouts are handled safely, and canceled or outdated results cannot complete setup after it has been interrupted.</li>
+        <li><b>Clearer Permission Guidance:</b> Onboarding starts with Accessibility, then checks Input Access. Access that is already available is labeled Available and needs no extra switch, even without a separate Input Monitoring entry in System Settings. Input Monitoring instructions appear only when needed. Existing layout and animations are preserved.</li>
+        <li><b>No Hidden Reveal Delay:</b> On its first ready launch, DockAway automatically removes an existing nonzero Dock reveal delay, including delays set by other Dock utilities. This one-time adjustment briefly restarts the Dock, respects managed settings, and leaves later Reveal Delay choices untouched.</li>
+        <li><b>More Dock Settings, One Click Away:</b> Added “More Dock Settings...” beneath Reveal Delay. It opens the native Desktop &amp; Dock page in System Settings for additional macOS customization.</li>
+        <li><b>Keyboard-Friendly Onboarding:</b> The setup window now accepts keyboard focus, allowing its controls and Return and Escape shortcuts to receive normal keyboard input while preserving the existing appearance and animations.</li>
+        <li><b>Your Dock Shortcut, Respected:</b> DockAway now reads your configured Dock hiding shortcut instead of always sending ⌘⌥D. Disabled or unsupported bindings stop shortcut events and display guidance for restoring the setting.</li>
+        <li><b>Steadier Dock Decisions:</b> If macOS temporarily cannot provide a window list, DockAway preserves its last confirmed state and retries through its existing checks instead of treating the failure as an empty desktop.</li>
+        <li><b>More Accessible Blacklist Actions:</b> Choose Application, Remove All, and About Blacklist now provide accessibility press actions and menu action routing. Remove All continues to reflect whether any applications are blacklisted.</li>
+        <li><b>Adaptive Text Colors:</b> Dock Settings slider labels and the disabled Continue button now use system colors that adapt to the current appearance. The Continue button also refreshes its styling when the appearance changes.</li>
+        <li><b>Safer Update Downloads:</b> Release automation now gives changed downloads unique filenames and retains previous assets, preventing cached update feeds from pointing to replacement files with different signatures.</li>
+        <li><b>Complete Release Notes and Stronger Checks:</b> Publishing now requires the matching full changelog section, checks existing release tags against the source commit, and validates the new appcast entry before uploading. Before publishing the feed, it downloads the GitHub asset and checks that its contents match the local archive. Release separators and changelog links are added automatically.</li>
+        <li><b>Simpler Permission Code:</b> Consolidated four permission implementation files into Permissions.swift while retaining their separate responsibilities and behavior.</li>
+        <li><b>Build and Test Improvements:</b> Corrected Xcode source membership so the application code is included in builds while archived releases stay excluded. Added automated checks for release metadata, publishing safeguards, shortcut handling, onboarding keyboard focus, permission state changes, setup completion decisions, timeouts, cancellation, and serialized access checks. A signed-build verification guide covers manual permission and restart-fallback testing.</li>
+    </ul>
+    <hr>
+
     <h3>Version 1.2 <span style="font-weight: normal;">(9-4-26)</span></h3>
     <ul>
         <li><b>A Proper DockAway Welcome:</b> First launch now opens a guided setup for Input Monitoring and Accessibility. Permission states update live, Launch at Login can be configured before starting, and the blue Continue action becomes available as soon as both permissions are ready.</li>

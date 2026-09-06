@@ -1,140 +1,66 @@
 #!/bin/zsh
-
 set -euo pipefail
 
 github_repo="akhairaddin/DockAway"
-preferred_remote="DockAway"
-feed_url="https://akhairaddin.github.io/DockAway/appcast.xml"
 release_notes_url="https://akhairaddin.github.io/DockAway/changelog.html"
-
-fail() {
-    print -u2 "DockAway appcast: $*"
-    exit 1
-}
+fail() { print -u2 "DockAway appcast: $*"; exit 1; }
 
 find_generate_appcast() {
-    if [[ -n "${SPARKLE_GENERATE_APPCAST:-}" \
-          && -x "${SPARKLE_GENERATE_APPCAST:-}" ]]; then
-        print -r -- "${SPARKLE_GENERATE_APPCAST:-}"
-        return
-    fi
-
-    if command -v generate_appcast >/dev/null 2>&1; then
+    if [[ -n "${SPARKLE_GENERATE_APPCAST:-}" && -x "$SPARKLE_GENERATE_APPCAST" ]]; then
+        print -r -- "$SPARKLE_GENERATE_APPCAST"
+    elif command -v generate_appcast >/dev/null 2>&1; then
         command -v generate_appcast
-        return
-    fi
-
-    local derived_data="$HOME/Library/Developer/Xcode/DerivedData"
-    local candidate=""
-    if [[ -d "$derived_data" ]]; then
-        candidate="$(find "$derived_data" \
+    else
+        find "$HOME/Library/Developer/Xcode/DerivedData" \
             -path '*/SourcePackages/artifacts/sparkle/Sparkle/bin/generate_appcast' \
-            -type f -perm -111 -print -quit 2>/dev/null || true)"
+            -type f -perm -111 -print -quit 2>/dev/null
     fi
-    [[ -n "$candidate" ]] || return 1
-    print -r -- "$candidate"
 }
 
-repo_root="${RILMAZAFONE_REPO_ROOT:-}"
-version="${RILMAZAFONE_VERSION:-}"
-dmg_path="${RILMAZAFONE_DMG:-}"
-
-[[ -n "$repo_root" ]] || fail "RILMAZAFONE_REPO_ROOT is missing."
-[[ -n "$version" ]] || fail "RILMAZAFONE_VERSION is missing."
-[[ -n "$dmg_path" ]] || fail "RILMAZAFONE_DMG is missing."
-[[ -f "$dmg_path" ]] || fail "DMG not found at $dmg_path"
-
-generate_appcast="$(find_generate_appcast)" \
-    || fail "Sparkle's generate_appcast tool was not found in Xcode DerivedData."
-
+repo_root="${RILMAZAFONE_REPO_ROOT:?RILMAZAFONE_REPO_ROOT is missing}"
+version="${RILMAZAFONE_VERSION:?RILMAZAFONE_VERSION is missing}"
+dmg_path="${RILMAZAFONE_DMG:?RILMAZAFONE_DMG is missing}"
+[[ -f "$dmg_path" ]] || fail "DMG not found: $dmg_path"
 cd "$repo_root"
-
-appcast_path="$repo_root/appcast.xml"
-[[ -f "$appcast_path" ]] || fail "appcast.xml is missing from the repository root."
-
-dmg_name="$(basename "$dmg_path")"
-gh release view "$version" --repo "$github_repo" --json assets \
-    --jq '.assets[].name' | grep -Fx "$dmg_name" >/dev/null \
-    || fail "GitHub release $version does not contain $dmg_name."
+metadata="$repo_root/Release/release_metadata.py"
+generate_appcast="$(find_generate_appcast)"
+[[ -n "$generate_appcast" ]] || fail "Sparkle generate_appcast was not found."
 
 stage_dir="$(mktemp -d /private/tmp/DockAway-appcast-XXXXXX)"
-cleanup() {
-    rm -rf "$stage_dir"
-}
-trap cleanup EXIT
-
-cp "$appcast_path" "$stage_dir/appcast.xml"
+trap 'rm -rf "$stage_dir"' EXIT
+dmg_name="$(python3 "$metadata" asset-name "$version" "$dmg_path")"
+download_url="https://github.com/$github_repo/releases/download/$version/$dmg_name"
+python3 "$metadata" notes changelog.html "$version" "$stage_dir/notes.md"
+cp appcast.xml "$stage_dir/appcast.xml"
 cp "$dmg_path" "$stage_dir/$dmg_name"
 
-download_prefix="https://github.com/$github_repo/releases/download/$version/"
-"$generate_appcast" \
-    --maximum-versions 0 \
-    --download-url-prefix "$download_prefix" \
-    --full-release-notes-url "$release_notes_url" \
-    "$stage_dir"
+"$generate_appcast" --maximum-versions 0 \
+    --download-url-prefix "https://github.com/$github_repo/releases/download/$version/" \
+    --full-release-notes-url "$release_notes_url" "$stage_dir"
+python3 "$metadata" normalize-feed "$stage_dir/appcast.xml" "$version" \
+    "$dmg_path" "$download_url" "$release_notes_url"
 
-generated_appcast="$stage_dir/appcast.xml"
-# DockAway uses one public changelog page for each update item. Sparkle's
-# full-release-notes option emits a channel-level companion link, so convert it
-# to the per-update release notes link that the updater displays.
-sed -i '' \
-    's#sparkle:fullReleaseNotesLink#sparkle:releaseNotesLink#g' \
-    "$generated_appcast"
+# Sign and validate locally before the publisher makes any public changes.
+if [[ "${DOCKAWAY_PREPARE_ONLY:-0}" == 1 ]]; then
+    print "Appcast preflight passed for $version"
+    exit 0
+fi
 
-# generate_appcast rewrites the current item and may discard surrounding
-# comments or an existing per-item release-notes link. Restore both pieces so
-# every generated feed remains readable and Sparkle can show the changelog.
-RILMAZAFONE_RELEASE_VERSION="$version" \
-RILMAZAFONE_RELEASE_NOTES_URL="$release_notes_url" \
-perl -0pi -e '
-    my $version = quotemeta($ENV{"RILMAZAFONE_RELEASE_VERSION"});
-    my $url = $ENV{"RILMAZAFONE_RELEASE_NOTES_URL"};
-    s{(<item>\s*<title>$version</title>.*?)(\s*</item>)}{
-        my ($item, $close) = ($1, $2);
-        $item =~ /<sparkle:releaseNotesLink>/
-            ? "$item$close"
-            : "$item\n            <sparkle:releaseNotesLink>$url</sparkle:releaseNotesLink>$close";
-    }gse;
-    s{(?<!RELEASE -->\n        )<item>\n            <title>([^<]+)</title>}{<!-- $1 RELEASE -->\n        <item>\n            <title>$1</title>}g;
-' "$generated_appcast"
+# Compare the actual public bytes, not just the asset's name.
+mkdir "$stage_dir/download"
+gh release download "$version" --repo "$github_repo" --pattern "$dmg_name" \
+    --dir "$stage_dir/download"
+python3 "$metadata" verify-archive "$dmg_path" "$stage_dir/download/$dmg_name"
 
-expected_version="<sparkle:shortVersionString>$version</sparkle:shortVersionString>"
-expected_download="$download_prefix$dmg_name"
-
-grep -F "$expected_version" "$generated_appcast" >/dev/null \
-    || fail "Generated appcast does not contain version $version."
-grep -F "$expected_download" "$generated_appcast" >/dev/null \
-    || fail "Generated appcast does not contain the GitHub DMG URL."
-RILMAZAFONE_RELEASE_VERSION="$version" \
-RILMAZAFONE_RELEASE_NOTES_URL="$release_notes_url" \
-perl -0ne '
-    my $version = quotemeta($ENV{"RILMAZAFONE_RELEASE_VERSION"});
-    my $url = quotemeta($ENV{"RILMAZAFONE_RELEASE_NOTES_URL"});
-    exit(/<item>\s*<title>$version<\/title>.*?<sparkle:releaseNotesLink>$url<\/sparkle:releaseNotesLink>.*?<\/item>/s ? 0 : 1);
-' "$generated_appcast" \
-    || fail "Generated appcast item $version does not contain the changelog link."
-grep -F "<!-- $version RELEASE -->" "$generated_appcast" >/dev/null \
-    || fail "Generated appcast does not contain the $version release separator."
-grep -F 'sparkle:edSignature=' "$generated_appcast" >/dev/null \
-    || fail "Generated appcast does not contain a Sparkle signature."
-
-cp "$generated_appcast" "$appcast_path"
+[[ -z "$(git status --porcelain)" ]] || fail "Commit local changes before publishing the feed."
+remote_name="DockAway"
+git remote get-url "$remote_name" >/dev/null 2>&1 || remote_name="origin"
+remote_url="$(git remote get-url "$remote_name")"
+[[ "$remote_url" == *"akhairaddin/DockAway"* ]] || fail "Unexpected Git remote."
+cp "$stage_dir/appcast.xml" appcast.xml
 git add appcast.xml
-
-if git diff --cached --quiet; then
-    print "appcast.xml already contains DockAway $version"
-else
+if ! git diff --cached --quiet; then
     git commit -m "Publish DockAway $version appcast"
 fi
-
-remote_name="$preferred_remote"
-if ! git remote get-url "$remote_name" >/dev/null 2>&1; then
-    remote_name="origin"
-fi
-git remote get-url "$remote_name" >/dev/null 2>&1 \
-    || fail "Neither the DockAway nor origin Git remote exists."
-
 git push "$remote_name" HEAD:main
-
 print "Sparkle appcast published for DockAway $version"
-print "Feed: $feed_url"
