@@ -105,7 +105,6 @@ The core logic is distributed across `DockWatcher.swift`, `MultitouchWatcher.swi
 7. **Dynamic UI & Graceful Exits:** The menu-bar chevron is updated through DockAway's existing state events instead of a dedicated cosmetic timer. Monitoring stops while the Mac is asleep or locked, permission problems are surfaced in the menu, and quitting DockAway restores the Dock to its normal visible state.
 8. **Permission Verification:** `Permissions.swift` brings authorization snapshots, fresh-process checks, current-process access checks, and the setup completion decision into one file. Fresh authorization checks use public macOS APIs without reading the privacy database. Potentially blocking access checks run off the UI thread, and serialized work, deadlines, and cancellation guards prevent overlapping checks or obsolete results from completing setup. Authorization and usable access remain separate checks, allowing setup to finish without restarting when both are ready.
 
-For contributors, [Tests/PermissionVerification.md](Tests/PermissionVerification.md) contains automated permission checks and a manual verification checklist for signed builds, including granting and revoking access, cancellation, and restart fallback behavior.
 
 ## Signed and Notarized
 
