@@ -180,21 +180,19 @@ private let mtContactCallback: @convention(c)
     (Int32, UnsafeMutableRawPointer?, Int32, Double, Int32) -> Int32 = {
         _, contactBytes, nFingers, _, _ in
         let countChanged = nFingers != mtLastFingerCount
-        let hadFourFingerContact = mtLastFingerCount >= 4
-        let hasFourFingerContact = nFingers >= 4
-        let crossedFourFingerBoundary =
-            hadFourFingerContact != hasFourFingerContact
+        let hadGestureContact = mtLastFingerCount >= 3
+        let hasGestureContact = nFingers >= 3
         var detectedMotion: MultitouchWatcher.FourFingerMotion?
 
         // MultitouchSupport still delivers hardware frames, but after the
-        // gesture direction is known—or while fewer than four fingers remain
+        // gesture direction is known—or while fewer than three fingers remain
         // unchanged—there is no useful work for DockAway to perform.
         if !countChanged,
-           !hasFourFingerContact || mtFourFingerMotionSent {
+           !hasGestureContact || mtFourFingerMotionSent {
             return 0
         }
 
-        if hasFourFingerContact, let contactBytes {
+        if hasGestureContact, let contactBytes {
             let count = Int(nFingers)
             let contacts = contactBytes.assumingMemoryBound(to: MTContact.self)
             var x: Float = 0
@@ -209,7 +207,7 @@ private let mtContactCallback: @convention(c)
                 // Adding or removing a contact moves the centroid without a
                 // gesture, so every stable finger-count begins a fresh sample.
                 mtFourFingerOrigin = centroid
-                if !hadFourFingerContact {
+                if !hadGestureContact {
                     mtFourFingerMotionSent = false
                 }
             } else if !mtFourFingerMotionSent, let origin = mtFourFingerOrigin {
@@ -237,7 +235,8 @@ private let mtContactCallback: @convention(c)
         }
 
         mtLastFingerCount = nFingers
-        if crossedFourFingerBoundary {
+        // Also report three-finger Mission Control gestures and their release.
+        if countChanged {
             let count = Int(nFingers)
             DispatchQueue.main.async { mtFingerHandler?(count) }
         }
