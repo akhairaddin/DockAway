@@ -156,10 +156,14 @@
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
-			files = ();
-			inputPaths = ("$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Sparkle.framework/Versions/B/Sparkle",);
+			files = (
+			);
+			inputPaths = (
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Sparkle.framework/Versions/B/Sparkle",
+			);
 			name = "Sign Sparkle Distribution Helpers";
-			outputPaths = ();
+			outputPaths = (
+			);
 			runOnlyForDeploymentPostprocessing = 1;
 			shellPath = /bin/sh;
 			shellScript = "set -eu\n# Normal development signing stays unchanged. The release plan supplies this identity.\nif [ \"${ACTION:-}\" != install ] || [ -z \"${DOCKAWAY_DISTRIBUTION_IDENTITY:-}\" ]; then exit 0; fi\nsparkle_path=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/Sparkle.framework\"\nfor helper in XPCServices/Installer.xpc XPCServices/Downloader.xpc Autoupdate Updater.app; do\n  /usr/bin/codesign --force --sign \"$DOCKAWAY_DISTRIBUTION_IDENTITY\" --timestamp --options runtime --preserve-metadata=identifier,entitlements \"$sparkle_path/Versions/B/$helper\"\ndone\n/usr/bin/codesign --force --sign \"$DOCKAWAY_DISTRIBUTION_IDENTITY\" --timestamp --options runtime --preserve-metadata=identifier,entitlements \"$sparkle_path\"\n/usr/bin/codesign --verify --deep --strict \"$sparkle_path\"\n";
@@ -304,7 +308,7 @@
 				AUTOMATION_APPLE_EVENTS = NO;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 13;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 9R8WN5SC2D;
 				ENABLE_APP_SANDBOX = NO;
@@ -366,7 +370,7 @@
 				AUTOMATION_APPLE_EVENTS = NO;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 13;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 9R8WN5SC2D;
 				ENABLE_APP_SANDBOX = NO;

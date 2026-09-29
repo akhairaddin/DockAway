@@ -397,8 +397,8 @@ final class OnboardingKeyboardSettingsView: NSView {
         }
     }
 
-    func prepareForOnboarding() {
-        if !hasPreparedOnboarding {
+    func prepareForOnboarding(applyDefaults: Bool = true) {
+        if !hasPreparedOnboarding && applyDefaults {
             hasPreparedOnboarding = true
             KeyboardNavigationPreferences.isRightHandEnabled = true
             KeyboardNavigationPreferences.isLeftHandEnabled = true

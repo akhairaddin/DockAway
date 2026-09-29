@@ -9114,7 +9114,9 @@ final class OnboardingPrimaryButton: NSButton {
               let step2 = permissionSetupKeyboardSettingsView else { return }
         onboardingCurrentStep = 2
         permissionSetupContinueButton?.keyEquivalent = ""
-        step2.prepareForOnboarding()
+        step2.prepareForOnboarding(
+            applyDefaults: !UserDefaults.standard.bool(forKey: Self.permissionSetupCompletedKey)
+        )
 
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let instructionView = permissionSetupView?.instructionView
@@ -9250,6 +9252,7 @@ final class OnboardingPrimaryButton: NSButton {
             case .continueInPlace:
                 self.finishPermissionSetupInPlace(generation: generation)
             case .restart:
+                MajorReleaseOnboarding.markCompleted()
                 UserDefaults.standard.set(true, forKey: Self.permissionSetupCompletedKey)
                 UserDefaults.standard.set(true, forKey: Self.showStartedPopoverAfterRelaunchKey)
                 self.dismissPermissionSetup()
@@ -9274,6 +9277,7 @@ final class OnboardingPrimaryButton: NSButton {
             confirmPermissionCompletion(generation: generation, initializationFailed: true)
             return
         }
+        MajorReleaseOnboarding.markCompleted()
         dismissPermissionSetup(preservingPermissionState: true)
         completePermissionSetup(forceStartedPopover: true)
     }
@@ -9984,7 +9988,8 @@ final class OnboardingPrimaryButton: NSButton {
             }
             permissionSetupRequested = false
             let setupCompleted = UserDefaults.standard.bool(forKey: Self.permissionSetupCompletedKey)
-            if setupCompleted, snapshot?.allGranted == true,
+            if setupCompleted, !MajorReleaseOnboarding.needsPresentation(),
+               snapshot?.allGranted == true,
                accessibilityAccessGranted, inputMonitoringAccessGranted {
                 completePermissionSetup()
             } else {
