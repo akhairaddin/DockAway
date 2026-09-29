@@ -5,12 +5,12 @@
         <!-- 2.0 RELEASE -->
         <item>
             <title>2.0</title>
-            <pubDate>Wed, 30 Sep 2026 00:20:16 +0300</pubDate>
+            <pubDate>Wed, 30 Sep 2026 00:36:26 +0300</pubDate>
             <sparkle:fullReleaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:fullReleaseNotesLink>
             <sparkle:version>14</sparkle:version>
             <sparkle:shortVersionString>2.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/2.0/DockAway-2.0.dmg" length="6557879" type="application/octet-stream" sparkle:edSignature="HakOT9c8Ul9wI5mZMNxoZU1LVd/iVT2l6Bc75X2whq9gNI24xOj5vza13/95rNXHeeKVLJwtEeXSIwnqpJ0wCg==" />
+            <enclosure url="https://github.com/akhairaddin/DockAway/releases/download/2.0/DockAway-2.0.dmg" length="6559306" type="application/octet-stream" sparkle:edSignature="MFfvgRaABqlJMh0X72RqZdNu9GruWaANehT7yxZ0Zsq1+CAQanxbJQu3ZJsC6J2ff0SZokmRZcljECCyKsedAA==" />
             <sparkle:releaseNotesLink>https://akhairaddin.github.io/DockAway/changelog.html</sparkle:releaseNotesLink>
         </item>
         <!-- 1.2.1 RELEASE -->
