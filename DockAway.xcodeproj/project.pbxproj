@@ -83,6 +83,7 @@
 				B8DCC9322FDE8291000500D4 /* Sources */,
 				B8DCC9332FDE8291000500D4 /* Frameworks */,
 				B8DCC9342FDE8291000500D4 /* Resources */,
+				C02000000000000000000001 /* Sign Sparkle Distribution Helpers */,
 			);
 			buildRules = (
 			);
@@ -149,6 +150,21 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		C02000000000000000000001 /* Sign Sparkle Distribution Helpers */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ("$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/Sparkle.framework/Versions/B/Sparkle",);
+			name = "Sign Sparkle Distribution Helpers";
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 1;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\n# Normal development signing stays unchanged. The release plan supplies this identity.\nif [ \"${ACTION:-}\" != install ] || [ -z \"${DOCKAWAY_DISTRIBUTION_IDENTITY:-}\" ]; then exit 0; fi\nsparkle_path=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/Sparkle.framework\"\nfor helper in XPCServices/Installer.xpc XPCServices/Downloader.xpc Autoupdate Updater.app; do\n  /usr/bin/codesign --force --sign \"$DOCKAWAY_DISTRIBUTION_IDENTITY\" --timestamp --options runtime --preserve-metadata=identifier,entitlements \"$sparkle_path/Versions/B/$helper\"\ndone\n/usr/bin/codesign --force --sign \"$DOCKAWAY_DISTRIBUTION_IDENTITY\" --timestamp --options runtime --preserve-metadata=identifier,entitlements \"$sparkle_path\"\n/usr/bin/codesign --verify --deep --strict \"$sparkle_path\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		B8DCC9322FDE8291000500D4 /* Sources */ = {
