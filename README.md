@@ -8,8 +8,8 @@ A native macOS menu-bar utility that shows the Dock on empty desktops and hides 
 
 <p align="center">
   <a href="https://github.com/akhairaddin/DockAway/releases/latest">Download</a> ·
-  <a href="#desktop-manager">Desktop Manager</a> ·
   <a href="#features">Features</a> ·
+  <a href="#desktop-manager">Desktop Manager</a> ·
   <a href="#first-launch-and-permissions">Setup</a> ·
   <a href="#privacy">Privacy</a> ·
   <a href="changelog.html">Changelog</a> ·
@@ -17,16 +17,6 @@ A native macOS menu-bar utility that shows the Dock on empty desktops and hides 
 </p>
 
 **DockAway 2.0** adds Desktop Manager, keyboard navigation, and optional window tools. See the [changelog](changelog.html) for the complete release notes.
-
-## Desktop Manager
-
-<p align="center">
-  <img src="DockAway/Assets.xcassets/DesktopManagerPreview.imageset/desktop-manager-preview.png" alt="DockAway Desktop Manager showing app icons, numbered desktops, and add buttons grouped across two displays" width="380">
-</p>
-
-See your desktops and their app icons, grouped by display. Switch, create, close, or drag desktops to reorder them or move them between monitors. Fullscreen apps get their own named tiles, and the layout adapts to the number of desktops and apps.
-
-Open the menu with **Option+Up** or **Option+Shift+W**, then navigate with **arrow keys or WASD**. Right- and left-hand profiles have customizable select and close bindings. Closing while **+** is selected first moves the highlight back to a desktop; a second press closes it. Escape dismisses the menu.
 
 ## Features
 
@@ -44,6 +34,16 @@ Open the menu with **Option+Up** or **Option+Shift+W**, then navigate with **arr
 An empty desktop or minimizing its last window shows the Dock. App windows hide it, unless a blacklisted app is frontmost. A blacklisted window behind another app does not keep the Dock visible.
 
 Use **Blacklist → Choose Application…** for apps that aren't running. DockAway respects your system Dock-hiding shortcut, **Command+Option+D** by default, and checks the live Dock state before toggling it. Quitting restores normal Dock visibility.
+
+## Desktop Manager
+
+<p align="center">
+  <img src="DockAway/Assets.xcassets/DesktopManagerPreview.imageset/desktop-manager-preview.png" alt="DockAway Desktop Manager showing app icons, numbered desktops, and add buttons grouped across two displays" width="380">
+</p>
+
+See your desktops and their app icons, grouped by display. Switch, create, close, or drag desktops to reorder them or move them between monitors. Fullscreen apps get their own named tiles, and the layout adapts to the number of desktops and apps.
+
+Open the menu with **Option+Up** or **Option+Shift+W**, then navigate with **arrow keys or WASD**. Right- and left-hand profiles have customizable select and close bindings. Closing while **+** is selected first moves the highlight back to a desktop; a second press closes it. Escape dismisses the menu.
 
 ## First launch and permissions
 
