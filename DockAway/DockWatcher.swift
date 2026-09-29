@@ -67,6 +67,13 @@ private final class DockWatcherSpaceAPI {
         let next: Space?
     }
 
+    struct DesktopInfo {
+        let currentDesktopIndex: Int
+        let totalDesktops: Int
+        let isFullScreenApp: Bool
+        let selection: DesktopSelectionSnapshot
+    }
+
     private typealias MainConnectionIDFn = @convention(c) () -> Int32
     private typealias CopyManagedDisplaySpacesFn =
         @convention(c) (Int32) -> Unmanaged<CFArray>?
@@ -168,6 +175,73 @@ private final class DockWatcherSpaceAPI {
         )
     }
 
+    func currentDesktopInfo(on displayID: CGDirectDisplayID) -> DesktopInfo? {
+        guard
+            let mainConnectionIDFn,
+            let copyManagedDisplaySpacesFn,
+            let rawDisplays = copyManagedDisplaySpacesFn(
+                mainConnectionIDFn()
+            )?.takeRetainedValue(),
+            let displays = Self.dictionaryArray(from: rawDisplays),
+            let display = matchingDisplay(in: displays, displayID: displayID, allowFallback: false),
+            let current = display["Current Space"] as? [String: Any],
+            let currentID = Self.spaceIdentifier(in: current),
+            let rawSpaces = display["Spaces"] as? NSArray,
+            let spaces = Self.dictionaryArray(from: rawSpaces)
+        else { return nil }
+
+        let desktopSpaces = spaces.filter {
+            (($0["type"] as? NSNumber)?.intValue ?? 0) == 0
+        }
+        let fullscreenSpaces = spaces.filter {
+            (($0["type"] as? NSNumber)?.intValue ?? 0) == 4
+        }
+        var fullscreenContentSpaceIDs: [UInt64: [UInt64]] = [:]
+        var fullscreenApplicationNames: [UInt64: String] = [:]
+        for fullscreenSpace in fullscreenSpaces {
+            guard let fullscreenID = Self.spaceIdentifier(in: fullscreenSpace),
+                  let layout = fullscreenSpace["TileLayoutManager"] as? NSDictionary,
+                  let rawTileSpaces = layout["TileSpaces"] as? NSArray,
+                  let tileSpaces = Self.dictionaryArray(from: rawTileSpaces) else { continue }
+            let contentIDs = tileSpaces.compactMap { Self.spaceIdentifier(in: $0) }
+            if !contentIDs.isEmpty { fullscreenContentSpaceIDs[fullscreenID] = contentIDs }
+            if let name = tileSpaces.compactMap({
+                ($0["appName"] as? String) ?? ($0["name"] as? String)
+            }).first(where: { !$0.isEmpty }) {
+                let pid = tileSpaces.compactMap { ($0["pid"] as? NSNumber)?.int32Value }.first
+                let bundleID = pid.flatMap { NSRunningApplication(processIdentifier: $0)?.bundleIdentifier }
+                fullscreenApplicationNames[fullscreenID] = DesktopBoxFullscreenPreference.displayFullscreenName(name, bundleIdentifier: bundleID)
+            }
+        }
+        let selection = DesktopSelectionSnapshot(
+            displayID: displayID,
+            currentID: currentID,
+            orderedSpaceIDs: spaces.compactMap { Self.spaceIdentifier(in: $0) },
+            desktopIDs: desktopSpaces.compactMap { Self.spaceIdentifier(in: $0) },
+            fullscreenSpaceIDs: fullscreenSpaces.compactMap { Self.spaceIdentifier(in: $0) },
+            fullscreenContentSpaceIDs: fullscreenContentSpaceIDs,
+            fullscreenApplicationNames: fullscreenApplicationNames
+        )
+
+        guard let currentIndex = desktopSpaces.firstIndex(where: {
+            Self.spaceIdentifier(in: $0) == currentID
+        }) else {
+            return DesktopInfo(
+                currentDesktopIndex: 0,
+                totalDesktops: desktopSpaces.count,
+                isFullScreenApp: true,
+                selection: selection
+            )
+        }
+
+        return DesktopInfo(
+            currentDesktopIndex: currentIndex + 1,
+            totalDesktops: desktopSpaces.count,
+            isFullScreenApp: false,
+            selection: selection
+        )
+    }
+
     func windowIDs(on spaceID: UInt64) -> [CGWindowID]? {
         guard
             let mainConnectionIDFn,
@@ -194,28 +268,31 @@ private final class DockWatcherSpaceAPI {
 
     private func matchingDisplay(
         in displays: [[String: Any]],
-        displayID: CGDirectDisplayID
+        displayID: CGDirectDisplayID,
+        allowFallback: Bool = true
     ) -> [String: Any]? {
-        if !NSScreen.screensHaveSeparateSpaces {
-            return displays.first {
-                ($0["Display Identifier"] as? String) == "Main"
-            } ?? (displays.count == 1 ? displays[0] : nil)
-        }
-
         guard
             let unmanagedUUID = CGDisplayCreateUUIDFromDisplayID(displayID)
         else {
-            return displays.count == 1 ? displays[0] : nil
+            return allowFallback ? displays.first : nil
         }
         let uuid = unmanagedUUID.takeRetainedValue()
         let identifier = CFUUIDCreateString(nil, uuid) as String
 
-        return displays.first {
+        let exact = displays.first {
             guard let candidate = $0["Display Identifier"] as? String else {
                 return false
             }
             return candidate.caseInsensitiveCompare(identifier) == .orderedSame
         }
+        if let exact { return exact }
+        // Prefer the live UUID mapping even while the system's display-mode
+        // flag is stale. Shared Spaces explicitly use the "Main" identifier.
+        if !NSScreen.screensHaveSeparateSpaces,
+           let shared = displays.first(where: { ($0["Display Identifier"] as? String) == "Main" }) {
+            return shared
+        }
+        return allowFallback ? displays.first : nil
     }
 
     private static func spaceIdentifier(in dictionary: [String: Any]) -> UInt64? {
@@ -289,6 +366,7 @@ final class DockWatcher {
 
     private var pendingAccessibilityCheck: DispatchWorkItem?
     private var pendingAccessibilitySettleCheck: DispatchWorkItem?
+    private var launchWindowCorrectionGeneration = 0
     private var pendingDebounceCheck: DispatchWorkItem?
     private var pendingDesktopTransitionFinish: DispatchWorkItem?
     private var pendingHoldReleaseCheck: DispatchWorkItem?
@@ -303,9 +381,16 @@ final class DockWatcher {
     private var accessibilityObservations = [pid_t: DockWatcherAXObservation]()
     private var dockAccessibilityObservation: DockWatcherAXObservation?
     private let missionControlProbe = MissionControlProbe()
+    private let missionControlAutoExpand = MissionControlAutoExpand()
+    private let missionControlWindowClose = MissionControlWindowClose()
+    private var missionControlTrackpadContacts = 0
     private var missionControlNeedsBootstrap = true
     private var missionControlFallbackRequested = false
     private var missionControlIsActive = false
+    var isMissionControlActive: Bool {
+        missionControlIsActive
+    }
+    var onAccessibilityEvent: ((pid_t, AXUIElement, String) -> Void)?
     private var desktopTransitionPhase: DesktopTransitionPhase = .idle
     private var desktopTransitionGeneration = 0
     private var holdLatched = false
@@ -352,6 +437,11 @@ final class DockWatcher {
     // ── SPEED TUNING ─────────────────────────────────────────────────────────
     // Raise any of these if the Dock starts double-toggling.
     private let accessibilityDebounce: TimeInterval = 0.05
+    private var windowMovementSettlesAt = Date.distantPast
+    private var pendingMovedWindow: (pid: pid_t, window: AXUIElement)?
+    private var isWindowMovementSettling: Bool {
+        Date() < windowMovementSettlesAt
+    }
     private let pointerDisplayInterval: TimeInterval = 0.12
     private let dockDisplayCacheLifetime: TimeInterval = 0.50
     private let dockDisplayHoverSettleInterval: TimeInterval = 0.05
@@ -386,9 +476,24 @@ final class DockWatcher {
         kAXApplicationShownNotification
     ]
 
+    private var windowMoveProtectionExpiry: Date = .distantPast
+
+    var isWindowMoveTransitionProtected: Bool {
+        Date() < windowMoveProtectionExpiry
+    }
+
+    func protectWindowMoveTransition(duration: TimeInterval = 0.55) {
+        windowMoveProtectionExpiry = Date().addingTimeInterval(duration)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.05) { [weak self] in
+            guard let self, self.isRunning else { return }
+            self.evaluateFrontmostApp(quiet: true)
+        }
+    }
+
     private var isDesktopTransitionProtected: Bool {
         desktopTransitionPhase != .idle || missionControlIsActive
             || (isRunning && missionControlNeedsBootstrap)
+            || isWindowMoveTransitionProtected
     }
 
     private var isHoldingHidden: Bool {
@@ -513,6 +618,9 @@ final class DockWatcher {
     }
 
     func stop() {
+        launchWindowCorrectionGeneration += 1
+        pendingMovedWindow = nil
+        windowMovementSettlesAt = .distantPast
         guard isRunning else { return }
         isRunning = false
 
@@ -557,6 +665,9 @@ final class DockWatcher {
         dockDisplayCacheValidUntil = .distantPast
         dockDisplayHoverCooldownUntil.removeAll(keepingCapacity: true)
         missionControlIsActive = false
+        missionControlAutoExpand.cancel()
+        missionControlWindowClose.stop()
+        missionControlTrackpadContacts = 0
         desktopTransitionPhase = .idle
         desktopTransitionGeneration += 1
         holdLatched = false
@@ -614,7 +725,7 @@ final class DockWatcher {
 
         // The destination can become classifiable just before this event. Give
         // the visible hold one immediate chance to hand off to hidden pre-hide.
-        if isHoldingVisible {
+        if isHoldingVisible, visibleHoldCanPrehideOccupiedDestination {
             evaluateFrontmostApp(quiet: true)
         }
 
@@ -812,11 +923,27 @@ final class DockWatcher {
             observation.observedWindows.removeAll { CFEqual($0, element) }
         }
 
+        if notification == kAXWindowMovedNotification {
+            // Moving an existing window invalidates a pending launch resize.
+            launchWindowCorrectionGeneration += 1
+            if NSScreen.screens.count > 1 {
+                pendingMovedWindow = (processIdentifier, element)
+                // Native display transfers animate outside Mission Control.
+                // Keep the work area stable until movement notifications stop.
+                windowMovementSettlesAt = Date().addingTimeInterval(0.35)
+            }
+        } else if notification == kAXWindowResizedNotification,
+                  isWindowMovementSettling {
+            windowMovementSettlesAt = Date().addingTimeInterval(0.35)
+        }
+
+        onAccessibilityEvent?(processIdentifier, element, notification)
         scheduleAccessibilityEvaluation(includeSettleRecheck: true)
     }
 
     private func scheduleAccessibilityEvaluation(includeSettleRecheck: Bool) {
         guard isRunning, !isDesktopTransitionProtected else { return }
+        let movementDelay = max(0, windowMovementSettlesAt.timeIntervalSinceNow)
 
         pendingAccessibilityCheck?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -826,7 +953,7 @@ final class DockWatcher {
         }
         pendingAccessibilityCheck = work
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + accessibilityDebounce,
+            deadline: .now() + max(accessibilityDebounce, movementDelay),
             execute: work
         )
 
@@ -839,7 +966,7 @@ final class DockWatcher {
             self.evaluateFrontmostApp(quiet: true)
         }
         pendingAccessibilitySettleCheck = settleWork
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.17, execute: settleWork)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.17, movementDelay + 0.05), execute: settleWork)
     }
 
     private func removeAccessibilityObserver(for processIdentifier: pid_t) {
@@ -1311,10 +1438,46 @@ final class DockWatcher {
         }
     }
 
+    func missionControlTrackpadContactsChanged(_ count: Int) {
+        let wasSwiping = missionControlTrackpadContacts >= 3
+        missionControlTrackpadContacts = count
+        missionControlWindowClose.trackpadContactsChanged(count)
+        if count >= 3 {
+            missionControlAutoExpand.cancel()
+        } else if wasSwiping && missionControlIsActive && isRunning {
+            scheduleMissionControlExpansion()
+        }
+    }
+
+    func missionControlTrackpadMotionDetected(_ motion: MultitouchWatcher.FourFingerMotion) {
+        guard isRunning && missionControlIsActive else { return }
+        switch motion {
+        case .downward:
+            missionControlWindowClose.handleDownwardSwipe()
+        case .upward:
+            missionControlWindowClose.cancelDownwardSwipe()
+        default:
+            break
+        }
+    }
+
+    private func scheduleMissionControlExpansion() {
+        missionControlAutoExpand.entered { [weak self] in
+            self?.isRunning == true && self?.missionControlIsActive == true
+                && (self?.missionControlTrackpadContacts ?? 0) < 3
+        }
+    }
+
     private func updateMissionControlState(_ isActive: Bool) {
         guard missionControlIsActive != isActive else { return }
 
         missionControlIsActive = isActive
+        missionControlWindowClose.setActive(isActive)
+        if isActive && missionControlTrackpadContacts < 3 {
+            scheduleMissionControlExpansion()
+        } else {
+            missionControlAutoExpand.cancel()
+        }
         nextMissionControlProbeAt = .distantPast
 
         if isActive {
@@ -1348,6 +1511,19 @@ final class DockWatcher {
     }
 
     // MARK: - Pointer Display Tracking
+
+    func refreshMissionControlClosePreference() {
+        missionControlWindowClose.stop()
+        if isRunning && missionControlIsActive { missionControlWindowClose.setActive(true) }
+    }
+
+    func reloadMissionControlKeyboardShortcuts() {
+        missionControlWindowClose.reloadKeyboardShortcuts()
+    }
+
+    var missionControlKeyboardCommandsToolTip: String {
+        missionControlWindowClose.keyboardCommandsToolTip
+    }
 
     // Changing which display is under the pointer changes DockAway's target,
     // even when no application or AX event occurs. This timer is intentionally
@@ -1403,6 +1579,7 @@ final class DockWatcher {
         cacheBundleIdentifier(for: app)
 
         let appName = app.localizedName ?? (app.bundleIdentifier ?? "Unknown")
+        prepareLaunchWindowCorrection(for: app)
         dockAwayDebugLog("▶ Active app: \(appName)")
 
         // Finder activation is the click-based fallback if a hover handoff did
@@ -1443,7 +1620,103 @@ final class DockWatcher {
         scheduleAccessibilityEvaluation(includeSettleRecheck: true)
     }
 
+    // Only adjust a newly encountered standard window that fills the old
+    // bottom-Dock work area. Rechecks are bounded to this activation.
+    private func prepareLaunchWindowCorrection(for app: NSRunningApplication) {
+        launchWindowCorrectionGeneration += 1
+        let generation = launchWindowCorrectionGeneration
+        let displayID = displayIDUnderPointer()
+        guard isRunning, !isDesktopTransitionProtected, !isWindowMovementSettling,
+              app.activationPolicy == .regular,
+              app.bundleIdentifier != "com.apple.finder",
+              !isProcessBlacklisted(app.processIdentifier),
+              dockIsActuallyShown(),
+              let screen = NSScreen.screen(withDisplayID: displayID) else { return }
+        let oldFrame = screen.visibleFrame
+        let screenFrame = screen.frame
+        // Side-positioned Docks need position changes as well. This trial
+        // deliberately handles only the bottom-edge gap with a size change.
+        guard oldFrame.minY - screenFrame.minY > 10,
+              abs(oldFrame.minX - screenFrame.minX) < 3,
+              abs(oldFrame.width - screenFrame.width) < 3 else { return }
+        let knownWindows = accessibilityObservations[app.processIdentifier]?.observedWindows ?? []
+        let pid = app.processIdentifier
+        dockAwayDebugLog("  → Window correction armed pid=\(pid) oldFrame=\(oldFrame) knownWindows=\(knownWindows.count)")
+        for delay in [0.2, 0.5, 0.9, 1.4] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.isRunning,
+                      self.launchWindowCorrectionGeneration == generation,
+                      !self.isDesktopTransitionProtected,
+                      !self.isWindowMovementSettling,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                      !self.isProcessBlacklisted(pid),
+                      NSEvent.pressedMouseButtons == 0,
+                      !self.dockIsActuallyShown(),
+                      let currentScreen = NSScreen.screen(withDisplayID: displayID),
+                      currentScreen.frame == screenFrame else { return }
+                let newFrame = currentScreen.visibleFrame
+                guard oldFrame.minY - newFrame.minY > 10,
+                      abs(oldFrame.maxY - newFrame.maxY) < 3,
+                      abs(oldFrame.minX - newFrame.minX) < 3,
+                      abs(oldFrame.width - newFrame.width) < 3 else { return }
+                let application = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(application, 0.05)
+                guard let window = application.element(kAXFocusedWindowAttribute) else { return }
+                guard !knownWindows.contains(where: { CFEqual($0, window) }) else {
+                    dockAwayDebugLog("  → Window correction skipped pid=\(pid): window already observed before activation")
+                    return
+                }
+                guard window.string(kAXSubroleAttribute) == kAXStandardWindowSubrole,
+                      window.bool("AXFullScreen") != true,
+                      window.bool(kAXMinimizedAttribute) == false,
+                      let position = window.point(),
+                      let size = window.size(),
+                      let primaryScreen = NSScreen.screens.first else { return }
+                let expectedTop = primaryScreen.frame.maxY - oldFrame.maxY
+                let tolerance: CGFloat = 4
+                // Some windows leave a small margin above the Dock even when
+                // filling the work area. Match that bottom edge independently.
+                let expectedBottom = primaryScreen.frame.maxY - oldFrame.minY
+                let bottomTolerance: CGFloat = 8
+                guard abs(position.x - oldFrame.minX) <= tolerance,
+                      abs(position.y - expectedTop) <= tolerance,
+                      abs(size.width - oldFrame.width) <= tolerance,
+                      abs(position.y + size.height - expectedBottom) <= bottomTolerance else {
+                    dockAwayDebugLog("  → Window correction geometry mismatch pid=\(pid) position=\(position) size=\(size) expectedTop=\(expectedTop) oldFrame=\(oldFrame)")
+                    return
+                }
+                var settable = DarwinBoolean(false)
+                guard AXUIElementIsAttributeSettable(window, kAXSizeAttribute as CFString, &settable) == .success,
+                      settable.boolValue else { return }
+                var correctedSize = size
+                correctedSize.height = primaryScreen.frame.maxY - newFrame.minY - position.y
+                guard let value = AXValueCreate(.cgSize, &correctedSize) else { return }
+                // One resize attempt per activation, including apps that reject it.
+                self.launchWindowCorrectionGeneration += 1
+                let result = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
+                dockAwayDebugLog("  → Launch window Dock-gap correction: \(result.rawValue)")
+            }
+        }
+    }
+
     // MARK: - Core Logic
+
+    private func consumeWindowTransferAway(from displayID: CGDirectDisplayID) -> Bool {
+        guard let moved = pendingMovedWindow else { return false }
+        pendingMovedWindow = nil
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == moved.pid else { return false }
+        let application = AXUIElementCreateApplication(moved.pid)
+        AXUIElementSetMessagingTimeout(application, 0.05)
+        guard let focused = application.element(kAXFocusedWindowAttribute),
+              CFEqual(focused, moved.window),
+              let frame = moved.window.frame,
+              frame.width > 0, frame.height > 0 else { return false }
+        guard !frame.intersects(CGDisplayBounds(displayID)) else { return false }
+        return NSScreen.screens.contains { screen in
+            guard let otherID = screen.displayID, otherID != displayID else { return false }
+            return CGDisplayBounds(otherID).contains(CGPoint(x: frame.midX, y: frame.midY))
+        }
+    }
 
     // Re-checks whatever app macOS currently reports as frontmost.
     private func evaluateFrontmostApp(
@@ -1469,7 +1742,7 @@ final class DockWatcher {
         applicationActivated: Bool = false,
         finderActivated: Bool = false
     ) {
-        guard isRunning else { return }
+        guard isRunning, !isWindowMovementSettling else { return }
 
         // Four-finger pre-hide owns the Dock until the swipe has landed. Any
         // AX, timer, pointer, or Space event that arrives meanwhile is ignored.
@@ -1493,6 +1766,29 @@ final class DockWatcher {
         lastEvaluatedDisplayID = activeDisplayID
         lastEvaluatedWindowState = windowState
 
+        let transferredAway = consumeWindowTransferAway(from: activeDisplayID)
+        if transferredAway, windowState == .empty,
+           !pointerDisplayChanged, !finderActivated, !applicationActivated {
+            // The pointer left behind by a native transfer is not a request
+            // to show the Dock. Reuse the empty-display intent gate, cleared
+            // by a display crossing, Finder activation, or an incoming window.
+            pointerOnlyEmptyDisplayID = activeDisplayID
+            cancelDockDisplayHandoff()
+            dockAwayDebugLog("  → Window transferred away; deferring empty-source Dock show until desktop interaction")
+        }
+
+        // App activation is delivered before a newly opened window is always
+        // present in WindowServer's list. For a regular, non-blacklisted app,
+        // use that early signal to start hiding the Dock while the previous
+        // state still looks empty or blacklisted, before the new window is
+        // sized against its visible frame. The existing AX settle evaluation
+        // remains authoritative and restores the Dock if no window appears.
+        let predictsIncomingWindow = applicationActivated
+            && windowState != .occupied
+            && app.activationPolicy == .regular
+            && bundleID != "com.apple.finder"
+            && !isProcessBlacklisted(app.processIdentifier)
+
         let pointerEnteredEmptyDisplay = pointerDisplayChanged
             && windowState == .empty
         if pointerDisplayChanged {
@@ -1515,7 +1811,9 @@ final class DockWatcher {
         }
 
         let shouldShowDock = windowState != .occupied
-        let suppressPendingHoverShow = !pointerEnteredEmptyDisplay
+            && !predictsIncomingWindow
+        let suppressPendingHoverShow = shouldShowDock
+            && !pointerEnteredEmptyDisplay
             && windowState == .empty
             && pointerOnlyEmptyDisplayID == activeDisplayID
 
@@ -1551,6 +1849,11 @@ final class DockWatcher {
             handoffExpectedState = nil
         }
 
+        let isFinderOnDesktop = app.bundleIdentifier == "com.apple.finder"
+            && !finderHasNormalWindow(on: activeDisplay)
+        let label = isFinderOnDesktop ? "Desktop" : (app.localizedName ?? bundleID)
+        let appText = windowState == .empty ? "Desktop" : label
+
         if suppressUnsafeDisplayShow,
            let handoffExpectedState,
            beginDockDisplayHandoff(
@@ -1559,11 +1862,7 @@ final class DockWatcher {
                 frontmostBundleIdentifier: bundleID,
                 trigger: pointerEnteredEmptyDisplay ? .hover : .activation
            ) {
-            postStatus(
-                windowState == .empty
-                    ? "Desktop"
-                    : (app.localizedName ?? bundleID)
-            )
+            postStatus(appText, displayID: activeDisplayID)
             return
         }
 
@@ -1573,7 +1872,9 @@ final class DockWatcher {
             pointerOnlyEmptyDisplayID = nil
         }
 
-        if !quiet {
+        if predictsIncomingWindow {
+            dockAwayDebugLog("  → Regular app activated while Dock is shown → predictively hiding Dock")
+        } else if !quiet {
             switch windowState {
             case .empty:
                 dockAwayDebugLog("  → Active display is empty → showing Dock")
@@ -1595,15 +1896,7 @@ final class DockWatcher {
         // Quiet evaluations suppress repetitive console output, but they are
         // also the authoritative post-transition correction. Always refresh
         // the menu so a Mission Control landing cannot leave the old app name.
-        let label = app.localizedName ?? bundleID
-        switch windowState {
-        case .empty:
-            postStatus("Desktop")
-        case .blacklisted:
-            postStatus(label)
-        case .occupied:
-            postStatus(label)
-        }
+        postStatus(appText, displayID: activeDisplayID)
     }
 
     // MARK: - Window Detection
@@ -1620,6 +1913,30 @@ final class DockWatcher {
         }
 
         return classifyWindowState(in: list, on: displayBounds) ?? .empty
+    }
+
+    private func finderHasNormalWindow(on displayBounds: CGRect) -> Bool {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        for info in list {
+            guard
+                let ownerName = info[kCGWindowOwnerName as String] as? String,
+                ownerName == "Finder",
+                let layer = info[kCGWindowLayer as String] as? Int,
+                layer == kCGNormalWindowLevel,
+                let boundsDict = info[kCGWindowBounds as String] as? NSDictionary
+            else { continue }
+
+            var windowRect = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(boundsDict, &windowRect) else { continue }
+            let overlap = windowRect.intersection(displayBounds)
+            if overlap.width >= 50, overlap.height >= 50 {
+                return true
+            }
+        }
+        return false
     }
 
     // Applies DockAway's normal front-to-back window rules to either the live
@@ -2392,6 +2709,26 @@ final class DockWatcher {
     ) -> Bool {
         guard !missionControlNeedsBootstrap else { return false }
         let sourceDisplayID = displayIDUnderPointer()
+
+        // If visible hold is already latched for this swipe, keep holding unless
+        // the gesture reversed direction into a known occupied destination.
+        if isHoldingVisible,
+           visibleHoldReason == .desktopSwipe,
+           visibleHoldDisplayID == sourceDisplayID {
+            if let prediction = horizontalSpacePrediction,
+               Date().timeIntervalSince(prediction.capturedAt) <= horizontalSpacePredictionLifetime {
+                let predictedDestinationState = movingToNextSpace
+                    ? prediction.nextState
+                    : prediction.previousState
+                if predictedDestinationState == .occupied {
+                    dockAwayDebugLog("  🔭 Reversed into occupied Space → canceling visible hold")
+                    clearVisibleHold()
+                    return false
+                }
+            }
+            return true
+        }
+
         guard
             isRunning,
             !missionControlIsActive,
@@ -2408,25 +2745,22 @@ final class DockWatcher {
             predictedDestinationState = movingToNextSpace
                 ? prediction.nextState
                 : prediction.previousState
-            horizontalSpacePrediction = nil
 
             if predictedDestinationState == .occupied {
                 dockAwayDebugLog("  🔭 Occupied adjacent Space predicted → pre-hiding before animation")
                 return false
             }
-        } else {
-            horizontalSpacePrediction = nil
         }
 
         // A blacklisted source may have other windows behind it, so only a
         // genuinely empty source makes the first occupied window unambiguous.
-        // Likewise, a confidently blacklisted destination owns SHOW through
-        // landing; mixed animation frames must not second-guess that verdict.
+        // Likewise, a confidently blacklisted or empty destination owns SHOW
+        // through landing; mixed animation frames must not second-guess that verdict.
         return armVisibleHold(
             on: sourceDisplayID,
             reason: .desktopSwipe,
             canPrehideOccupiedDestination: sourceState == .empty
-                && predictedDestinationState != .blacklisted,
+                && predictedDestinationState == nil,
             maximum: maximum
         )
     }
@@ -2464,6 +2798,13 @@ final class DockWatcher {
         canPrehideOccupiedDestination: Bool,
         maximum: TimeInterval
     ) -> Bool {
+        if visibleHoldLatched,
+           visibleHoldReason == reason,
+           visibleHoldDisplayID == displayID,
+           visibleHoldCanPrehideOccupiedDestination == canPrehideOccupiedDestination {
+            return true
+        }
+
         cancelDockDisplayHandoff()
         clearHiddenHold()
         cancelTransientDecisionWork()
@@ -2803,6 +3144,7 @@ final class DockWatcher {
     private func setDockVisible(_ shouldShow: Bool) {
         guard
             isRunning,
+            !isWindowMovementSettling,
             (NSApp.delegate as? AppDelegate)?.isQuitting != true
         else { return }
 
@@ -2899,8 +3241,30 @@ final class DockWatcher {
 
     // MARK: - Status Helpers
 
-    private func postStatus(_ text: String) {
-        (NSApp.delegate as? AppDelegate)?.updateStatus(text)
+    func refreshStatus() {
+        guard isRunning else { return }
+        evaluateFrontmostApp(quiet: true)
+    }
+
+    func desktopSelection(on displayID: CGDirectDisplayID) -> DesktopSelectionSnapshot? {
+        // Do not navigate using cached topology or a disconnected display.
+        guard NSScreen.screen(withDisplayID: displayID) != nil else { return nil }
+        return spaceAPI.currentDesktopInfo(on: displayID)?.selection
+    }
+
+    private func desktopStatusLabel(on displayID: CGDirectDisplayID) -> String? {
+        guard let info = spaceAPI.currentDesktopInfo(on: displayID) else {
+            return nil
+        }
+        if info.isFullScreenApp {
+            return "Desktop: Fullscreen"
+        }
+        return "Desktop: \(info.currentDesktopIndex) of \(info.totalDesktops)"
+    }
+
+    private func postStatus(_ text: String, displayID: CGDirectDisplayID) {
+        let desktopText = desktopStatusLabel(on: displayID)
+        (NSApp.delegate as? AppDelegate)?.updateStatus(text, desktopText: desktopText)
     }
 
     private func postDockVisibility(_ isVisible: Bool) {

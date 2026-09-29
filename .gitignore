@@ -1,3 +1,5 @@
 .checkpoints/
 /Release/
 /Tests/
+.agents/
+.build/

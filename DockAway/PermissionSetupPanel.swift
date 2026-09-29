@@ -4,4 +4,5 @@ import AppKit
 // route keyboard focus, Return, Escape, and accessibility interactions.
 final class PermissionSetupPanel: NSPanel {
     override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }

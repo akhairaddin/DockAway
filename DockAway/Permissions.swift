@@ -245,11 +245,16 @@ final class PermissionMonitor {
         probe.terminationHandler = { [weak self] result in
             let exitCode = result.terminationStatus
             let normalExit = result.terminationReason == .exit
-            Task { @MainActor [weak self] in
-                let snapshot = PermissionProbeState.decode(
-                    exitCode: exitCode, normalExit: normalExit
-                )
-                self?.finish(generation: generation, snapshot: snapshot)
+            let completedAt = ProcessInfo.processInfo.systemUptime
+            // Native menu tracking must not strand a completed check on the
+            // main queue and turn delivery latency into a permission failure.
+            RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) { [weak self] in
+                MainActor.assumeIsolated {
+                    let snapshot = PermissionProbeState.decode(
+                        exitCode: exitCode, normalExit: normalExit
+                    )
+                    self?.finish(generation: generation, snapshot: snapshot, completedAt: completedAt)
+                }
             }
         }
         process = probe
@@ -270,10 +275,10 @@ final class PermissionMonitor {
         cancelProcess()
     }
 
-    private func finish(generation: Int, snapshot: PermissionSnapshot?) {
+    private func finish(generation: Int, snapshot: PermissionSnapshot?, completedAt: TimeInterval? = nil) {
         // Check the token before touching the Process slot or any callbacks.
         guard state.complete(generation: generation, snapshot: snapshot,
-                             now: ProcessInfo.processInfo.systemUptime) else { return }
+                             now: completedAt ?? ProcessInfo.processInfo.systemUptime) else { return }
         let callback = confirmation
         let result = state.snapshot
         cancelProcess()
