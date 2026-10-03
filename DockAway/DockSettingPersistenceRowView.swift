@@ -48,11 +48,20 @@ final class DockSettingHelpButton: NSButton {
 
     override func mouseEntered(with event: NSEvent) {
         contentTintColor = .labelColor
-        schedulePopover()
+        beginHover()
     }
 
     override func mouseExited(with event: NSEvent) {
         contentTintColor = .secondaryLabelColor
+        endHover()
+    }
+
+    func beginHover() {
+        guard isEnabled else { return }
+        schedulePopover()
+    }
+
+    func endHover() {
         hoverWorkItem?.cancel()
         hoverWorkItem = nil
         if !openedByClick {
@@ -62,6 +71,7 @@ final class DockSettingHelpButton: NSButton {
     }
 
     @objc func performHelpAction(_ sender: Any?) {
+        guard isEnabled else { return }
         hoverWorkItem?.cancel()
         hoverWorkItem = nil
         if let existing = helpPopover, existing.isShown {
@@ -79,6 +89,7 @@ final class DockSettingHelpButton: NSButton {
     }
 
     override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
         performHelpAction(nil)
         return true
     }
@@ -112,7 +123,7 @@ final class DockSettingHelpButton: NSButton {
     }
 
     private func showPopover() {
-        guard window != nil, !(helpPopover?.isShown ?? false) else { return }
+        guard isEnabled, window != nil, !(helpPopover?.isShown ?? false) else { return }
         let popover = makeHelpPopover()
         helpPopover = popover
         setAccessibilityHelp(textProvider())
@@ -681,6 +692,7 @@ final class DockAwayMenuRowView: NSView {
     private let titleLeadingAdjustment: CGFloat
     private let actionHandler: (() -> Void)?
     private var controlEnabled = true
+    private(set) var helpButton: DockSettingHelpButton?
 
     init(
         title: String,
@@ -692,6 +704,8 @@ final class DockAwayMenuRowView: NSView {
         width: CGFloat = 190,
         height: CGFloat = 26,
         toolTip: String? = nil,
+        helpHeading: String? = nil,
+        helpTextProvider: (() -> String)? = nil,
         actionHandler: (() -> Void)? = nil
     ) {
         self.title = title
@@ -713,6 +727,20 @@ final class DockAwayMenuRowView: NSView {
         if actionHandler != nil {
             setAccessibilityRole(.button)
         }
+        if let helpTextProvider {
+            let button = DockSettingHelpButton(heading: helpHeading ?? title, textProvider: helpTextProvider)
+            helpButton = button
+            self.toolTip = nil
+            addSubview(button)
+            NSLayoutConstraint.activate([
+                button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+                button.centerYAnchor.constraint(equalTo: centerYAnchor),
+                button.widthAnchor.constraint(equalToConstant: 16),
+                button.heightAnchor.constraint(equalToConstant: 16)
+            ])
+            setAccessibilityHelp(helpTextProvider())
+            setAccessibilityChildren([button])
+        }
     }
 
     required init?(coder: NSCoder) { nil }
@@ -726,6 +754,9 @@ final class DockAwayMenuRowView: NSView {
 
     func setControlEnabled(_ enabled: Bool) {
         controlEnabled = enabled
+        setAccessibilityEnabled(enabled)
+        helpButton?.isEnabled = enabled
+        if !enabled { helpButton?.closePopover() }
         needsDisplay = true
     }
 
@@ -762,7 +793,7 @@ final class DockAwayMenuRowView: NSView {
         let textHeight = ceil(text.size().height)
 
         let textX: CGFloat = leadingInset + 16 + 6 + titleLeadingAdjustment
-        let rightMargin: CGFloat = hasSubmenu ? 26 : (shortcut != nil ? 44 : 12)
+        let rightMargin: CGFloat = helpButton != nil ? 36 : hasSubmenu ? 26 : (shortcut != nil ? 44 : 12)
         let textWidth = max(0, bounds.width - textX - rightMargin)
         text.draw(in: NSRect(x: textX, y: (bounds.height - textHeight) / 2, width: textWidth, height: textHeight))
 
@@ -772,6 +803,7 @@ final class DockAwayMenuRowView: NSView {
             let iconRect = NSRect(x: leadingInset, y: (bounds.height - 16) / 2, width: 16, height: 16)
             drawnIcon.draw(in: iconRect)
         }
+        helpButton?.contentTintColor = highlighted ? .selectedMenuItemTextColor : .secondaryLabelColor
 
         if hasSubmenu {
             let chevronColor: NSColor = highlighted ? .selectedMenuItemTextColor : .secondaryLabelColor
@@ -812,15 +844,23 @@ final class DockAwayMenuRowView: NSView {
         for item in enclosingMenuItem?.menu?.items ?? [] {
             guard let row = item.view as? DockAwayMenuRowView, row !== self else { continue }
             row.hovered = false
+            row.helpButton?.endHover()
             row.needsDisplay = true
         }
         hovered = true
+        if controlEnabled { helpButton?.beginHover() }
         needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
         hovered = false
+        helpButton?.endHover()
         needsDisplay = true
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { helpButton?.closePopover() }
+        super.viewWillMove(toWindow: newWindow)
     }
 
     override func viewDidMoveToWindow() {
@@ -832,6 +872,7 @@ final class DockAwayMenuRowView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard controlEnabled else { return }
         if let actionHandler {
+            helpButton?.closePopover()
             enclosingMenuItem?.menu?.cancelTracking()
             actionHandler()
         } else {
@@ -841,11 +882,13 @@ final class DockAwayMenuRowView: NSView {
 
     @objc func performMenuAction(_ sender: Any?) {
         guard controlEnabled else { return }
+        helpButton?.closePopover()
         actionHandler?()
     }
 
     override func accessibilityPerformPress() -> Bool {
         guard controlEnabled else { return false }
+        helpButton?.closePopover()
         actionHandler?()
         return true
     }

@@ -373,96 +373,6 @@ private final class HoverHighlightButton: NSButton {
     }
 }
 
-private final class AppIconShineView: NSView {
-    private let maskImage: NSImage
-    private let iconMaskLayer = CALayer()
-    private let shineLayer = CAGradientLayer()
-
-    init(maskImage: NSImage) {
-        self.maskImage = maskImage
-        super.init(frame: .zero)
-
-        wantsLayer = true
-        layer?.masksToBounds = true
-
-        shineLayer.colors = [
-            NSColor.clear.cgColor,
-            NSColor.white.withAlphaComponent(0.42).cgColor,
-            NSColor.clear.cgColor
-        ]
-        shineLayer.locations = [0, 0.5, 1]
-        shineLayer.startPoint = CGPoint(x: 1, y: 1)
-        shineLayer.endPoint = CGPoint(x: 2, y: 2)
-        shineLayer.opacity = 0
-
-        layer?.addSublayer(shineLayer)
-        layer?.mask = iconMaskLayer
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
-    }
-
-    override func layout() {
-        super.layout()
-
-        var imageRect = bounds
-        let scale = window?.backingScaleFactor
-            ?? NSScreen.main?.backingScaleFactor
-            ?? 2
-
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        shineLayer.frame = bounds
-        iconMaskLayer.frame = bounds
-        iconMaskLayer.contents = maskImage.cgImage(
-            forProposedRect: &imageRect,
-            context: nil,
-            hints: nil
-        )
-        iconMaskLayer.contentsGravity = .resizeAspect
-        iconMaskLayer.contentsScale = scale
-        CATransaction.commit()
-    }
-
-    func play(after delay: TimeInterval) {
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, self.window != nil else { return }
-            self.layoutSubtreeIfNeeded()
-
-            let startPoint = CABasicAnimation(keyPath: "startPoint")
-            startPoint.fromValue = CGPoint(x: -1, y: -1)
-            startPoint.toValue = CGPoint(x: 1, y: 1)
-
-            let endPoint = CABasicAnimation(keyPath: "endPoint")
-            endPoint.fromValue = CGPoint(x: 0, y: 0)
-            endPoint.toValue = CGPoint(x: 2, y: 2)
-
-            let opacity = CAKeyframeAnimation(keyPath: "opacity")
-            opacity.values = [0, 1, 1, 0]
-            opacity.keyTimes = [0, 0.12, 0.78, 1]
-
-            let shine = CAAnimationGroup()
-            shine.animations = [startPoint, endPoint, opacity]
-            shine.duration = 1.28
-            shine.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-
-            self.shineLayer.removeAnimation(forKey: "appIconShine")
-            self.shineLayer.add(shine, forKey: "appIconShine")
-        }
-    }
-
-    @objc func replay(_ sender: Any?) {
-        play(after: 0)
-    }
-}
-
 private final class PermissionAttentionRingView: NSView {
     private let ringLayers = (0..<2).map { _ in CAShapeLayer() }
     private var isEmitting = false
@@ -2916,6 +2826,11 @@ final class OnboardingPrimaryButton: NSButton {
     private var launchAtLoginRowView: DockSettingPersistenceRowView!
     private var dockSettingsRestartInProgress = false
     private var dockRestartGeneration = 0
+    private let dockRestartController = DockRestartController()
+    private var dockRestartIsManual = false
+    private weak var restartDockMenuItem: NSMenuItem?
+    private weak var restartDockRowView: DockAwayMenuRowView?
+    private weak var advancedSettingsMenu: NSMenu?
     private var dockAwayStatusView: DockAwayStatusView!
     private var dockAwayEnabled = true
     private var activeStatusText = "Detecting…"
@@ -3251,7 +3166,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     private var automaticSuspensionDetail: String {
         if dockSettingsRestartInProgress {
-            return "Applying Dock settings"
+            return dockRestartIsManual ? "Restarting the macOS Dock" : "Applying Dock settings"
         }
         if permissionMonitor.snapshot == nil {
             return "Unable to confirm permissions. Checking again…"
@@ -3280,7 +3195,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     private var inactiveStatusTitle: String {
         if dockSettingsRestartInProgress {
-            return "DockAway: Applying Settings"
+            return dockRestartIsManual ? "DockAway: Restarting Dock" : "DockAway: Applying Settings"
         }
         return permissionRecoveryRequired
             && dockAwayEnabled
@@ -4358,10 +4273,11 @@ final class OnboardingPrimaryButton: NSButton {
                 accessibilityDescription: "Check for Updates"
             ),
             leadingInset: 12,
-            titleLeadingAdjustment: 2
-        ) { [weak self] in
-            self?.updaterController?.checkForUpdates(nil)
-        }
+            titleLeadingAdjustment: 2,
+            actionHandler: { [weak self] in
+                self?.updaterController?.checkForUpdates(nil)
+            }
+        )
         updateMenuItem.view = updateRowView
         self.updateMenuItem = updateMenuItem
         refreshUpdateMenuItem()
@@ -5651,6 +5567,28 @@ final class OnboardingPrimaryButton: NSButton {
         self.chromiumWebAppPlacementRowView = webAppsRow
         advancedMenu.addItem(webAppsItem)
 
+        advancedMenu.addItem(.separator())
+        let restartItem = NSMenuItem(title: "Restart Dock", action: nil, keyEquivalent: "")
+        let restartRow = DockAwayMenuRowView(
+            title: "Restart Dock",
+            icon: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Restart Dock"),
+            leadingInset: 18,
+            titleLeadingAdjustment: 1,
+            width: advancedMenuWidth,
+            helpHeading: "Restart Dock",
+            helpTextProvider: {
+                "Use this if the Dock stops appearing or responding. The Dock and Mission Control briefly disappear while macOS relaunches them.\n\n• Your Dock preferences, open apps, and desktops are preserved.\n• Only the Dock for your current login is restarted.\n• DockAway pauses its Dock monitoring and resumes when the replacement is ready."
+            }
+        ) { [weak self] in self?.restartDockFromAdvanced() }
+        restartItem.view = restartRow
+        restartItem.target = restartRow
+        restartItem.action = #selector(DockAwayMenuRowView.performMenuAction(_:))
+        advancedMenu.addItem(restartItem)
+        restartDockMenuItem = restartItem
+        restartDockRowView = restartRow
+        advancedSettingsMenu = advancedMenu
+        refreshRestartDockAction()
+
         advancedItem.submenu = advancedMenu
         dockAwaySettingsMenu.addItem(advancedItem)
 
@@ -5664,10 +5602,11 @@ final class OnboardingPrimaryButton: NSButton {
         aboutMenuItem.view = DockAwayMenuRowView(
             title: "About DockAway",
             leadingInset: 12,
-            titleLeadingAdjustment: 2
-        ) { [weak self] in
-            self?.showAbout()
-        }
+            titleLeadingAdjustment: 2,
+            actionHandler: { [weak self] in
+                self?.showAbout()
+            }
+        )
         menu.addItem(aboutMenuItem)
 
         let quitMenuItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
@@ -5685,10 +5624,11 @@ final class OnboardingPrimaryButton: NSButton {
             ),
             shortcut: "⌘Q",
             leadingInset: 12,
-            titleLeadingAdjustment: 2
-        ) { [weak self] in
-            self?.quit()
-        }
+            titleLeadingAdjustment: 2,
+            actionHandler: { [weak self] in
+                self?.quit()
+            }
+        )
         menu.addItem(quitMenuItem)
 
         installDesktopMenuDelegates(in: menu)
@@ -6447,11 +6387,48 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private var dockSettingsCanRestartDock: Bool {
-        guard !dockSettingsRestartInProgress, !fourFingersDown else { return false }
+        guard !dockSettingsRestartInProgress, !fourFingersDown, !isQuitting,
+              automaticSuspensionReasons.isEmpty, !desktopCreationInProgress else { return false }
         if let dockWatcher {
             return dockWatcher.canRestartDockSafely
         }
         return missionControlStateForDockSettings() == false
+    }
+
+    private func refreshRestartDockAction() {
+        let title = dockSettingsRestartInProgress ? "Restarting Dock…" : "Restart Dock"
+        restartDockMenuItem?.title = title
+        restartDockMenuItem?.isEnabled = dockSettingsCanRestartDock
+        restartDockRowView?.update(title: title)
+        restartDockRowView?.setControlEnabled(dockSettingsCanRestartDock)
+    }
+
+    @objc private func restartDockFromAdvanced() {
+        statusItem.menu?.cancelTracking()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard self.dockSettingsCanRestartDock else {
+                NSSound.beep()
+                self.refreshRestartDockAction()
+                return
+            }
+            let generation = self.beginDockRestart(manual: true)
+            self.restartDock(generation: generation)
+        }
+    }
+
+    private func beginDockRestart(manual: Bool) -> Int {
+        dockRestartIsManual = manual
+        dockSettingsRestartInProgress = true
+        dockRestartGeneration += 1
+        fourFingersDown = false
+        fourFingerStartedInMissionControl = false
+        dockWatcher?.stop()
+        multitouch.stop()
+        refreshRestartDockAction()
+        updateDockAwayMenuState()
+        dockAwayStatusView?.pauseResumeButton.isEnabled = false
+        return dockRestartGeneration
     }
 
     private func missionControlStateForDockSettings() -> Bool? {
@@ -6529,6 +6506,7 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private func refreshDockSettingsMenu() {
+        refreshRestartDockAction()
         guard
             let dockPositionRowView,
             let dockAnimationSliderView,
@@ -6760,16 +6738,7 @@ final class OnboardingPrimaryButton: NSButton {
             return true
         }
 
-        dockSettingsRestartInProgress = true
-        dockRestartGeneration += 1
-        let restartGeneration = dockRestartGeneration
-
-        fourFingersDown = false
-        fourFingerStartedInMissionControl = false
-        dockWatcher?.stop()
-        multitouch.stop()
-        updateDockAwayMenuState()
-        dockAwayStatusView?.pauseResumeButton.isEnabled = false
+        let restartGeneration = beginDockRestart(manual: false)
 
         for change in changes {
             CFPreferencesSetValue(
@@ -6815,89 +6784,14 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private func restartDock(generation: Int) {
-        guard let dockApplication = NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.apple.dock"
-        ).first else {
-            finishDockSettingsChange(
-                generation: generation,
-                errorMessage: "Dock.app was not running, so its settings will apply the next time it opens."
-            )
-            return
-        }
-
-        let previousPID = dockApplication.processIdentifier
-        guard kill(previousPID, SIGTERM) == 0 else {
-            finishDockSettingsChange(
-                generation: generation,
-                errorMessage: "DockAway could not restart Dock.app."
-            )
-            return
-        }
-
-        waitForReplacementDock(
-            previousPID: previousPID,
-            generation: generation,
-            attempt: 0
-        )
-    }
-
-    private func waitForReplacementDock(
-        previousPID: pid_t,
-        generation: Int,
-        attempt: Int
-    ) {
-        guard
-            !isQuitting,
-            dockSettingsRestartInProgress,
-            generation == dockRestartGeneration
-        else { return }
-
-        let replacementDock = NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.apple.dock"
-        ).first {
-            !$0.isTerminated && $0.processIdentifier != previousPID
-        }
-
-        if let replacementDock, dockApplicationIsReady(replacementDock) {
-            // Give the new Dock process a moment to establish its windows and
-            // preference observers before DockAway resumes issuing decisions.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
-                self?.finishDockSettingsChange(
-                    generation: generation,
-                    errorMessage: nil
-                )
+        dockAwayDebugLog("Restarting native Dock; manual=\(dockRestartIsManual)")
+        dockRestartController.restart { [weak self] error in
+            guard let self, !self.isQuitting, self.dockRestartGeneration == generation else { return }
+            // Let the replacement establish its preference observers before
+            // DockAway resumes. Failures report directly instead of stalling UI.
+            DispatchQueue.main.asyncAfter(deadline: .now() + (error == nil ? 0.10 : 0)) { [weak self] in
+                self?.finishDockSettingsChange(generation: generation, errorMessage: error)
             }
-            return
-        }
-
-        guard attempt < 80 else {
-            finishDockSettingsChange(
-                generation: generation,
-                errorMessage: "Dock.app took too long to restart. The new settings were still saved."
-            )
-            return
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.waitForReplacementDock(
-                previousPID: previousPID,
-                generation: generation,
-                attempt: attempt + 1
-            )
-        }
-    }
-
-    private func dockApplicationIsReady(_ application: NSRunningApplication) -> Bool {
-        guard application.isFinishedLaunching else { return false }
-        let processIdentifier = application.processIdentifier
-        guard let windows = CGWindowListCopyWindowInfo(
-            .optionAll,
-            kCGNullWindowID
-        ) as? [[String: Any]] else { return false }
-
-        return windows.contains { info in
-            (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
-                == processIdentifier
         }
     }
 
@@ -6907,6 +6801,8 @@ final class OnboardingPrimaryButton: NSButton {
     ) {
         guard generation == dockRestartGeneration else { return }
 
+        let wasManual = dockRestartIsManual
+        dockRestartIsManual = false
         dockSettingsRestartInProgress = false
         dockAwayStatusView?.pauseResumeButton.isEnabled = true
         refreshDockSettingsMenu()
@@ -6923,7 +6819,7 @@ final class OnboardingPrimaryButton: NSButton {
         if let errorMessage {
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = "Dock Settings"
+            alert.messageText = wasManual ? "Restart Dock" : "Dock Settings"
             alert.informativeText = errorMessage
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
@@ -6933,19 +6829,14 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func refreshUpdateMenuItem() {
         guard let updateMenuItem else { return }
-
         let updateIsAvailable = availableUpdateVersion != nil
         let title: String
-        let toolTip: String
         if let version = availableUpdateVersion {
             title = "Update Available v\(version)"
-            toolTip = "Install DockAway \(version)"
         } else {
             title = "Check for Updates..."
-            toolTip = "Check for a newer version of DockAway"
         }
         updateMenuItem.title = title
-        updateMenuItem.toolTip = toolTip
 
         let symbolName = updateIsAvailable
             ? "arrow.down"
@@ -6960,8 +6851,7 @@ final class OnboardingPrimaryButton: NSButton {
         updateMenuItem.onStateImage = menuIcon(from: icon)
         (updateMenuItem.view as? DockAwayMenuRowView)?.update(
             title: title,
-            icon: icon,
-            toolTip: toolTip
+            icon: icon
         )
     }
 
@@ -8628,7 +8518,7 @@ final class OnboardingPrimaryButton: NSButton {
         let iconShineView = AppIconShineView(maskImage: appIconImage)
         iconShineView.translatesAutoresizingMaskIntoConstraints = false
 
-        let iconView = NSButton(
+        let iconView = DraggableAppIconButton(
             image: appIconImage,
             target: iconShineView,
             action: #selector(AppIconShineView.replay(_:))
@@ -8641,7 +8531,8 @@ final class OnboardingPrimaryButton: NSButton {
             buttonCell.showsStateBy = []
         }
         iconView.setAccessibilityLabel("DockAway app icon")
-        iconView.setAccessibilityHelp("Plays the icon shine animation.")
+        iconView.setAccessibilityHelp("Drag DockAway into a permission list in System Settings. Click to play the icon shine animation.")
+        iconView.toolTip = "Drag into System Settings to add DockAway to a permission list."
         iconView.translatesAutoresizingMaskIntoConstraints = false
 
         let iconContainer = NSView()
@@ -10280,6 +10171,8 @@ extension AppDelegate: NSMenuDelegate {
             rebuildHoverActivationBlacklistMenu()
         } else if menu === dockSettingsMenu {
             refreshDockSettingsMenu()
+        } else if menu === advancedSettingsMenu {
+            refreshRestartDockAction()
         } else if menu === desktopIndicatorAppearanceMenu {
             refreshDesktopIndicatorAppearanceMenu()
         } else if menu === dockAwaySettingsMenu {

@@ -366,7 +366,20 @@ final class DockWatcher {
 
     private var pendingAccessibilityCheck: DispatchWorkItem?
     private var pendingAccessibilitySettleCheck: DispatchWorkItem?
-    private var launchWindowCorrectionGeneration = 0
+    private struct LaunchWindowCorrection {
+        let processIdentifier: pid_t
+        let displayID: CGDirectDisplayID
+        let screenFrame: CGRect
+        let oldWorkArea: CGRect
+        let primaryTop: CGFloat
+        let pointerAtArm: CGPoint
+        var retry: DockGapCorrectionRetryPolicy
+        var window: AXUIElement?
+        var lastFailure: String?
+    }
+    private var launchWindowCorrection: LaunchWindowCorrection?
+    private var launchWindowCorrectionTimer: Timer?
+    private var shownDockWorkAreas = [CGDirectDisplayID: ShownDockWorkArea]()
     private var pendingDebounceCheck: DispatchWorkItem?
     private var pendingDesktopTransitionFinish: DispatchWorkItem?
     private var pendingHoldReleaseCheck: DispatchWorkItem?
@@ -618,7 +631,8 @@ final class DockWatcher {
     }
 
     func stop() {
-        launchWindowCorrectionGeneration += 1
+        cancelLaunchWindowCorrection()
+        shownDockWorkAreas.removeAll()
         pendingMovedWindow = nil
         windowMovementSettlesAt = .distantPast
         guard isRunning else { return }
@@ -924,17 +938,33 @@ final class DockWatcher {
         }
 
         if notification == kAXWindowMovedNotification {
-            // Moving an existing window invalidates a pending launch resize.
-            launchWindowCorrectionGeneration += 1
+            // Launching apps also emit moved notifications while positioning
+            // their new window. Only an actual user drag cancels correction.
+            if let correction = launchWindowCorrection,
+               correction.processIdentifier == processIdentifier,
+               NSEvent.pressedMouseButtons != 0,
+               hypot(NSEvent.mouseLocation.x - correction.pointerAtArm.x,
+                     NSEvent.mouseLocation.y - correction.pointerAtArm.y) > 6 {
+                cancelLaunchWindowCorrection()
+            }
             if NSScreen.screens.count > 1 {
                 pendingMovedWindow = (processIdentifier, element)
                 // Native display transfers animate outside Mission Control.
                 // Keep the work area stable until movement notifications stop.
                 windowMovementSettlesAt = Date().addingTimeInterval(0.35)
             }
-        } else if notification == kAXWindowResizedNotification,
-                  isWindowMovementSettling {
-            windowMovementSettlesAt = Date().addingTimeInterval(0.35)
+        } else if notification == kAXWindowResizedNotification {
+            if let correction = launchWindowCorrection,
+               correction.processIdentifier == processIdentifier,
+               let window = correction.window, CFEqual(window, element),
+               NSEvent.pressedMouseButtons != 0,
+               hypot(NSEvent.mouseLocation.x - correction.pointerAtArm.x,
+                     NSEvent.mouseLocation.y - correction.pointerAtArm.y) > 6 {
+                cancelLaunchWindowCorrection()
+            }
+            if isWindowMovementSettling {
+                windowMovementSettlesAt = Date().addingTimeInterval(0.35)
+            }
         }
 
         onAccessibilityEvent?(processIdentifier, element, notification)
@@ -1620,83 +1650,156 @@ final class DockWatcher {
         scheduleAccessibilityEvaluation(includeSettleRecheck: true)
     }
 
-    // Only adjust a newly encountered standard window that fills the old
-    // bottom-Dock work area. Rechecks are bounded to this activation.
+    // Capture the reserved work area before hiding. AX registration order is
+    // not a reliable way to distinguish a just-created or restored window.
     private func prepareLaunchWindowCorrection(for app: NSRunningApplication) {
-        launchWindowCorrectionGeneration += 1
-        let generation = launchWindowCorrectionGeneration
+        if launchWindowCorrection?.processIdentifier == app.processIdentifier { return }
+        cancelLaunchWindowCorrection()
         let displayID = displayIDUnderPointer()
-        guard isRunning, !isDesktopTransitionProtected, !isWindowMovementSettling,
+        guard isRunning, !isDesktopTransitionProtected,
               app.activationPolicy == .regular,
               app.bundleIdentifier != "com.apple.finder",
               !isProcessBlacklisted(app.processIdentifier),
-              dockIsActuallyShown(),
               let screen = NSScreen.screen(withDisplayID: displayID) else { return }
-        let oldFrame = screen.visibleFrame
         let screenFrame = screen.frame
-        // Side-positioned Docks need position changes as well. This trial
-        // deliberately handles only the bottom-edge gap with a size change.
+        // Prediction can hide the Dock before macOS delivers activation or
+        // publishes the new focused window. Keep the last genuinely reserved
+        // work area across that short boundary instead of requiring SHOW now.
+        let shown = dockIsActuallyShown()
+        let now = ProcessInfo.processInfo.systemUptime
+        let oldFrame: CGRect
+        if shown, screen.visibleFrame.minY - screenFrame.minY > 10 {
+            oldFrame = screen.visibleFrame
+        } else if let snapshot = shownDockWorkAreas[displayID],
+                  snapshot.isUsable(on: screenFrame, now: now) {
+            oldFrame = snapshot.visibleFrame
+        } else { return }
+        // Side-positioned Docks need position changes as well. Reclaim only
+        // the bottom-edge gap, without altering the window's position or width.
         guard oldFrame.minY - screenFrame.minY > 10,
               abs(oldFrame.minX - screenFrame.minX) < 3,
               abs(oldFrame.width - screenFrame.width) < 3 else { return }
-        let knownWindows = accessibilityObservations[app.processIdentifier]?.observedWindows ?? []
         let pid = app.processIdentifier
-        dockAwayDebugLog("  → Window correction armed pid=\(pid) oldFrame=\(oldFrame) knownWindows=\(knownWindows.count)")
-        for delay in [0.2, 0.5, 0.9, 1.4] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, self.isRunning,
-                      self.launchWindowCorrectionGeneration == generation,
-                      !self.isDesktopTransitionProtected,
-                      !self.isWindowMovementSettling,
-                      NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-                      !self.isProcessBlacklisted(pid),
-                      NSEvent.pressedMouseButtons == 0,
-                      !self.dockIsActuallyShown(),
-                      let currentScreen = NSScreen.screen(withDisplayID: displayID),
-                      currentScreen.frame == screenFrame else { return }
-                let newFrame = currentScreen.visibleFrame
-                guard oldFrame.minY - newFrame.minY > 10,
-                      abs(oldFrame.maxY - newFrame.maxY) < 3,
-                      abs(oldFrame.minX - newFrame.minX) < 3,
-                      abs(oldFrame.width - newFrame.width) < 3 else { return }
-                let application = AXUIElementCreateApplication(pid)
-                AXUIElementSetMessagingTimeout(application, 0.05)
-                guard let window = application.element(kAXFocusedWindowAttribute) else { return }
-                guard !knownWindows.contains(where: { CFEqual($0, window) }) else {
-                    dockAwayDebugLog("  → Window correction skipped pid=\(pid): window already observed before activation")
-                    return
-                }
-                guard window.string(kAXSubroleAttribute) == kAXStandardWindowSubrole,
-                      window.bool("AXFullScreen") != true,
-                      window.bool(kAXMinimizedAttribute) == false,
-                      let position = window.point(),
-                      let size = window.size(),
-                      let primaryScreen = NSScreen.screens.first else { return }
-                let expectedTop = primaryScreen.frame.maxY - oldFrame.maxY
-                let tolerance: CGFloat = 4
-                // Some windows leave a small margin above the Dock even when
-                // filling the work area. Match that bottom edge independently.
-                let expectedBottom = primaryScreen.frame.maxY - oldFrame.minY
-                let bottomTolerance: CGFloat = 8
-                guard abs(position.x - oldFrame.minX) <= tolerance,
-                      abs(position.y - expectedTop) <= tolerance,
-                      abs(size.width - oldFrame.width) <= tolerance,
-                      abs(position.y + size.height - expectedBottom) <= bottomTolerance else {
-                    dockAwayDebugLog("  → Window correction geometry mismatch pid=\(pid) position=\(position) size=\(size) expectedTop=\(expectedTop) oldFrame=\(oldFrame)")
-                    return
-                }
-                var settable = DarwinBoolean(false)
-                guard AXUIElementIsAttributeSettable(window, kAXSizeAttribute as CFString, &settable) == .success,
-                      settable.boolValue else { return }
-                var correctedSize = size
-                correctedSize.height = primaryScreen.frame.maxY - newFrame.minY - position.y
-                guard let value = AXValueCreate(.cgSize, &correctedSize) else { return }
-                // One resize attempt per activation, including apps that reject it.
-                self.launchWindowCorrectionGeneration += 1
-                let result = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value)
-                dockAwayDebugLog("  → Launch window Dock-gap correction: \(result.rawValue)")
-            }
+        guard let primaryTop = NSScreen.screens.first?.frame.maxY else { return }
+        launchWindowCorrection = LaunchWindowCorrection(
+            processIdentifier: pid, displayID: displayID, screenFrame: screenFrame,
+            oldWorkArea: CGRect(x: oldFrame.minX, y: primaryTop - oldFrame.maxY,
+                                width: oldFrame.width, height: oldFrame.height),
+            primaryTop: primaryTop,
+            pointerAtArm: NSEvent.mouseLocation,
+            retry: DockGapCorrectionRetryPolicy(now: ProcessInfo.processInfo.systemUptime)
+        )
+        dockAwayDebugLog("  → Window correction armed pid=\(pid) oldFrame=\(oldFrame)")
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+            self?.recheckLaunchWindowCorrection()
         }
+        timer.tolerance = 0.02
+        RunLoop.main.add(timer, forMode: .common)
+        launchWindowCorrectionTimer = timer
+    }
+
+    private func cancelLaunchWindowCorrection() {
+        launchWindowCorrectionTimer?.invalidate()
+        launchWindowCorrectionTimer = nil
+        launchWindowCorrection = nil
+    }
+
+    private func recheckLaunchWindowCorrection() {
+        guard var correction = launchWindowCorrection else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard isRunning, !correction.retry.hasExpired(now: now),
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == correction.processIdentifier,
+              !isProcessBlacklisted(correction.processIdentifier),
+              let screen = NSScreen.screen(withDisplayID: correction.displayID),
+              screen.frame == correction.screenFrame,
+              NSScreen.screens.first?.frame.maxY == correction.primaryTop else {
+            dockAwayDebugLog("  → Window correction ended or invalidated pid=\(correction.processIdentifier), lastFailure=\(correction.lastFailure ?? "none")")
+            cancelLaunchWindowCorrection()
+            return
+        }
+        // Retry after launch positioning and Dock animation settle, rather
+        // than permanently losing the operation to one transitional snapshot.
+        guard !isDesktopTransitionProtected, !isWindowMovementSettling,
+              NSEvent.pressedMouseButtons == 0, !dockIsActuallyShown() else { return }
+        let visible = screen.visibleFrame
+        let newWorkArea = CGRect(x: visible.minX, y: correction.primaryTop - visible.maxY,
+                                 width: visible.width, height: visible.height)
+        guard abs(newWorkArea.minX - correction.oldWorkArea.minX) < 3,
+              abs(newWorkArea.minY - correction.oldWorkArea.minY) < 3,
+              abs(newWorkArea.width - correction.oldWorkArea.width) < 3 else {
+            cancelLaunchWindowCorrection()
+            return
+        }
+        guard newWorkArea.maxY - correction.oldWorkArea.maxY > 10 else { return }
+        let budget = AccessibilityRequestBudget(seconds: 0.08)
+        let application = AXUIElementCreateApplication(correction.processIdentifier)
+        guard let focused = budget.element(kAXFocusedWindowAttribute, of: application)
+                ?? budget.element(kAXMainWindowAttribute, of: application),
+              budget.string(kAXSubroleAttribute, of: focused) == kAXStandardWindowSubrole,
+              (budget.perform(on: focused, { focused.bool("AXFullScreen") }) ?? nil) != true,
+              budget.perform(on: focused, { focused.bool(kAXMinimizedAttribute) }) == false,
+              let frame = budget.frame(of: focused) else {
+            noteLaunchWindowCorrectionFailure("Window hierarchy/frame not ready or not a standard resizable window")
+            return
+        }
+        // Stay with one window once a write has been attempted. An app may
+        // open a dialog or switch focused windows while restoring its session.
+        if let window = correction.window, !CFEqual(window, focused) {
+            cancelLaunchWindowCorrection()
+            return
+        }
+        // AX can expose a focused window on another Space. Only resize when
+        // WindowServer also reports this normal window on the visible desktop.
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], 0)
+                as? [[String: Any]],
+              windows.contains(where: { info in
+                  guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == correction.processIdentifier,
+                        (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                        let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                        let cgFrame = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return false }
+                  return DockGapCorrectionGeometry.approximatelyEqual(frame, cgFrame, tolerance: 4)
+              }) else {
+            noteLaunchWindowCorrectionFailure("WindowServer has not confirmed the window on this desktop")
+            return
+        }
+        switch correction.retry.action(window: frame, oldWorkArea: correction.oldWorkArea,
+                                       newWorkArea: newWorkArea, now: now) {
+        case .finish:
+            dockAwayDebugLog("  → Window correction finished pid=\(correction.processIdentifier) writes=\(correction.retry.writeCount)")
+            cancelLaunchWindowCorrection()
+        case .wait:
+            launchWindowCorrection = correction
+        case .resize(let target):
+            var settable = DarwinBoolean(false)
+            guard budget.perform(on: focused, {
+                AXUIElementIsAttributeSettable(focused, kAXSizeAttribute as CFString, &settable)
+            }) == .success, settable.boolValue else {
+                noteLaunchWindowCorrectionFailure("AX size is not writable yet")
+                return
+            }
+            var size = target.size
+            guard let value = AXValueCreate(.cgSize, &size),
+                  let result = budget.perform(on: focused, {
+                      AXUIElementSetAttributeValue(focused, kAXSizeAttribute as CFString, value)
+                  }) else {
+                noteLaunchWindowCorrectionFailure("AX resize exceeded the request budget")
+                return
+            }
+            correction.window = focused
+            correction.retry.didAttemptResize(to: target, now: now)
+            correction.lastFailure = result == .success ? nil : "AX resize error \(result.rawValue)"
+            launchWindowCorrection = correction
+            dockAwayDebugLog("  → Launch window Dock-gap write \(correction.retry.writeCount): \(result.rawValue), awaiting verification")
+        }
+    }
+
+    private func noteLaunchWindowCorrectionFailure(_ reason: String) {
+        guard var correction = launchWindowCorrection else { return }
+        if correction.lastFailure != reason {
+            dockAwayDebugLog("  → Window correction waiting pid=\(correction.processIdentifier): \(reason)")
+        }
+        correction.lastFailure = reason
+        launchWindowCorrection = correction
     }
 
     // MARK: - Core Logic
@@ -3195,12 +3298,29 @@ final class DockWatcher {
         pendingDebounceCheck?.cancel()
         pendingDebounceCheck = nil
 
+        // Same-app Dock clicks do not always emit an activation notification.
+        // The final HIDE boundary is a second opportunity to capture the gap.
+        if !shouldShow, actuallyShown, let app = NSWorkspace.shared.frontmostApplication {
+            prepareLaunchWindowCorrection(for: app)
+        }
         sendDockToggle(towardVisible: shouldShow, reason: "Forcing Dock")
     }
 
     private func dockIsActuallyShown() -> Bool {
         let isShown = !(UserDefaults(suiteName: "com.apple.dock")?
             .bool(forKey: "autohide") ?? false)
+        if isShown {
+            for screen in NSScreen.screens {
+                guard let displayID = screen.displayID,
+                      screen.visibleFrame.minY - screen.frame.minY > 10,
+                      abs(screen.visibleFrame.minX - screen.frame.minX) < 3,
+                      abs(screen.visibleFrame.width - screen.frame.width) < 3 else { continue }
+                shownDockWorkAreas[displayID] = ShownDockWorkArea(
+                    screenFrame: screen.frame, visibleFrame: screen.visibleFrame,
+                    capturedAt: ProcessInfo.processInfo.systemUptime
+                )
+            }
+        }
         postDockVisibility(isShown)
         return isShown
     }
