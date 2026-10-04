@@ -34,6 +34,48 @@ private final class DockLaunchCompletion {
     }
 }
 
+/// One native Dock restart per DockAway launch. Permission setup, session
+/// suspension, and protected desktop transitions can defer the attempt. A
+/// settings/manual restart satisfies it too; a failure never creates a loop.
+@MainActor
+final class DockStartupRestartCoordinator {
+    struct Environment {
+        var isReady: () -> Bool
+        var canRestart: () -> Bool
+        var restart: () -> Void
+        var schedule: (TimeInterval, @escaping @MainActor () -> Void) -> Void
+    }
+
+    private let environment: Environment
+    private(set) var isPending = true
+    private var retryScheduled = false
+
+    init(environment: Environment) {
+        self.environment = environment
+    }
+
+    func requestIfReady() {
+        guard isPending, environment.isReady() else { return }
+        if environment.canRestart() {
+            // Claim before the callback: startup and permission callbacks can
+            // reenter the launch flow while the replacement Dock is pending.
+            noteRestartAttempt()
+            environment.restart()
+        } else if !retryScheduled {
+            retryScheduled = true
+            environment.schedule(0.5) { [weak self] in
+                guard let self else { return }
+                self.retryScheduled = false
+                self.requestIfReady()
+            }
+        }
+    }
+
+    func noteRestartAttempt() {
+        isPending = false
+    }
+}
+
 /// Restarts only the current user's native Dock. Dependencies are injectable
 /// so timeout and launchd recovery can be tested without touching real desktops.
 @MainActor

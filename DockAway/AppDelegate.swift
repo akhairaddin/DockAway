@@ -2661,6 +2661,12 @@ final class OnboardingPrimaryButton: NSButton {
     private static let initialRevealDelayHandledKey = "InitialRevealDelayHandled"
     private static let showStartedPopoverAfterRelaunchKey =
         "ShowStartedPopoverAfterPermissionRelaunch"
+    private static let showRestartedPopoverAfterRelaunchKey =
+        "ShowRestartedPopoverAfterPermissionRelaunch"
+    private static let automaticPermissionRelaunchAttemptedKey =
+        "AutomaticPermissionRelaunchAttempted"
+    private static let permissionRecoveryPendingKey = "PermissionRecoveryPending"
+    private static let permissionRelaunchWasPausedKey = "PermissionRelaunchWasPaused"
     private static let dockPreferencesDomain = "com.apple.dock" as CFString
     private static let dockOrientationKey = "orientation"
     private static let dockAnimationDurationKey = "autohide-time-modifier"
@@ -2778,10 +2784,9 @@ final class OnboardingPrimaryButton: NSButton {
     var isQuitting = false
     private var statusItem: NSStatusItem!
     private var quitRestorationCompleted = false
-    private let quitDockRestartController = DockRestartController()
     private lazy var quitDockRestoration = DockQuitRestoration(environment: .live(
         sendShortcut: { [weak self] in self?.dockWatcher?.simulateOptionCommandDPublic() ?? false },
-        restarter: quitDockRestartController,
+        restarter: dockRestartController,
         allowsFullscreenHiding: { [weak self] in self?.currentDesktopInfo().isFS == true }
     ))
     private lazy var statusItemSpaceRefresh = StatusItemSpaceRefresh(
@@ -2792,7 +2797,9 @@ final class OnboardingPrimaryButton: NSButton {
         refresh: { [weak self] in self?.repaintStatusItemAfterSpaceChange() }
     )
     private var startedPopover: NSPopover?
+    private var startedPopoverAnchor: PopoverPresentationAnchor?
     private lazy var startedPopoverCooldown = PopoverInteractionCooldown { [weak self] in
+        dockAwayDebugLog("Startup popover idle cooldown expired")
         self?.closeStartedPopover()
     }
     private var startedPopoverLocalEventMonitor: Any?
@@ -2844,7 +2851,30 @@ final class OnboardingPrimaryButton: NSButton {
     private var dockSettingsRestartInProgress = false
     private var dockRestartGeneration = 0
     private let dockRestartController = DockRestartController()
-    private var dockRestartIsManual = false
+    private enum DockRestartReason: String {
+        case preferences, manual, startup
+    }
+    private var dockRestartReason = DockRestartReason.preferences
+    private lazy var startupDockRestart = DockStartupRestartCoordinator(environment: .init(
+        isReady: { [weak self] in
+            guard let self else { return false }
+            return !self.isQuitting && !self.permissionRelaunchScheduled
+                && !self.permissionSetupInProgress && !self.permissionContinuePending
+                && !self.permissionRecovery.isRecovering
+                && self.completedPermissionOnboarding
+                && self.permissionMonitor.snapshot?.allGranted == true
+                && self.accessibilityAccessGranted && self.inputMonitoringAccessGranted
+                && self.automaticSuspensionReasons.isEmpty
+        }, canRestart: { [weak self] in
+            self?.dockSettingsCanRestartDock == true
+        }, restart: { [weak self] in
+            guard let self else { return }
+            let generation = self.beginDockRestart(reason: .startup)
+            self.restartDock(generation: generation)
+        }, schedule: { delay, work in
+            DockLifecycleRunLoop.schedule(after: delay, work)
+        }
+    ))
     private weak var restartDockMenuItem: NSMenuItem?
     private weak var restartDockRowView: DockAwayMenuRowView?
     private var dockAwayStatusView: DockAwayStatusView!
@@ -2966,6 +2996,11 @@ final class OnboardingPrimaryButton: NSButton {
     private weak var permissionSetupView: PermissionSetupView?
     private let permissionMonitor = PermissionMonitor()
     private let runtimePermissionAccess = RuntimePermissionAccess()
+    private var permissionRecovery = PermissionRecoveryState(
+        relaunchAlreadyAttempted: UserDefaults.standard.bool(
+            forKey: AppDelegate.automaticPermissionRelaunchAttemptedKey
+        )
+    )
     private var permissionContinuePending = false
     private var permissionContinueGeneration = 0
     private var permissionSetupRequested = false
@@ -2982,6 +3017,7 @@ final class OnboardingPrimaryButton: NSButton {
             && !processInputMonitoringAccessGranted
     }
     private var permissionRelaunchScheduled = false
+    private var permissionRelaunchIsAutomatic = false
     private var isPermissionRelaunching = false
     private var permissionHealthTimer: Timer?
     
@@ -3027,10 +3063,19 @@ final class OnboardingPrimaryButton: NSButton {
             || inputMonitoringPermissionMissing || permissionRestartRequired
     }
 
+    private var completedPermissionOnboarding: Bool {
+        UserDefaults.standard.bool(forKey: Self.permissionSetupCompletedKey)
+            && !MajorReleaseOnboarding.needsPresentation()
+    }
+
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = DockAwayTheme.current.appearance
         dockAwayDebugLog("🚀 APP LAUNCHED")
+        if UserDefaults.standard.bool(forKey: Self.permissionRelaunchWasPausedKey) {
+            dockAwayEnabled = false
+            UserDefaults.standard.removeObject(forKey: Self.permissionRelaunchWasPausedKey)
+        }
         mutedVolumeMenuBarController.recoverPreviousSession()
         mutedVolumeMenuBarController.onDisabled = { [weak self] in
             self?.mutedVolumeMenuBarRow?.setOn(false)
@@ -3183,13 +3228,18 @@ final class OnboardingPrimaryButton: NSButton {
 
     private var automaticSuspensionDetail: String {
         if dockSettingsRestartInProgress {
-            return dockRestartIsManual ? "Restarting the macOS Dock" : "Applying Dock settings"
+            return dockRestartReason == .preferences ? "Applying Dock settings" : "Restarting the macOS Dock"
         }
         if permissionMonitor.snapshot == nil {
             return "Unable to confirm permissions. Checking again…"
         }
         if permissionRestartRequired {
-            return "Finish setup to activate access"
+            if permissionRecovery.isRecovering || permissionRelaunchScheduled {
+                return "Restoring permission access…"
+            }
+            return completedPermissionOnboarding
+                ? "Restart DockAway to activate access"
+                : "Finish setup to activate access"
         }
         if accessibilityPermissionMissing {
             return "Accessibility access is off"
@@ -3212,7 +3262,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     private var inactiveStatusTitle: String {
         if dockSettingsRestartInProgress {
-            return dockRestartIsManual ? "DockAway: Restarting Dock" : "DockAway: Applying Settings"
+            return dockRestartReason == .preferences ? "DockAway: Applying Settings" : "DockAway: Restarting Dock"
         }
         return permissionRecoveryRequired
             && dockAwayEnabled
@@ -3221,7 +3271,8 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private var permissionActionTitle: String {
-        permissionRestartRequired ? "Finish Permission Setup" : "Restore Permissions"
+        permissionRestartRequired && !completedPermissionOnboarding
+            ? "Finish Permission Setup" : "Restore Permissions"
     }
 
     // Stops all of DockAway's active monitoring while nobody can interact
@@ -3348,6 +3399,8 @@ final class OnboardingPrimaryButton: NSButton {
         dockWatcher?.stop()
         multitouch.stop()
         permissionMonitor.stop()
+        permissionRecovery.cancel()
+        cancelAutomaticPermissionRelaunch()
         permissionContinueGeneration += 1
         if runtimePermissionAccess.isChecking {
             runtimePermissionAccess.invalidate()
@@ -4256,7 +4309,7 @@ final class OnboardingPrimaryButton: NSButton {
             width: dockIconActionsWidth,
             helpHeading: "Restart Dock",
             helpTextProvider: {
-                "Use this if the Dock stops appearing or responding. The Dock and Mission Control briefly disappear while macOS relaunches them.\n\n• Your Dock preferences, open apps, and desktops are preserved.\n• Only the Dock for your current login is restarted.\n• DockAway pauses its Dock monitoring and resumes when the replacement is ready."
+                "Use this if the Dock stops appearing or responding. DockAway also restarts the Dock after startup and when you quit. Startup waits until setup is complete and desktop transitions are idle. The Dock and Mission Control briefly disappear while macOS relaunches them.\n\n• Only the Dock for your current login is restarted.\n• Restart Dock and the startup restart preserve your Dock preferences, open apps, and desktops.\n• Quitting respects your Dock preference persistence choices and restores Dock visibility.\n• DockAway pauses its Dock monitoring and resumes when the replacement is ready."
             }
         ) { [weak self] in self?.restartDockFromPreferences() }
         restartItem.view = restartRow
@@ -6456,13 +6509,13 @@ final class OnboardingPrimaryButton: NSButton {
                 self.refreshRestartDockAction()
                 return
             }
-            let generation = self.beginDockRestart(manual: true)
+            let generation = self.beginDockRestart(reason: .manual)
             self.restartDock(generation: generation)
         }
     }
 
-    private func beginDockRestart(manual: Bool) -> Int {
-        dockRestartIsManual = manual
+    private func beginDockRestart(reason: DockRestartReason) -> Int {
+        dockRestartReason = reason
         dockSettingsRestartInProgress = true
         dockRestartGeneration += 1
         fourFingersDown = false
@@ -6785,7 +6838,7 @@ final class OnboardingPrimaryButton: NSButton {
             return true
         }
 
-        let restartGeneration = beginDockRestart(manual: false)
+        let restartGeneration = beginDockRestart(reason: .preferences)
 
         for change in changes {
             CFPreferencesSetValue(
@@ -6831,7 +6884,10 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private func restartDock(generation: Int) {
-        dockAwayDebugLog("Restarting native Dock; manual=\(dockRestartIsManual)")
+        // A preference change at first launch may already need a restart.
+        // Reuse that replacement instead of immediately restarting it again.
+        startupDockRestart.noteRestartAttempt()
+        dockAwayDebugLog("Restarting native Dock; reason=\(dockRestartReason.rawValue)")
         dockRestartController.restart { [weak self] error in
             guard let self, !self.isQuitting, self.dockRestartGeneration == generation else { return }
             // Let the replacement establish its preference observers before
@@ -6848,8 +6904,8 @@ final class OnboardingPrimaryButton: NSButton {
     ) {
         guard generation == dockRestartGeneration else { return }
 
-        let wasManual = dockRestartIsManual
-        dockRestartIsManual = false
+        let reason = dockRestartReason
+        dockRestartReason = .preferences
         dockSettingsRestartInProgress = false
         dockAwayStatusView?.pauseResumeButton.isEnabled = true
         refreshDockSettingsMenu()
@@ -6864,13 +6920,16 @@ final class OnboardingPrimaryButton: NSButton {
         updateDockAwayMenuState()
 
         if let errorMessage {
+            dockAwayDebugLog("Native Dock restart failed; reason=\(reason.rawValue): \(errorMessage)")
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = wasManual ? "Restart Dock" : "Dock Preferences"
+            alert.messageText = reason == .preferences ? "Dock Preferences" : "Restart Dock"
             alert.informativeText = errorMessage
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
+        } else {
+            dockAwayDebugLog("Native Dock restart completed; reason=\(reason.rawValue)")
         }
     }
 
@@ -7663,7 +7722,7 @@ final class OnboardingPrimaryButton: NSButton {
            !accessibilityAccessGranted || !inputMonitoringAccessGranted {
             statusItem.menu?.cancelTracking()
             DispatchQueue.main.async { [weak self] in
-                self?.requestAccessibilityPermission()
+                self?.requestAccessibilityPermission(userInitiated: true)
             }
             return
         }
@@ -7680,7 +7739,7 @@ final class OnboardingPrimaryButton: NSButton {
             dockAwayDebugLog("🔴 DockAway inactive")
         } else {
             dockAwayEnabled = true
-            requestAccessibilityPermission()
+            requestAccessibilityPermission(userInitiated: true)
             updateDockAwayMenuState()
         }
     }
@@ -8374,8 +8433,14 @@ final class OnboardingPrimaryButton: NSButton {
 
     // MARK: - Permission Setup
 
-    private func requestAccessibilityPermission() {
+    private func requestAccessibilityPermission(userInitiated: Bool = false) {
         guard !isQuitting, !permissionContinuePending, !permissionRelaunchScheduled else { return }
+        if userInitiated, completedPermissionOnboarding, !permissionRecovery.isRecovering {
+            // A deliberate Resume click may retry a previously failed recovery,
+            // but ordinary health checks must never create a relaunch loop.
+            permissionRecovery.allowRetry()
+            UserDefaults.standard.removeObject(forKey: Self.automaticPermissionRelaunchAttemptedKey)
+        }
         if permissionSetupInProgress {
             permissionSetupWindow?.makeKeyAndOrderFront(nil)
             permissionMonitor.refresh(force: true)
@@ -9254,30 +9319,63 @@ final class OnboardingPrimaryButton: NSButton {
         }
     }
 
-    private func scheduleRelaunchAfterPermissionSetup() {
+    private func scheduleRelaunchAfterPermissionSetup(automaticRecovery: Bool = false) {
         guard !permissionRelaunchScheduled, !isQuitting else { return }
         permissionRelaunchScheduled = true
+        permissionRelaunchIsAutomatic = automaticRecovery
+        UserDefaults.standard.set(!dockAwayEnabled, forKey: Self.permissionRelaunchWasPausedKey)
 
         // Give the setup window a brief moment to dismiss before the new
         // process takes over, keeping the restart quiet and intentional.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
-            guard let self, !self.isQuitting else { return }
-
-            self.isPermissionRelaunching = true
-            do {
-                try self.launchRelaunchHelper()
-                NSApp.terminate(nil)
-            } catch {
-                self.isPermissionRelaunching = false
-                self.permissionRelaunchScheduled = false
-                UserDefaults.standard.set(
-                    false,
-                    forKey: Self.showStartedPopoverAfterRelaunchKey
-                )
-                self.presentPermissionSetup()
-                self.permissionMonitor.refresh(force: true)
-                dockAwayDebugLog("⚠️ Could not prepare DockAway relaunch after permission setup: \(error)")
+            guard let self, !self.isQuitting, self.permissionRelaunchScheduled else { return }
+            if automaticRecovery {
+                // Recheck after the presentation delay. Revocation or sleep
+                // during the handoff must not turn a stale grant into a restart.
+                self.permissionMonitor.refresh(force: true) { [weak self] snapshot in
+                    guard let self, !self.isQuitting, self.permissionRelaunchScheduled else { return }
+                    guard snapshot?.allGranted == true,
+                          self.automaticSuspensionReasons.isEmpty else {
+                        self.cancelAutomaticPermissionRelaunch()
+                        self.updateDockAwayMenuState()
+                        return
+                    }
+                    self.performPermissionRelaunch(automaticRecovery: true)
+                }
+            } else {
+                self.performPermissionRelaunch(automaticRecovery: false)
             }
+        }
+    }
+
+    private func cancelAutomaticPermissionRelaunch() {
+        guard permissionRelaunchScheduled, permissionRelaunchIsAutomatic,
+              !isPermissionRelaunching else { return }
+        permissionRelaunchScheduled = false
+        permissionRelaunchIsAutomatic = false
+        permissionRecovery.allowRetry()
+        UserDefaults.standard.removeObject(forKey: Self.automaticPermissionRelaunchAttemptedKey)
+        UserDefaults.standard.removeObject(forKey: Self.showRestartedPopoverAfterRelaunchKey)
+        UserDefaults.standard.removeObject(forKey: Self.permissionRelaunchWasPausedKey)
+        UserDefaults.standard.set(false, forKey: Self.showStartedPopoverAfterRelaunchKey)
+    }
+
+    private func performPermissionRelaunch(automaticRecovery: Bool) {
+        isPermissionRelaunching = true
+        do {
+            try launchRelaunchHelper()
+            NSApp.terminate(nil)
+        } catch {
+            isPermissionRelaunching = false
+            permissionRelaunchScheduled = false
+            permissionRelaunchIsAutomatic = false
+            UserDefaults.standard.set(false, forKey: Self.showStartedPopoverAfterRelaunchKey)
+            UserDefaults.standard.removeObject(forKey: Self.showRestartedPopoverAfterRelaunchKey)
+            UserDefaults.standard.removeObject(forKey: Self.permissionRelaunchWasPausedKey)
+            if !automaticRecovery { presentPermissionSetup() }
+            permissionMonitor.refresh(force: true)
+            updateDockAwayMenuState()
+            dockAwayDebugLog("⚠️ Could not prepare DockAway relaunch after restoring permissions: \(error)")
         }
     }
 
@@ -9304,7 +9402,11 @@ final class OnboardingPrimaryButton: NSButton {
         try helper.run()
     }
 
-    private func completePermissionSetup(allowStartedPopover: Bool = true, forceStartedPopover: Bool = false) {
+    private func completePermissionSetup(
+        allowStartedPopover: Bool = true,
+        forceStartedPopover: Bool = false,
+        restarted: Bool = false
+    ) {
         guard permissionMonitor.snapshot?.allGranted == true,
               accessibilityAccessGranted, inputMonitoringAccessGranted else { return }
         let defaults = UserDefaults.standard
@@ -9314,11 +9416,17 @@ final class OnboardingPrimaryButton: NSButton {
         let shouldShowAfterRelaunch = defaults.bool(
             forKey: Self.showStartedPopoverAfterRelaunchKey
         )
+        let recoveryPending = !isFirstCompletedSetup && defaults.bool(forKey: Self.permissionRecoveryPendingKey)
         let shouldShowStartedPopover = allowStartedPopover
-            && (isFirstCompletedSetup || shouldShowAfterRelaunch || forceStartedPopover)
+            && (isFirstCompletedSetup || shouldShowAfterRelaunch || forceStartedPopover || recoveryPending)
+        let showRestarted = restarted || recoveryPending
+            || defaults.bool(forKey: Self.showRestartedPopoverAfterRelaunchKey)
         defaults.set(true, forKey: Self.permissionSetupCompletedKey)
+        defaults.removeObject(forKey: Self.automaticPermissionRelaunchAttemptedKey)
         if shouldShowStartedPopover {
             defaults.set(false, forKey: Self.showStartedPopoverAfterRelaunchKey)
+            defaults.removeObject(forKey: Self.showRestartedPopoverAfterRelaunchKey)
+            defaults.removeObject(forKey: Self.permissionRecoveryPendingKey)
         }
 
         if dockWatcher == nil {
@@ -9331,21 +9439,37 @@ final class OnboardingPrimaryButton: NSButton {
         }
         startMonitoringIfAllowed()
         ensureDockAwayIsOn()
+        startupDockRestart.requestIfReady()
         updateDockAwayMenuState()
 
         if shouldShowStartedPopover {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
-                self?.showDockAwayStartedPopover()
+                self?.showStartedPopoverAfterDockRestart(restarted: showRestarted)
             }
         }
     }
 
-    private func showDockAwayStartedPopover() {
+    private func showStartedPopoverAfterDockRestart(restarted: Bool) {
+        guard !isQuitting, !permissionRelaunchScheduled, !permissionSetupInProgress,
+              accessibilityAccessGranted, inputMonitoringAccessGranted,
+              automaticSuspensionReasons.isEmpty else { return }
+        guard !dockSettingsRestartInProgress else {
+            // Confirm startup only after the replacement is ready. This does
+            // not alter the confetti button's interaction/dismissal cooldown.
+            DockLifecycleRunLoop.schedule(after: 0.25) { [weak self] in
+                self?.showStartedPopoverAfterDockRestart(restarted: restarted)
+            }
+            return
+        }
+        showDockAwayStartedPopover(restarted: restarted)
+    }
+
+    private func showDockAwayStartedPopover(restarted: Bool = false) {
         showMenuBarPopover(
             symbolName: "checkmark.circle.fill",
-            symbolDescription: "DockAway started",
+            symbolDescription: restarted ? "DockAway restarted" : "DockAway started",
             symbolColor: .systemGreen,
-            title: "DockAway has successfully started ",
+            title: restarted ? "DockAway has restarted " : "DockAway has successfully started ",
             detail: "You can manage it here from the menu bar.",
             contentSize: NSSize(width: 275, height: 60),
             celebrationEmoji: "🎉"
@@ -9363,13 +9487,13 @@ final class OnboardingPrimaryButton: NSButton {
         let detail: String
         if accessibilityPermissionMissing && inputMonitoringPermissionMissing {
             title = "DockAway permissions were revoked"
-            detail = "Restore Accessibility and Input Monitoring from the menu bar by pressing the resume button."
+            detail = "Restore DockAway’s access in System Settings. DockAway will resume automatically."
         } else if accessibilityPermissionMissing {
             title = "Accessibility permission was revoked"
-            detail = "Restore Accessibility from the menu bar by pressing the resume button to restore access."
+            detail = "Restore DockAway’s access in System Settings. DockAway will resume automatically."
         } else if inputMonitoringPermissionMissing {
             title = "Input Monitoring permission was revoked"
-            detail = "Gesture detection is paused. Click the menu bar icon and press the resume button to restore access."
+            detail = "Gesture detection is paused. Restore access in System Settings to resume automatically."
         } else {
             return
         }
@@ -9447,9 +9571,11 @@ final class OnboardingPrimaryButton: NSButton {
                 action: #selector(replayStartedPopoverConfetti(_:))
             )
             emojiButton.interactionBegan = { [weak self] in
+                dockAwayDebugLog("Startup confetti button press began")
                 self?.startedPopoverCooldown.interactionBegan()
             }
             emojiButton.interactionEnded = { [weak self] in
+                dockAwayDebugLog("Startup confetti button press ended")
                 self?.startedPopoverCooldown.interactionEnded()
             }
             emojiButton.font = .systemFont(ofSize: 14)
@@ -9502,14 +9628,20 @@ final class OnboardingPrimaryButton: NSButton {
         popover.behavior = .applicationDefined
         popover.contentSize = contentView.frame.size
         popover.contentViewController = viewController
+        // Keep only the timed startup confirmation independent of the native
+        // status-item window. Permission notices retain their existing anchor.
+        let anchor = celebrationButton != nil ? PopoverPresentationAnchor(positioningView: statusButton) : nil
+        let positioningView = anchor?.view ?? statusButton
+        startedPopoverAnchor = anchor
         popover.show(
-            relativeTo: statusButton.bounds,
-            of: statusButton,
+            relativeTo: positioningView.bounds,
+            of: positioningView,
             preferredEdge: .minY
         )
         startedPopover = popover
         startedPopoverContentView = contentView
         startedPopoverCelebrationButton = celebrationButton
+        dockAwayDebugLog("Startup popover shown window=\(contentView.window?.windowNumber ?? 0)")
         monitorStartedPopoverDismissal()
 
         if let celebrationButton {
@@ -9538,6 +9670,7 @@ final class OnboardingPrimaryButton: NSButton {
             startedPopover != nil
         else { return }
 
+        dockAwayDebugLog("Startup confetti button action")
         startedPopoverCooldown.interactionPerformed()
         animatePopoverConfetti(from: sender, in: contentView)
     }
@@ -9806,6 +9939,7 @@ final class OnboardingPrimaryButton: NSButton {
             // Close before returning the event so a status-item click still
             // reaches the DockAway menu instead of being consumed.
             let statusItemWasClicked = self.statusItemContainsMouse()
+            dockAwayDebugLog("Startup popover outside local click window=\(event.windowNumber)")
             self.closeStartedPopover()
             if statusItemWasClicked {
                 self.reopenStatusMenuAfterPopoverClick()
@@ -9817,6 +9951,7 @@ final class OnboardingPrimaryButton: NSButton {
         ) { [weak self, weak popover] _ in
             guard let self, let popover, self.startedPopover === popover else { return }
             let statusItemWasClicked = self.statusItemContainsMouse()
+            dockAwayDebugLog("Startup popover outside global click")
             DispatchQueue.main.async { [weak self, weak popover] in
                 guard let self, let popover, self.startedPopover === popover else { return }
                 self.closeStartedPopover()
@@ -9869,6 +10004,8 @@ final class OnboardingPrimaryButton: NSButton {
         closeStartedPopoverConfetti()
         startedPopover?.close()
         startedPopover = nil
+        startedPopoverAnchor?.close()
+        startedPopoverAnchor = nil
         startedPopoverContentView = nil
         startedPopoverCelebrationButton = nil
     }
@@ -9898,17 +10035,29 @@ final class OnboardingPrimaryButton: NSButton {
         // A failed or timed-out check is unknown, never a cached grant.
         accessibilityPermissionMissing = snapshot?.accessibilityGranted != true
         inputMonitoringPermissionMissing = snapshot?.inputMonitoringGranted != true
+        permissionRecovery.observeAuthorization(snapshot)
+        if snapshot?.allGranted == false {
+            UserDefaults.standard.removeObject(forKey: Self.automaticPermissionRelaunchAttemptedKey)
+            if completedPermissionOnboarding {
+                // Keep the confirmation across macOS's own Quit & Reopen flow,
+                // not just relaunches initiated by DockAway.
+                UserDefaults.standard.set(true, forKey: Self.permissionRecoveryPendingKey)
+            }
+        }
+        if snapshot?.allGranted != true {
+            permissionRecovery.cancel()
+            cancelAutomaticPermissionRelaunch()
+        }
+        if let snapshot, !snapshot.allGranted {
+            // Drop obsolete runtime grants. Setup or external recovery can
+            // reacquire them through a new serialized local capability check.
+            runtimePermissionAccess.invalidate()
+        }
         refreshGreenButtonFillController()
         refreshDockIconClickMinimizeController()
         refreshChromiumWebAppPlacementController()
         refreshFinderDeleteKeyController()
         refreshHoverActivationController()
-        if let snapshot, !snapshot.allGranted {
-            // Drop obsolete runtime grants. Continue can reacquire them with
-            // a new serialized local check, or use a restart as a fallback.
-            runtimePermissionAccess.invalidate()
-        }
-
         if !accessibilityAccessGranted || !inputMonitoringAccessGranted {
             fourFingersDown = false
             fourFingerStartedInMissionControl = false
@@ -9917,6 +10066,28 @@ final class OnboardingPrimaryButton: NSButton {
         }
         renderPermissionSetupState()
         updateDockAwayMenuState()
+
+        if completedPermissionOnboarding, snapshot?.allGranted == true,
+           !permissionContinuePending, !permissionRelaunchScheduled,
+           automaticSuspensionReasons.isEmpty, !dockSettingsRestartInProgress {
+            // A system grant is not onboarding completion. Existing users only
+            // need a capability handoff, including when Settings was opened
+            // independently or the app was launched before access was restored.
+            if runtimePermissionAccess.isChecking || permissionRecovery.isRecovering { return }
+            if permissionRestartRequired {
+                permissionSetupRequested = false
+                recoverPermissionsWithoutOnboarding(snapshot)
+                return
+            }
+            if permissionSetupInProgress || UserDefaults.standard.bool(forKey: Self.permissionRecoveryPendingKey) {
+                if permissionSetupInProgress {
+                    dismissPermissionSetup(preservingPermissionState: true)
+                }
+                permissionSetupRequested = false
+                completePermissionSetup(forceStartedPopover: true, restarted: true)
+                return
+            }
+        }
 
         if permissionSetupRequested {
             if snapshot?.allGranted == true, runtimePermissionAccess.isChecking {
@@ -9938,8 +10109,70 @@ final class OnboardingPrimaryButton: NSButton {
         if monitoringShouldRun, dockWatcher?.isRunning != true {
             startMonitoringIfAllowed(resetState: true)
         }
+        // Also retries a deferred launch after unlock or restored permissions.
+        // Once consumed, routine health checks and Resume never restart Dock.
+        startupDockRestart.requestIfReady()
         if previouslyGranted, let snapshot, !snapshot.allGranted {
             showPermissionRevokedPopover()
+        }
+    }
+
+    private func recoverPermissionsWithoutOnboarding(_ authorization: PermissionSnapshot?) {
+        guard let generation = permissionRecovery.begin(
+            authorization: authorization,
+            setupCompleted: UserDefaults.standard.bool(forKey: Self.permissionSetupCompletedKey),
+            onboardingRequired: MajorReleaseOnboarding.needsPresentation()
+        ) else { return }
+        UserDefaults.standard.set(true, forKey: Self.permissionRecoveryPendingKey)
+        if permissionSetupInProgress {
+            dismissPermissionSetup(preservingPermissionState: true)
+        }
+        updateDockAwayMenuState()
+        dockAwayDebugLog("Rechecking runtime access after permissions were restored externally")
+        runtimePermissionAccess.refresh { [weak self] in
+            guard let self, self.isPermissionRecoveryCurrent(generation) else { return }
+            self.confirmAutomaticPermissionRecovery(generation: generation)
+        }
+    }
+
+    private func isPermissionRecoveryCurrent(_ generation: Int) -> Bool {
+        permissionRecovery.isCurrent(generation) && !isQuitting
+            && !permissionContinuePending && !permissionRelaunchScheduled
+            && automaticSuspensionReasons.isEmpty && completedPermissionOnboarding
+    }
+
+    private func confirmAutomaticPermissionRecovery(generation: Int, initializationFailed: Bool = false) {
+        // Authorization may have changed while the local system call ran.
+        permissionMonitor.refresh(force: true) { [weak self] authorization in
+            guard let self, self.isPermissionRecoveryCurrent(generation) else { return }
+            let decision = PermissionCompletionDecision.decide(
+                authorization: authorization,
+                runtime: initializationFailed ? nil : self.runtimePermissionAccess.snapshot
+            )
+            switch decision {
+            case .remainInSetup:
+                self.permissionRecovery.cancel()
+            case .continueInPlace:
+                self.startMonitoringIfAllowed(resetState: true)
+                // A user-paused app stays paused. Otherwise verify monitoring
+                // actually started before reporting that recovery succeeded.
+                guard !self.dockAwayEnabled || self.dockWatcher?.isRunning == true else {
+                    self.confirmAutomaticPermissionRecovery(generation: generation, initializationFailed: true)
+                    return
+                }
+                self.permissionRecovery.finish(generation: generation)
+                self.completePermissionSetup(forceStartedPopover: true, restarted: true)
+                dockAwayDebugLog("Permission access restored in place without onboarding")
+            case .restart:
+                self.permissionRecovery.finish(generation: generation)
+                let defaults = UserDefaults.standard
+                defaults.set(true, forKey: Self.automaticPermissionRelaunchAttemptedKey)
+                defaults.set(true, forKey: Self.showStartedPopoverAfterRelaunchKey)
+                defaults.set(true, forKey: Self.showRestartedPopoverAfterRelaunchKey)
+                self.scheduleRelaunchAfterPermissionSetup(automaticRecovery: true)
+                dockAwayDebugLog("Permission access requires one automatic DockAway relaunch")
+            }
+            self.updateDockAwayMenuState()
         }
     }
 
@@ -9975,6 +10208,7 @@ final class OnboardingPrimaryButton: NSButton {
         // A failed protected operation is a reason to revalidate, not permission
         // to publish a cached API result as the System Settings switch state.
         runtimePermissionAccess.invalidate()
+        permissionRecovery.cancel()
         fourFingersDown = false
         fourFingerStartedInMissionControl = false
         dockWatcher?.stop()
@@ -10101,13 +10335,17 @@ final class OnboardingPrimaryButton: NSButton {
         // when a managed preference or unsafe process fails synchronously.
         DockLifecycleRunLoop.perform { [weak self] in
             guard let self else { sender.reply(toApplicationShouldTerminate: true); return }
-            self.quitDockRestoration.restore(reloadPreferences: reloadPreferences) { [weak self] error in
+            // Do not fire-and-forget after process exit: save the intended
+            // quit state, restart only our Dock, and verify its replacement
+            // before replying to AppKit. Internal permission handoffs skip it.
+            dockAwayDebugLog("Restarting native Dock before quitting")
+            self.quitDockRestoration.restore(reloadPreferences: reloadPreferences, forceRestart: true) { [weak self] error in
                 if let error {
                     Logger(subsystem: "AK.DockAway", category: "DockQuit")
                         .error("Dock restoration failed: \(error, privacy: .public)")
                 }
                 self?.quitRestorationCompleted = true
-                dockAwayDebugLog(error == nil ? "Dock visibility verified before quitting" : "Dock restoration failed before quitting")
+                dockAwayDebugLog(error == nil ? "Dock restarted and visibility verified before quitting" : "Dock restoration failed before quitting")
                 sender.reply(toApplicationShouldTerminate: true)
             }
         }

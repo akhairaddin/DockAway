@@ -80,19 +80,78 @@ enum PermissionCompletionDecision: Equatable {
     }
 }
 
+// MARK: - Recovery after external permission changes
+
+// One recovery attempt per observed grant. A persisted relaunch latch also
+// prevents the replacement process from restarting again if access still fails.
+struct PermissionRecoveryState {
+    private(set) var generation = 0
+    private(set) var isRecovering = false
+    private var attemptedForCurrentGrant: Bool
+
+    init(relaunchAlreadyAttempted: Bool = false) {
+        attemptedForCurrentGrant = relaunchAlreadyAttempted
+    }
+
+    mutating func observeAuthorization(_ snapshot: PermissionSnapshot?) {
+        guard snapshot?.allGranted == false else { return }
+        cancel()
+        attemptedForCurrentGrant = false
+    }
+
+    mutating func begin(
+        authorization: PermissionSnapshot?,
+        setupCompleted: Bool,
+        onboardingRequired: Bool
+    ) -> Int? {
+        guard setupCompleted, !onboardingRequired,
+              authorization?.allGranted == true,
+              !isRecovering, !attemptedForCurrentGrant else { return nil }
+        generation += 1
+        isRecovering = true
+        attemptedForCurrentGrant = true
+        return generation
+    }
+
+    func isCurrent(_ generation: Int) -> Bool {
+        self.generation == generation && isRecovering
+    }
+
+    @discardableResult
+    mutating func finish(generation: Int) -> Bool {
+        guard isCurrent(generation) else { return false }
+        isRecovering = false
+        return true
+    }
+
+    mutating func cancel() {
+        // An interrupted check is not a completed attempt. A completed failed
+        // attempt stays latched until denial or an explicit user retry.
+        if isRecovering { attemptedForCurrentGrant = false }
+        generation += 1
+        isRecovering = false
+    }
+
+    mutating func allowRetry() {
+        cancel()
+        attemptedForCurrentGrant = false
+    }
+}
+
 // MARK: - Current-process access
 
 // Current-process permission checks can block inside the system framework.
 // Sample off the main thread, separately from fresh-process observations.
-// Continue can explicitly resample, but system calls never overlap, even after
-// a timeout or cancellation. Background polling never invokes this sampler.
+// Continue or a newly observed authorization grant can resample, but system
+// calls never overlap, even after a timeout or cancellation. Steady-state
+// background polling never invokes this sampler.
 @MainActor
 final class RuntimePermissionAccess {
     private var state = PermissionProbeState()
     private var hasStarted = false
     private var workerGeneration: Int?
     private var pendingSample = false
-    private var timeoutWork: DispatchWorkItem?
+    private var timeoutTimer: Timer?
     private var completion: (() -> Void)?
     private let readAccess: @Sendable () -> (Bool, Bool)
     private let timeout: TimeInterval
@@ -122,11 +181,16 @@ final class RuntimePermissionAccess {
         let generation = state.begin(
             now: ProcessInfo.processInfo.systemUptime, timeout: timeout
         )
-        let work = DispatchWorkItem { [weak self] in
-            self?.finish(generation: generation, snapshot: nil)
+        let timer = Timer(timeInterval: max(0, timeout), repeats: false) { [weak self] _ in
+            // This timer is registered exclusively on the main run loop.
+            MainActor.assumeIsolated {
+                self?.finish(generation: generation, snapshot: nil)
+            }
         }
-        timeoutWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, timeout), execute: work)
+        timeoutTimer = timer
+        for mode: RunLoop.Mode in [.default, .eventTracking, .modalPanel] {
+            RunLoop.main.add(timer, forMode: mode)
+        }
         pendingSample = true
         launchPendingSample()
     }
@@ -139,15 +203,20 @@ final class RuntimePermissionAccess {
         let readAccess = self.readAccess
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let access = readAccess()
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.workerGeneration = nil
-                let snapshot = PermissionSnapshot(
-                    accessibilityGranted: access.0,
-                    inputMonitoringGranted: access.1
-                )
-                self.finish(generation: generation, snapshot: snapshot)
-                self.launchPendingSample()
+            let completedAt = ProcessInfo.processInfo.systemUptime
+            // Native menu tracking must not defer a completed capability read
+            // onto the default main queue and turn delivery latency into denial.
+            RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.workerGeneration = nil
+                    let snapshot = PermissionSnapshot(
+                        accessibilityGranted: access.0,
+                        inputMonitoringGranted: access.1
+                    )
+                    self.finish(generation: generation, snapshot: snapshot, completedAt: completedAt)
+                    self.launchPendingSample()
+                }
             }
         }
     }
@@ -158,19 +227,19 @@ final class RuntimePermissionAccess {
         hasStarted = true
         pendingSample = false
         state.invalidate()
-        timeoutWork?.cancel()
-        timeoutWork = nil
+        timeoutTimer?.invalidate()
+        timeoutTimer = nil
         completion = nil
     }
 
-    private func finish(generation: Int, snapshot: PermissionSnapshot?) {
+    private func finish(generation: Int, snapshot: PermissionSnapshot?, completedAt: TimeInterval? = nil) {
         guard state.complete(
             generation: generation,
             snapshot: snapshot,
-            now: ProcessInfo.processInfo.systemUptime
+            now: completedAt ?? ProcessInfo.processInfo.systemUptime
         ) else { return }
-        timeoutWork?.cancel()
-        timeoutWork = nil
+        timeoutTimer?.invalidate()
+        timeoutTimer = nil
         pendingSample = false
         let callback = completion
         completion = nil
