@@ -227,7 +227,7 @@ final class DockSettingPersistenceRowView: NSView {
             checkbox.setButtonType(.momentaryChange)
             checkbox.image = NSImage(
                 systemSymbolName: "arrow.counterclockwise",
-                accessibilityDescription: "Restore Default macOS Dock"
+                accessibilityDescription: "Restore Default macOS Dock Settings"
             )?.withSymbolConfiguration(
                 NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
             )

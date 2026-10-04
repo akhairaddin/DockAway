@@ -9,19 +9,23 @@
     </style>
 </head>
 <body>
-    <h3>Version 2.1 <span style="font-weight: normal;">(10-3-26)</span></h3>
+    <h3>Version 2.1 <span style="font-weight: normal;">(10-4-26)</span></h3>
     <h4>New Features</h4>
     <ul>
-        <li><b>Restart Dock:</b> Restart an unresponsive macOS Dock from DockAway Settings &gt; Advanced without resetting your Dock preferences. Only your current login's Dock is restarted. DockAway pauses its Dock monitoring during the restart and resumes when the replacement is ready.</li>
+        <li><b>Cycle App Windows:</b> A new option in Dock Preferences &gt; Dock Icon Actions brings the active app's next window forward with each Dock click. Cycles non-minimized windows on the current desktop in a stable order, across displays, without resizing or minimizing them.</li>
+        <li><b>Restart Dock:</b> Restart an unresponsive macOS Dock from the bottom of Dock Preferences without resetting your Dock preferences. Only your current login's Dock is restarted. DockAway pauses its Dock monitoring during the restart and resumes when the replacement is ready. Rich help explains when to use it.</li>
         <li><b>Draggable Onboarding Icon:</b> Drag the DockAway icon from onboarding into a permission list in System Settings to add the app. A normal click still plays the shine animation.</li>
     </ul>
     <h4>Improvements</h4>
     <ul>
-        <li>No entries recorded for this release.</li>
+        <li><b>Startup Confetti Cooldown:</b> Each confetti click resets a 3.5-second dismissal countdown for the startup confirmation. Holding the button pauses the countdown, and clicking outside still dismisses it immediately.</li>
+        <li><b>Minor Renames:</b> Made minor wording changes to menu labels for clarity.</li>
     </ul>
     <h4>Bug Fixes</h4>
     <ul>
         <li><b>No Gap After the Dock Hides:</b> Fixed an intermittent bottom gap when opening an app from the Dock on an empty desktop. Windows sized to fill the area above the visible Dock now extend into the space it frees when hiding, including delayed launches and restored windows. Smaller windows and manual window sizing are preserved.</li>
+        <li><b>Dock Visibility on Quit:</b> Quitting now verifies that the macOS Dock is shown before DockAway exits. If the normal visibility shortcut does not restore it, DockAway saves the shown state and safely restarts only your login's Dock. Your Dock preference persistence choices are preserved.</li>
+        <li><b>Menu Bar Desktop Indicator:</b> The indicator refreshes automatically after switching desktops to address cases where it disappears on a desktop while DockAway's menu remains accessible through its keyboard shortcut.</li>
         <li><b>Uninterrupted Icon Shines:</b> Clicking the onboarding icon plays a complete shine. Additional clicks during the animation are ignored, so the sweep finishes without restarting or queuing extra shines.</li>
     </ul>
     <hr>

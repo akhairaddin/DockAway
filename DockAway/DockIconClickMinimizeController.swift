@@ -22,12 +22,14 @@ private final class DockIconClickOperationToken: @unchecked Sendable {
 final class DockIconClickMinimizeController {
     static let preferenceKey = "minimizeDockIconOnClick"
     static let hidePreferenceKey = "hideDockIconAppOnClick"
+    static let cyclePreferenceKey = "cycleDockIconAppWindowsOnClick"
     static let dragThreshold: CGFloat = 6
 
     enum Mode: Equatable {
         case disabled
         case minimize
         case hide
+        case cycle
     }
 
     enum ClickAction: Equatable {
@@ -66,11 +68,18 @@ final class DockIconClickMinimizeController {
         var desiredMinimized: Bool
     }
 
+    private struct CycleWindowBatch {
+        let windows: [WindowReference]
+        let frontToBack: [CGWindowID]
+        let focusedWindowID: CGWindowID
+    }
+
     private enum PreparedAction {
         case minimize(ManagedWindowBatch)
         case restore(ManagedWindowBatch)
         case hide
         case unhide
+        case cycle(CycleWindowBatch)
     }
 
     private var eventTap: EventTap?
@@ -79,6 +88,7 @@ final class DockIconClickMinimizeController {
     private var operationTokens: [pid_t: DockIconClickOperationToken] = [:]
     private var desiredHiddenStates: [pid_t: Bool] = [:]
     private var hiddenStateGenerations: [pid_t: UInt] = [:]
+    private var windowCycles: [pid_t: DockAppWindowCycle] = [:]
     private(set) var mode: Mode = .disabled
     var onWillHideApplication: (() -> Void)?
     private let operationQueue = DispatchQueue(
@@ -101,7 +111,8 @@ final class DockIconClickMinimizeController {
         if newMode != .disabled { start() }
     }
 
-    static func mode(minimizeEnabled: Bool, hideEnabled: Bool) -> Mode {
+    static func mode(minimizeEnabled: Bool, hideEnabled: Bool, cycleEnabled: Bool = false) -> Mode {
+        if cycleEnabled { return .cycle }
         if hideEnabled { return .hide }
         if minimizeEnabled { return .minimize }
         return .disabled
@@ -118,6 +129,7 @@ final class DockIconClickMinimizeController {
         managedWindows.removeAll()
         desiredHiddenStates.removeAll()
         hiddenStateGenerations.removeAll()
+        windowCycles.removeAll()
         eventTap?.invalidate()
         eventTap = nil
     }
@@ -263,7 +275,62 @@ final class DockIconClickMinimizeController {
                 for: processIdentifier,
                 appWasFrontmost: appWasFrontmost
             )
+        case .cycle:
+            return prepareCycleAction(for: processIdentifier, appWasFrontmost: appWasFrontmost)
         }
+    }
+
+    private func prepareCycleAction(for processIdentifier: pid_t,
+                                    appWasFrontmost: Bool) -> PreparedAction? {
+        // Keep native launch, activation, unhide and single-window behavior.
+        guard appWasFrontmost else { return nil }
+        let frontToBack = Self.onScreenWindowIDs(processIdentifier: processIdentifier,
+                                               preservingMissionControl: true)
+        guard frontToBack.count > 1 else { return nil }
+        let visibleIDs = Set(frontToBack)
+        let application = AXUIElementCreateApplication(processIdentifier)
+        // The event tap must not spend an unbounded time querying a slow app.
+        let budget = AccessibilityRequestBudget(seconds: 0.08, messageLimit: 0.015)
+        guard let windows = budget.perform(on: application, {
+            application.elements(kAXWindowsAttribute)
+        }) ?? nil else { return nil }
+
+        var eligible: [WindowReference] = []
+        for window in windows {
+            guard !budget.expired else { return nil }
+            guard let windowID = budget.perform(on: window, { window.windowID }) ?? nil,
+                  visibleIDs.contains(windowID),
+                  budget.string(kAXRoleAttribute, of: window) == kAXWindowRole,
+                  budget.string(kAXSubroleAttribute, of: window) == kAXStandardWindowSubrole,
+                  budget.perform(on: window, { window.bool(kAXMinimizedAttribute) }) == false,
+                  budget.perform(on: window, { window.bool("AXFullScreen") }) != true
+            else { continue }
+            var actions: CFArray?
+            guard budget.perform(on: window, {
+                AXUIElementCopyActionNames(window, &actions)
+            }) == .success,
+            (actions as? [String])?.contains(kAXRaiseAction) == true else { continue }
+            eligible.append(WindowReference(element: window, windowID: windowID))
+        }
+        guard !budget.expired, eligible.count > 1 else { return nil }
+        let eligibleIDs = Set(eligible.map(\.windowID))
+        let focusedWindow = budget.element(kAXFocusedWindowAttribute, of: application)
+            ?? budget.element(kAXMainWindowAttribute, of: application)
+        let focusedID: CGWindowID?
+        if let focusedWindow {
+            guard budget.perform(on: focusedWindow, { focusedWindow.bool(kAXModalAttribute) }) != true,
+                  !Self.hasAttachedSheet(focusedWindow, budget: budget)
+            else { return nil }
+            focusedID = budget.perform(on: focusedWindow, { focusedWindow.windowID }) ?? nil
+            // Do not raise a different window behind a modal authentication or
+            // document dialog that currently owns the application's focus.
+            guard let focusedID, eligibleIDs.contains(focusedID) else { return nil }
+        } else {
+            focusedID = frontToBack.first(where: { eligibleIDs.contains($0) })
+        }
+        guard !budget.expired, let focusedID else { return nil }
+        return .cycle(CycleWindowBatch(windows: eligible,
+            frontToBack: frontToBack.filter { eligibleIDs.contains($0) }, focusedWindowID: focusedID))
     }
 
     private func prepareHideAction(
@@ -356,6 +423,9 @@ final class DockIconClickMinimizeController {
 
     private func commit(_ action: PreparedAction, processIdentifier: pid_t) {
         switch action {
+        case .cycle(let batch):
+            cycleWindows(batch, processIdentifier: processIdentifier)
+
         case .hide:
             setApplicationHidden(true, processIdentifier: processIdentifier)
 
@@ -380,6 +450,68 @@ final class DockIconClickMinimizeController {
                 processIdentifier: processIdentifier
             )
             pruneFinishedApplicationsIfNeeded()
+        }
+    }
+
+    private func cycleWindows(_ batch: CycleWindowBatch, processIdentifier: pid_t) {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier else { return }
+        var cycle = windowCycles[processIdentifier] ?? DockAppWindowCycle()
+        guard let nextID = cycle.nextWindow(availableWindowIDs: batch.frontToBack,
+            focusedWindowID: batch.focusedWindowID,
+            operationInFlight: operationTokens[processIdentifier] != nil),
+            let window = batch.windows.first(where: { $0.windowID == nextID }) else { return }
+        windowCycles[processIdentifier] = cycle
+        operationTokens.removeValue(forKey: processIdentifier)?.cancel()
+        let token = DockIconClickOperationToken()
+        operationTokens[processIdentifier] = token
+        pruneFinishedApplicationsIfNeeded()
+
+        operationQueue.async { [weak self] in
+            let budget = AccessibilityRequestBudget(seconds: 0.25, messageLimit: 0.05)
+            let application = AXUIElementCreateApplication(processIdentifier)
+            let focused = budget.element(kAXFocusedWindowAttribute, of: application)
+                ?? budget.element(kAXMainWindowAttribute, of: application)
+            let modalBlocksCycle: Bool
+            if let focused {
+                modalBlocksCycle = budget.string(kAXSubroleAttribute, of: focused) != kAXStandardWindowSubrole
+                    || budget.perform(on: focused, { focused.bool(kAXModalAttribute) }) == true
+                    || Self.hasAttachedSheet(focused, budget: budget)
+            } else {
+                modalBlocksCycle = false
+            }
+            // The window may have closed or been minimized during mouse tracking.
+            let valid = !token.isCancelled
+                && !modalBlocksCycle
+                && Self.onScreenWindowIDs(processIdentifier: processIdentifier,
+                                          preservingMissionControl: true).contains(nextID)
+                && budget.perform(on: window.element, { window.element.bool(kAXMinimizedAttribute) }) == false
+                && budget.perform(on: window.element, { window.element.bool("AXFullScreen") }) != true
+                && !budget.expired
+            var raised = false
+            if valid, !token.isCancelled {
+                _ = budget.perform(on: application) {
+                    AXUIElementSetAttributeValue(application, kAXFocusedWindowAttribute as CFString,
+                                                 window.element)
+                }
+                guard !token.isCancelled else { return }
+                _ = budget.perform(on: window.element) {
+                    AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+                }
+                guard !token.isCancelled else { return }
+                raised = budget.perform(on: window.element) {
+                    AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
+                } == .success
+            }
+            let succeeded = raised
+            DispatchQueue.main.async {
+                guard let self, self.operationTokens[processIdentifier] === token,
+                      !token.isCancelled else { return }
+                self.operationTokens.removeValue(forKey: processIdentifier)
+                self.windowCycles[processIdentifier]?.finished(windowID: nextID)
+                if !succeeded {
+                    dockAwayDebugLog("Dock icon window cycle failed pid=\(processIdentifier) window=\(nextID)")
+                }
+            }
         }
     }
 
@@ -433,6 +565,11 @@ final class DockIconClickMinimizeController {
     }
 
     private func pruneFinishedApplicationsIfNeeded() {
+        if windowCycles.count > 24 {
+            windowCycles = windowCycles.filter {
+                NSRunningApplication(processIdentifier: $0.key)?.isTerminated == false
+            }
+        }
         guard managedWindows.count > 24 else { return }
         managedWindows = managedWindows.filter {
             NSRunningApplication(processIdentifier: $0.key)?.isTerminated == false
@@ -573,16 +710,36 @@ final class DockIconClickMinimizeController {
         }
     }
 
-    private static func onScreenWindowIDs(processIdentifier: pid_t) -> [CGWindowID] {
+    nonisolated private static func onScreenWindowIDs(processIdentifier: pid_t,
+                                                       preservingMissionControl: Bool = false) -> [CGWindowID] {
         guard let windows = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else { return [] }
+        if preservingMissionControl, windows.contains(where: {
+            ($0[kCGWindowOwnerName as String] as? String) == "WindowManager"
+                && ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 14
+        }) {
+            return [] // Keep the Dock's native Mission Control exit behavior.
+        }
         return windows.compactMap { window in
             guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == processIdentifier,
                   (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 else { return nil }
+            guard (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue != 0 else { return nil }
             return (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value
         }
+    }
+
+    nonisolated private static func hasAttachedSheet(_ window: AXUIElement,
+                                                     budget: AccessibilityRequestBudget) -> Bool {
+        guard let children = budget.perform(on: window, {
+            window.elements(kAXChildrenAttribute)
+        }) ?? nil else { return budget.expired }
+        for child in children {
+            guard !budget.expired else { return true }
+            if budget.string(kAXRoleAttribute, of: child) == kAXSheetRole { return true }
+        }
+        return budget.expired
     }
 
     /// Empty frames cannot contain a click, so treat them as unreadable.

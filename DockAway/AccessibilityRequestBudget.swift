@@ -3,7 +3,9 @@ import AppKit
 
 /// A cooperative deadline for a sequence of synchronous AX messages. macOS can
 /// overrun a requested timeout, so this is not a hard real-time guarantee.
-struct AccessibilityRequestBudget {
+// This value owns no UI state. Each operation creates its own budget, whether
+// it runs in the event tap or on a background Accessibility work queue.
+nonisolated struct AccessibilityRequestBudget {
     private let deadline: TimeInterval
     private let clock: () -> TimeInterval
     private let messageLimit: TimeInterval

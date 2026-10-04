@@ -2790,7 +2790,8 @@ final class DockWatcher {
         evaluateFrontmostApp(quiet: false)
     }
 
-    func simulateOptionCommandDPublic() {
+    @discardableResult
+    func simulateOptionCommandDPublic() -> Bool {
         simulateOptionCommandD()
     }
 
