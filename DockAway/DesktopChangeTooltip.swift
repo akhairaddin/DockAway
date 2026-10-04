@@ -123,11 +123,17 @@ final class DesktopChangeTooltip: NSObject {
 
     static var isDisplayUnderneath: Bool {
         get {
-            UserDefaults.standard.bool(forKey: displayUnderneathPreferenceKey)
+            prefersDisplayNameUnderneath()
         }
         set {
             UserDefaults.standard.set(newValue, forKey: displayUnderneathPreferenceKey)
         }
+    }
+
+    static func prefersDisplayNameUnderneath(in defaults: UserDefaults = .standard) -> Bool {
+        // Stacked labels are the default, but an explicit off choice survives
+        // relaunches and toggling the desktop-change tooltip itself.
+        defaults.object(forKey: displayUnderneathPreferenceKey) as? Bool ?? true
     }
 
     private var tracker = DesktopChangeTracker()

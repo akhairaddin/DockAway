@@ -4,6 +4,7 @@ import OSLog
 /// Restores the current login's Dock before AppKit completes termination.
 /// The shortcut is tried only once. Failed restoration uses an idempotent
 /// preference write and a verified, current-user-only native Dock restart.
+/// Normal quits can require that restart even when the Dock is already shown.
 @MainActor
 final class DockQuitRestoration {
     struct State {
@@ -18,6 +19,7 @@ final class DockQuitRestoration {
         var restart: (@escaping (String?) -> Void) -> Bool
         var now: () -> TimeInterval
         var schedule: (TimeInterval, @escaping @MainActor () -> Void) -> Void
+        var restartInProgress: () -> Bool = { false }
 
         @MainActor static func live(sendShortcut: @escaping () -> Bool,
                          restarter: DockRestartController,
@@ -48,7 +50,7 @@ final class DockQuitRestoration {
             }, restart: { restarter.restart(completion: $0) },
                 now: { ProcessInfo.processInfo.systemUptime }, schedule: { delay, work in
                     DockLifecycleRunLoop.schedule(after: delay, work)
-                })
+                }, restartInProgress: { restarter.isRestarting })
         }
     }
 
@@ -60,7 +62,8 @@ final class DockQuitRestoration {
     init(environment: Environment) { self.environment = environment }
 
     @discardableResult
-    func restore(reloadPreferences: Bool = false, completion: @escaping (String?) -> Void) -> Bool {
+    func restore(reloadPreferences: Bool = false, forceRestart: Bool = false,
+                 completion: @escaping (String?) -> Void) -> Bool {
         guard !isRestoring else { return false }
         isRestoring = true
         generation += 1
@@ -87,25 +90,38 @@ final class DockQuitRestoration {
             self.environment.schedule(0.05) { verifyAfterRestart(until: deadline) }
         }
 
-        func fallback() {
-            guard !fallbackStarted else { return }
-            fallbackStarted = true
-            stableReads = 0
+        func restartWhenIdle() {
+            guard self.isRestoring, self.generation == operation else { return }
+            // Quit can arrive while the startup/manual restarter is waiting for
+            // launchd. Finish that operation before replacing its new Dock.
+            guard !self.environment.restartInProgress() else {
+                self.environment.schedule(0.05, restartWhenIdle)
+                return
+            }
             guard self.environment.persistShown() else {
                 finish("DockAway could not save the shown Dock state. The setting may be managed by macOS.")
                 return
             }
             self.logger.notice("Reloading the current login's Dock before quitting")
-            // Include a watchdog even if a dependency fails to call back.
-            self.environment.schedule(12) {
-                finish("The Dock took too long to restore before quitting.")
-            }
             let accepted = self.environment.restart { error in
                 guard self.isRestoring, self.generation == operation else { return }
                 if let error { finish(error); return }
                 verifyAfterRestart(until: self.environment.now() + 1)
             }
             if !accepted { finish("DockAway could not start a safe Dock restart before quitting.") }
+        }
+
+        func fallback() {
+            guard !fallbackStarted else { return }
+            fallbackStarted = true
+            stableReads = 0
+            // Existing restarts are bounded at ten seconds. Allow time for one
+            // such operation, our restart, and verification, without hanging
+            // termination if a dependency never calls back.
+            self.environment.schedule(self.environment.restartInProgress() ? 22 : 12) {
+                finish("The Dock took too long to restore before quitting.")
+            }
+            restartWhenIdle()
         }
 
         func verifyShortcut() {
@@ -121,7 +137,7 @@ final class DockQuitRestoration {
             self.environment.schedule(0.05, verifyShortcut)
         }
 
-        if reloadPreferences {
+        if reloadPreferences || forceRestart {
             fallback()
         } else {
             let state = environment.read()

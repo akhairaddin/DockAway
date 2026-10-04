@@ -1,5 +1,43 @@
 import AppKit
 
+private final class PopoverAnchorPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+/// A status item's system-owned window can disappear or be replaced while
+/// AppKit refreshes the menu bar. NSPopover closes when its anchor goes away,
+/// independently of our idle deadline. Keep the same screen position using
+/// an app-owned, invisible, non-interactive anchor instead.
+@MainActor
+final class PopoverPresentationAnchor {
+    let view: NSView
+    private let panel: NSPanel
+
+    init?(positioningView: NSView) {
+        guard let sourceWindow = positioningView.window,
+              sourceWindow.isVisible else { return nil }
+        let rect = sourceWindow.convertToScreen(positioningView.convert(positioningView.bounds, to: nil))
+        guard rect.width > 0, rect.height > 0 else { return nil }
+        panel = PopoverAnchorPanel(contentRect: rect,
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        view = NSView(frame: NSRect(origin: .zero, size: rect.size))
+        panel.contentView = view
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = true
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.animationBehavior = .none
+        panel.level = sourceWindow.level
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        panel.orderFrontRegardless()
+    }
+
+    func close() { panel.orderOut(nil) }
+}
+
 /// One idle deadline, restarted by each interaction rather than queued.
 @MainActor
 final class PopoverInteractionCooldown {

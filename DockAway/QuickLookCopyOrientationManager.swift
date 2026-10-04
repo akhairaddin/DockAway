@@ -8,13 +8,17 @@ import UniformTypeIdentifiers
 @MainActor
 final class QuickLookCopyOrientationManager {
     static let preferenceKey = "correctQuickLookCopyOrientation"
+    private static let imagePayloadTypes: [NSPasteboard.PasteboardType] = [
+        .png, .tiff, .init(UTType.jpeg.identifier), .init(UTType.heic.identifier)
+    ]
 
-    private struct CopySource: @unchecked Sendable {
+    struct CopySource: @unchecked Sendable {
         let url: URL?
         let data: Data?
+        var copiedImageData: Data? = nil
     }
 
-    private struct CorrectedRepresentations: @unchecked Sendable {
+    struct CorrectedRepresentations: @unchecked Sendable {
         let png: Data
         let tiff: Data
     }
@@ -22,6 +26,7 @@ final class QuickLookCopyOrientationManager {
     private var timer: Timer?
     private var lastPasteboardChangeCount = NSPasteboard.general.changeCount
     private var quickLookWasVisibleUntil = Date.distantPast
+    private var previewedFileURL: URL?
     private var nextQuickLookSampleAt: TimeInterval = 0
     private var correctionGeneration: UInt = 0
     private var isWritingPasteboard = false
@@ -35,6 +40,7 @@ final class QuickLookCopyOrientationManager {
         timer?.invalidate()
         timer = nil
         quickLookWasVisibleUntil = .distantPast
+        previewedFileURL = nil
         nextQuickLookSampleAt = 0
         isWritingPasteboard = false
     }
@@ -68,41 +74,55 @@ final class QuickLookCopyOrientationManager {
         guard changeCount != lastPasteboardChangeCount else { return }
         lastPasteboardChangeCount = changeCount
         // A copy made right after Quick Look opened can land between samples.
-        if finderOwnsFrontmostUI, !sampledQuickLook, Date() > quickLookWasVisibleUntil {
+        let containsImage = pasteboard.types?.contains {
+            Self.imagePayloadTypes.contains($0)
+        } == true
+        if containsImage, !sampledQuickLook {
             sampleQuickLookVisibility(now: now)
+        }
+        if containsImage {
+            dockAwayDebugLog("Quick Look image clipboard change; previewRecentlyVisible=\(Date() <= quickLookWasVisibleUntil); FinderFrontmost=\(finderOwnsFrontmostUI)")
         }
 
         guard !isWritingPasteboard,
               Date() <= quickLookWasVisibleUntil,
               let source = Self.copySource(
                 from: pasteboard,
-                preferredFileURL: Self.finderSelectedImageURL()
+                preferredFileURL: previewedFileURL ?? Self.finderSelectedImageURL()
               ) else { return }
 
+        dockAwayDebugLog("Quick Look image copy detected; source=\(source.url?.lastPathComponent ?? "clipboard metadata")")
         correctionGeneration &+= 1
         let generation = correctionGeneration
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let corrected = Self.correctedRepresentations(from: source) else { return }
-            DispatchQueue.main.async {
+            RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) {
                 MainActor.assumeIsolated {
                     guard let self,
                           self.timer != nil,
                           self.correctionGeneration == generation,
                           NSPasteboard.general.changeCount == changeCount else { return }
                     self.write(corrected)
+                    dockAwayDebugLog("Quick Look clipboard orientation correction completed")
                 }
             }
         }
     }
 
     /// Quick Look visibility costs Accessibility IPC into Finder, so it is
-    /// sampled less often than the pasteboard. The 0.6 s grace window, which
+    /// sampled less often than the pasteboard. The 2 s grace window, which
     /// keeps a copy associated with Quick Look if the panel dismisses as the
     /// pasteboard owner publishes its promised data, also spans the gap.
     private func sampleQuickLookVisibility(now: TimeInterval) {
         nextQuickLookSampleAt = now + 0.25
         if Self.finderQuickLookIsVisible() {
-            quickLookWasVisibleUntil = Date().addingTimeInterval(0.6)
+            if Date() > quickLookWasVisibleUntil {
+                dockAwayDebugLog("Finder Quick Look preview detected")
+            }
+            quickLookWasVisibleUntil = Date().addingTimeInterval(2)
+            previewedFileURL = Self.finderSelectedImageURL()
+        } else if Date() > quickLookWasVisibleUntil {
+            previewedFileURL = nil
         }
     }
 
@@ -118,39 +138,51 @@ final class QuickLookCopyOrientationManager {
         lastPasteboardChangeCount = pasteboard.changeCount
         isWritingPasteboard = false
         quickLookWasVisibleUntil = .distantPast
+        previewedFileURL = nil
     }
 
-    private static func copySource(
+    static func copySource(
         from pasteboard: NSPasteboard,
         preferredFileURL: URL?
     ) -> CopySource? {
-        let imageTypes: [NSPasteboard.PasteboardType] = [.png, .tiff]
-        let copiedImageData = (pasteboard.pasteboardItems ?? []).lazy.compactMap { item in
+        let imageTypes = imagePayloadTypes
+        let imageItems = (pasteboard.pasteboardItems ?? []).filter { item in
+            item.types.contains { imageTypes.contains($0) }
+        }
+        // Finder file copies contain a file URL and its icon, not an image
+        // payload. Never turn those ordinary file copies into flattened images.
+        guard imageItems.count == 1 else { return nil }
+
+        // Resolve the preview's original BEFORE a clipboard-supplied file URL.
+        // Clipboard managers can attach a history file whose pixels already
+        // lost EXIF orientation. That cached file must not outrank the original.
+        // Retain the copied bitmap too, so the worker can verify that it really
+        // belongs to this preview before replacing it. This also protects an
+        // unrelated image copied after focus leaves Quick Look during the grace
+        // period, and prevents rotating a bitmap that is already upright.
+        let copiedImageData = imageItems.lazy.compactMap { item in
             imageTypes.lazy.compactMap { item.data(forType: $0) }.first
         }.first
+        guard let copiedImageData, imageSource(from: copiedImageData) != nil else {
+            return nil
+        }
+        if let preferredFileURL,
+           preferredFileURL.isFileURL,
+           imageSource(at: preferredFileURL) != nil {
+            return CopySource(url: preferredFileURL, data: nil,
+                              copiedImageData: copiedImageData)
+        }
 
         if let fileURL = (pasteboard.readObjects(
             forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]
         ) as? [URL])?.first,
            imageSource(at: fileURL) != nil {
-            return CopySource(url: fileURL, data: nil)
+            return CopySource(url: fileURL, data: nil,
+                              copiedImageData: copiedImageData)
         }
 
-        // Finder's Quick Look publishes a flattened PNG with no orientation
-        // metadata. Use the selected source file when available so ImageIO can
-        // apply its original EXIF/TIFF orientation instead of preserving the
-        // sideways Quick Look bitmap.
-        if copiedImageData != nil,
-           let preferredFileURL,
-           imageSource(at: preferredFileURL) != nil {
-            return CopySource(url: preferredFileURL, data: nil)
-        }
-
-        if let copiedImageData, imageSource(from: copiedImageData) != nil {
-            return CopySource(url: nil, data: copiedImageData)
-        }
-        return nil
+        return CopySource(url: nil, data: copiedImageData)
     }
 
     nonisolated static func normalizedPixelSize(forImageAt url: URL) -> CGSize? {
@@ -166,7 +198,7 @@ final class QuickLookCopyOrientationManager {
         return CGSize(width: width.doubleValue, height: height.doubleValue)
     }
 
-    private nonisolated static func correctedRepresentations(
+    nonisolated static func correctedRepresentations(
         from source: CopySource
     ) -> CorrectedRepresentations? {
         let imageSource: CGImageSource?
@@ -178,8 +210,12 @@ final class QuickLookCopyOrientationManager {
             return nil
         }
 
-        guard let imageSource,
-              CGImageSourceGetCount(imageSource) > 0,
+        guard let imageSource, CGImageSourceGetCount(imageSource) > 0 else { return nil }
+        if let copiedData = source.copiedImageData {
+            guard let copiedSource = self.imageSource(from: copiedData),
+                  rawPixelsMatch(imageSource, copiedSource) else { return nil }
+        }
+        guard
               let rawImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) else {
             return nil
         }
@@ -187,6 +223,7 @@ final class QuickLookCopyOrientationManager {
         let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil)
             as? [CFString: Any]
         let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.int32Value ?? 1
+        guard (1...8).contains(orientation) else { return nil }
         let orientedImage = CIImage(cgImage: rawImage).oriented(forExifOrientation: orientation)
         let extent = orientedImage.extent.integral
         guard !extent.isEmpty,
@@ -207,6 +244,55 @@ final class QuickLookCopyOrientationManager {
             return nil
         }
         return CorrectedRepresentations(png: png, tiff: tiff)
+    }
+
+    private nonisolated static func rawPixelsMatch(
+        _ original: CGImageSource,
+        _ copied: CGImageSource
+    ) -> Bool {
+        func dimensions(_ source: CGImageSource) -> CGSize? {
+            guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                    as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+                  let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+                return nil
+            }
+            return CGSize(width: width.doubleValue, height: height.doubleValue)
+        }
+        // Quick Look's broken copy preserves the raw dimensions and pixels,
+        // but strips their orientation. Check both without decoding two full
+        // photos. Never infer rotation just from portrait/landscape shape.
+        guard let size = dimensions(original), size == dimensions(copied) else {
+            return false
+        }
+        func fingerprint(_ source: CGImageSource) -> [UInt8]? {
+            guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: false,
+                kCGImageSourceThumbnailMaxPixelSize: 48
+            ] as CFDictionary),
+                  let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+            var pixels = [UInt8](repeating: 0, count: 48 * 48 * 4)
+            let rendered = pixels.withUnsafeMutableBytes { storage -> Bool in
+                guard let context = CGContext(data: storage.baseAddress,
+                    width: 48, height: 48, bitsPerComponent: 8, bytesPerRow: 48 * 4,
+                    space: colorSpace,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                    return false
+                }
+                context.draw(thumbnail, in: CGRect(x: 0, y: 0, width: 48, height: 48))
+                return true
+            }
+            return rendered ? pixels : nil
+        }
+        guard let first = fingerprint(original), let second = fingerprint(copied) else {
+            return false
+        }
+        let differences = zip(first, second).map { abs(Int($0) - Int($1)) }
+        // Allow minor JPEG/color-conversion differences, but require the same
+        // image content rather than merely matching its resolution.
+        return differences.reduce(0, +) < differences.count * 6
+            && differences.filter { $0 > 32 }.count < differences.count / 50
     }
 
     private nonisolated static func encodedData(
@@ -313,10 +399,14 @@ final class QuickLookCopyOrientationManager {
         if role == kAXOutlineRole as String
             || role == kAXListRole as String
             || role == "AXBrowser" {
-            let rows = element.elements(kAXRowsAttribute)
-                ?? element.elements(kAXChildrenAttribute)
-                ?? []
-            for row in rows where row.bool(kAXSelectedAttribute) == true {
+            let selectedChildren = element.elements(kAXSelectedChildrenAttribute) ?? []
+            let rows = selectedChildren.isEmpty
+                ? (element.elements(kAXRowsAttribute)
+                    ?? element.elements(kAXChildrenAttribute) ?? []).filter {
+                        $0.bool(kAXSelectedAttribute) == true
+                    }
+                : selectedChildren
+            for row in rows {
                 if let url = firstFileURL(in: row, depth: 0),
                    matchingFileName == nil || url.lastPathComponent == matchingFileName {
                     return url
@@ -395,6 +485,21 @@ final class QuickLookCopyOrientationManager {
     }
 
     private static func windows(of application: AXUIElement) -> [AXUIElement] {
-        application.elements(kAXWindowsAttribute) ?? []
+        // Finder can expose an empty AXWindows array while its real windows,
+        // including QLPreviewPanel, remain available through AXChildren.
+        // Prefer the focused window, then merge both public discovery paths.
+        var candidates: [AXUIElement] = []
+        if let focused = application.element(kAXFocusedWindowAttribute) {
+            candidates.append(focused)
+        }
+        candidates += application.elements(kAXWindowsAttribute) ?? []
+        candidates += (application.elements(kAXChildrenAttribute) ?? []).filter {
+            $0.string(kAXRoleAttribute) == kAXWindowRole as String
+        }
+        return candidates.reduce(into: []) { result, window in
+            if !result.contains(where: { CFEqual($0, window) }) {
+                result.append(window)
+            }
+        }
     }
 }
