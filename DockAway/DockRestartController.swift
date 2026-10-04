@@ -1,6 +1,39 @@
 import AppKit
 import Darwin
 
+/// AppKit waits for delayed termination in its modal run-loop mode, where a
+/// block queued on the main dispatch queue need not run. Native Dock lifecycle
+/// work must continue in that mode as well as during ordinary application use.
+enum DockLifecycleRunLoop {
+    nonisolated static func perform(_ work: @escaping @MainActor () -> Void) {
+        RunLoop.main.perform(inModes: [.common, .modalPanel]) {
+            MainActor.assumeIsolated { work() }
+        }
+    }
+
+    nonisolated static func schedule(after delay: TimeInterval, _ work: @escaping @MainActor () -> Void) {
+        perform {
+            let timer = Timer(timeInterval: max(0.001, delay), repeats: false) { _ in
+                MainActor.assumeIsolated { work() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            RunLoop.main.add(timer, forMode: .modalPanel)
+        }
+    }
+}
+
+@MainActor
+private final class DockLaunchCompletion {
+    private(set) var completed = false
+    private let completion: (Bool) -> Void
+    init(_ completion: @escaping (Bool) -> Void) { self.completion = completion }
+    func finish(_ succeeded: Bool) {
+        guard !completed else { return }
+        completed = true
+        completion(succeeded)
+    }
+}
+
 /// Restarts only the current user's native Dock. Dependencies are injectable
 /// so timeout and launchd recovery can be tested without touching real desktops.
 @MainActor
@@ -16,9 +49,9 @@ final class DockRestartController {
         var terminate: (pid_t) -> Bool
         var launchAgent: (@escaping (Bool) -> Void) -> Void
         var now: () -> TimeInterval
-        var schedule: (TimeInterval, @escaping () -> Void) -> Void
+        var schedule: (TimeInterval, @escaping @MainActor () -> Void) -> Void
 
-        static func live() -> Self {
+        @MainActor static func live() -> Self {
             Self(currentDock: {
                 for app in NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock") {
                     guard !app.isTerminated,
@@ -55,25 +88,20 @@ final class DockRestartController {
                 process.arguments = ["kickstart", "gui/\(geteuid())/com.apple.Dock.agent"]
                 process.standardOutput = FileHandle.nullDevice
                 process.standardError = FileHandle.nullDevice
-                var completed = false
-                func finish(_ succeeded: Bool) {
-                    guard !completed else { return }
-                    completed = true
-                    completion(succeeded)
-                }
+                let result = DockLaunchCompletion(completion)
                 process.terminationHandler = { child in
                     let succeeded = child.terminationStatus == 0
-                    DispatchQueue.main.async { finish(succeeded) }
+                    DockLifecycleRunLoop.perform { result.finish(succeeded) }
                 }
                 do { try process.run() }
-                catch { finish(false); return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    guard !completed else { return }
+                catch { result.finish(false); return }
+                DockLifecycleRunLoop.schedule(after: 2) {
+                    guard !result.completed else { return }
                     if process.isRunning { process.terminate() }
-                    finish(false)
+                    result.finish(false)
                 }
             }, now: { ProcessInfo.processInfo.systemUptime }, schedule: { delay, work in
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { work() }
+                DockLifecycleRunLoop.schedule(after: delay, work)
             })
         }
     }

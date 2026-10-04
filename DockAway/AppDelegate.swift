@@ -2777,8 +2777,24 @@ final class OnboardingPrimaryButton: NSButton {
 
     var isQuitting = false
     private var statusItem: NSStatusItem!
+    private var quitRestorationCompleted = false
+    private let quitDockRestartController = DockRestartController()
+    private lazy var quitDockRestoration = DockQuitRestoration(environment: .live(
+        sendShortcut: { [weak self] in self?.dockWatcher?.simulateOptionCommandDPublic() ?? false },
+        restarter: quitDockRestartController,
+        allowsFullscreenHiding: { [weak self] in self?.currentDesktopInfo().isFS == true }
+    ))
+    private lazy var statusItemSpaceRefresh = StatusItemSpaceRefresh(
+        canRefresh: { [weak self] in
+            guard let self else { return false }
+            return !self.isQuitting && !self.statusMenuIsOpen
+        },
+        refresh: { [weak self] in self?.repaintStatusItemAfterSpaceChange() }
+    )
     private var startedPopover: NSPopover?
-    private var startedPopoverCloseWorkItem: DispatchWorkItem?
+    private lazy var startedPopoverCooldown = PopoverInteractionCooldown { [weak self] in
+        self?.closeStartedPopover()
+    }
     private var startedPopoverLocalEventMonitor: Any?
     private var startedPopoverGlobalEventMonitor: Any?
     private weak var startedPopoverContentView: NSView?
@@ -2823,6 +2839,7 @@ final class OnboardingPrimaryButton: NSButton {
     private var restoreDockDefaultsRowView: DockSettingPersistenceRowView!
     private var dockIconClickMinimizeRowView: DockSettingPersistenceRowView?
     private var dockIconClickHideRowView: DockSettingPersistenceRowView?
+    private var dockIconClickCycleRowView: DockSettingPersistenceRowView?
     private var launchAtLoginRowView: DockSettingPersistenceRowView!
     private var dockSettingsRestartInProgress = false
     private var dockRestartGeneration = 0
@@ -2830,7 +2847,6 @@ final class OnboardingPrimaryButton: NSButton {
     private var dockRestartIsManual = false
     private weak var restartDockMenuItem: NSMenuItem?
     private weak var restartDockRowView: DockAwayMenuRowView?
-    private weak var advancedSettingsMenu: NSMenu?
     private var dockAwayStatusView: DockAwayStatusView!
     private var dockAwayEnabled = true
     private var activeStatusText = "Detecting…"
@@ -3042,6 +3058,7 @@ final class OnboardingPrimaryButton: NSButton {
             HoverActivationController.protectedBundleIdentifiersPreferenceKey: [String](),
             DockIconClickMinimizeController.preferenceKey: false,
             DockIconClickMinimizeController.hidePreferenceKey: false,
+            DockIconClickMinimizeController.cyclePreferenceKey: false,
             CursorTeleportPreference.appActivationPreferenceKey: true,
             CursorTeleportPreference.windowMovePreferenceKey: true,
             "moveCursorToSelectedDisplay": true,
@@ -3421,6 +3438,21 @@ final class OnboardingPrimaryButton: NSButton {
         updateMenuBarDesktopBadge()
         refreshDesktopIndicatorAppearanceMenu()
         refreshDisplayOrderMenu()
+        statusItemSpaceRefresh.spaceDidChange()
+    }
+
+    private func repaintStatusItemAfterSpaceChange() {
+        guard !isQuitting, !statusMenuIsOpen, let button = statusItem?.button else { return }
+        // Rebuild the current content, not a captured desktop number. Invalidate
+        // the existing native button after the destination presentation settles;
+        // never hide/recreate the status item or change its system-owned window.
+        updateMenuBarDesktopBadge(refreshMenu: false)
+        button.invalidateIntrinsicContentSize()
+        button.needsLayout = true
+        button.needsDisplay = true
+        button.layoutSubtreeIfNeeded()
+        button.displayIfNeeded()
+        button.window?.displayIfNeeded()
     }
 
     private var currentDesktopIndicatorAppearance: DesktopIndicatorAppearance {
@@ -4022,15 +4054,15 @@ final class OnboardingPrimaryButton: NSButton {
         rebuildBlacklistMenu()
 
         let dockSettingsItem = NSMenuItem(
-            title: "Dock Settings",
+            title: "Dock Preferences",
             action: nil,
             keyEquivalent: ""
         )
         dockSettingsItem.view = DockAwayMenuRowView(
-            title: "Dock Settings",
+            title: "Dock Preferences",
             icon: NSImage(
                 systemSymbolName: "slider.horizontal.3",
-                accessibilityDescription: "Dock Settings"
+                accessibilityDescription: "Dock Preferences"
             ),
             hasSubmenu: true,
             leadingInset: 12,
@@ -4039,10 +4071,10 @@ final class OnboardingPrimaryButton: NSButton {
         dockSettingsItem.state = .on
         dockSettingsItem.onStateImage = menuIcon(from: NSImage(
             systemSymbolName: "slider.horizontal.3",
-            accessibilityDescription: "Dock Settings"
+            accessibilityDescription: "Dock Preferences"
         ))
 
-        let dockSettingsMenu = NSMenu(title: "Dock Settings")
+        let dockSettingsMenu = NSMenu(title: "Dock Preferences")
         dockSettingsMenu.autoenablesItems = false
         dockSettingsMenu.delegate = self
 
@@ -4128,7 +4160,7 @@ final class OnboardingPrimaryButton: NSButton {
         dockSettingsPersistenceNoneItem.view = dockSettingsPersistenceNoneRowView
 
         let restoreDockDefaultsRowView = DockSettingPersistenceRowView(
-            title: "Restore Default macOS Dock",
+            title: "Restore Default macOS Dock Settings",
             isOn: false,
             leadingControlStyle: .resetAction
         ) { [weak self] _ in
@@ -4137,13 +4169,21 @@ final class OnboardingPrimaryButton: NSButton {
         let restoreDockDefaultsItem = NSMenuItem()
         restoreDockDefaultsItem.view = restoreDockDefaultsRowView
 
-        let dockIconActionsWidth: CGFloat = 360
+        let dockIconClickMinimizeTitle = "Minimize/Expands App When Dock Icon Clicked"
+        let dockIconClickHideTitle = "Hides/Unhides App When Dock Icon Clicked"
+        let dockIconClickCycleTitle = "Cycle App Windows When Dock Icon Clicked"
+        let dockIconActionsWidth = max(CGFloat(360), [
+            dockIconClickMinimizeTitle, dockIconClickHideTitle, dockIconClickCycleTitle
+        ].map {
+            ceil(($0 as NSString).size(withAttributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.systemFontSize)
+            ]).width) + 82
+        }.max() ?? 360)
         let dockIconActionsHeaderItem = NSMenuItem()
         dockIconActionsHeaderItem.view = DockSettingSectionHeaderView(
             title: "Dock Icon Actions:",
             width: dockIconActionsWidth
         )
-        let dockIconClickMinimizeTitle = "Minimize/Expands App When Dock Icon Clicked"
         let dockIconClickMinimizeItem = NSMenuItem(
             title: dockIconClickMinimizeTitle,
             action: nil,
@@ -4162,24 +4202,11 @@ final class OnboardingPrimaryButton: NSButton {
                 "Click the Dock icon of the app you are using to minimize its open windows. Click it again to restore only the windows DockAway minimized.\n\n• Windows minimized another way stay minimized.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
-            UserDefaults.standard.set(
-                enabled,
-                forKey: DockIconClickMinimizeController.preferenceKey
-            )
-            if enabled {
-                UserDefaults.standard.set(
-                    false,
-                    forKey: DockIconClickMinimizeController.hidePreferenceKey
-                )
-                self?.dockIconClickHideRowView?.setOn(false)
-            }
-            self?.dockIconClickMinimizeRowView?.setOn(enabled)
-            self?.refreshDockIconClickMinimizeController()
+            self?.setDockIconClickAction(.minimize, enabled: enabled)
         }
         dockIconClickMinimizeRow.autoresizingMask = [.width]
         dockIconClickMinimizeItem.view = dockIconClickMinimizeRow
 
-        let dockIconClickHideTitle = "Hides/Unhides App When Dock Icon Clicked"
         let dockIconClickHideItem = NSMenuItem(
             title: dockIconClickHideTitle,
             action: nil,
@@ -4198,22 +4225,45 @@ final class OnboardingPrimaryButton: NSButton {
                 "Click the Dock icon of the app you are using to hide the entire app. Click its Dock icon again to unhide and reactivate it.\n\n• Clicking an app that is not currently active keeps the normal macOS activation behavior.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
-            UserDefaults.standard.set(
-                enabled,
-                forKey: DockIconClickMinimizeController.hidePreferenceKey
-            )
-            if enabled {
-                UserDefaults.standard.set(
-                    false,
-                    forKey: DockIconClickMinimizeController.preferenceKey
-                )
-                self?.dockIconClickMinimizeRowView?.setOn(false)
-            }
-            self?.dockIconClickHideRowView?.setOn(enabled)
-            self?.refreshDockIconClickMinimizeController()
+            self?.setDockIconClickAction(.hide, enabled: enabled)
         }
         dockIconClickHideRow.autoresizingMask = [.width]
         dockIconClickHideItem.view = dockIconClickHideRow
+
+        let dockIconClickCycleItem = NSMenuItem(title: dockIconClickCycleTitle,
+                                               action: nil, keyEquivalent: "")
+        let dockIconClickCycleRow = DockSettingPersistenceRowView(
+            title: dockIconClickCycleTitle,
+            isOn: UserDefaults.standard.bool(forKey: DockIconClickMinimizeController.cyclePreferenceKey),
+            width: dockIconActionsWidth,
+            leadingInset: 18,
+            trailingInset: 12,
+            helpHeading: dockIconClickCycleTitle,
+            helpTextProvider: {
+                "Click an active app's Dock icon to bring its next window forward. Repeated clicks cycle through its windows in a stable order.\n\n• Windows on the current desktop are included, across displays.\n• Minimized windows stay minimized, and fullscreen windows and dialogs are not cycled.\n• The first click on a background app activates it normally.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior.\n• Only one Dock Icon Action can be enabled at a time."
+            }
+        ) { [weak self] enabled in
+            self?.setDockIconClickAction(.cycle, enabled: enabled)
+        }
+        dockIconClickCycleItem.view = dockIconClickCycleRow
+
+        let restartItem = NSMenuItem(title: "Restart Dock", action: nil, keyEquivalent: "")
+        let restartRow = DockAwayMenuRowView(
+            title: "Restart Dock",
+            icon: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Restart Dock"),
+            leadingInset: 18,
+            titleLeadingAdjustment: 1,
+            width: dockIconActionsWidth,
+            helpHeading: "Restart Dock",
+            helpTextProvider: {
+                "Use this if the Dock stops appearing or responding. The Dock and Mission Control briefly disappear while macOS relaunches them.\n\n• Your Dock preferences, open apps, and desktops are preserved.\n• Only the Dock for your current login is restarted.\n• DockAway pauses its Dock monitoring and resumes when the replacement is ready."
+            }
+        ) { [weak self] in self?.restartDockFromPreferences() }
+        restartItem.view = restartRow
+        restartItem.target = restartRow
+        restartItem.action = #selector(DockAwayMenuRowView.performMenuAction(_:))
+        restartDockMenuItem = restartItem
+        restartDockRowView = restartRow
 
         dockSettingsItem.submenu = dockSettingsMenu
         self.dockSettingsMenu = dockSettingsMenu
@@ -4225,6 +4275,7 @@ final class OnboardingPrimaryButton: NSButton {
         self.restoreDockDefaultsRowView = restoreDockDefaultsRowView
         self.dockIconClickMinimizeRowView = dockIconClickMinimizeRow
         self.dockIconClickHideRowView = dockIconClickHideRow
+        self.dockIconClickCycleRowView = dockIconClickCycleRow
         refreshDockSettingsMenu()
         dockSettingsMenu.addItem(positionItem)
         dockSettingsMenu.addItem(positionRowItem)
@@ -4248,12 +4299,14 @@ final class OnboardingPrimaryButton: NSButton {
         dockSettingsMenu.addItem(dockIconActionsHeaderItem)
         dockSettingsMenu.addItem(dockIconClickMinimizeItem)
         dockSettingsMenu.addItem(dockIconClickHideItem)
+        dockSettingsMenu.addItem(dockIconClickCycleItem)
         dockSettingsMenu.addItem(wideMenuSeparator(width: dockIconActionsWidth, leadingInset: 18, trailingInset: 14))
         dockSettingsMenu.addItem(keepDockSettingsAfterQuitItem)
         dockSettingsPersistenceItems.forEach { dockSettingsMenu.addItem($0) }
         dockSettingsMenu.addItem(dockSettingsPersistenceNoneItem)
         dockSettingsMenu.addItem(wideMenuSeparator(width: 240, leadingInset: 18, trailingInset: 14))
         dockSettingsMenu.addItem(restoreDockDefaultsItem)
+        dockSettingsMenu.addItem(restartItem)
         menu.addItem(wideMenuSeparator(width: 190, leadingInset: 14, trailingInset: 14))
         menu.addItem(blacklistItem)
         menu.addItem(dockSettingsItem)
@@ -5567,28 +5620,6 @@ final class OnboardingPrimaryButton: NSButton {
         self.chromiumWebAppPlacementRowView = webAppsRow
         advancedMenu.addItem(webAppsItem)
 
-        advancedMenu.addItem(.separator())
-        let restartItem = NSMenuItem(title: "Restart Dock", action: nil, keyEquivalent: "")
-        let restartRow = DockAwayMenuRowView(
-            title: "Restart Dock",
-            icon: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Restart Dock"),
-            leadingInset: 18,
-            titleLeadingAdjustment: 1,
-            width: advancedMenuWidth,
-            helpHeading: "Restart Dock",
-            helpTextProvider: {
-                "Use this if the Dock stops appearing or responding. The Dock and Mission Control briefly disappear while macOS relaunches them.\n\n• Your Dock preferences, open apps, and desktops are preserved.\n• Only the Dock for your current login is restarted.\n• DockAway pauses its Dock monitoring and resumes when the replacement is ready."
-            }
-        ) { [weak self] in self?.restartDockFromAdvanced() }
-        restartItem.view = restartRow
-        restartItem.target = restartRow
-        restartItem.action = #selector(DockAwayMenuRowView.performMenuAction(_:))
-        advancedMenu.addItem(restartItem)
-        restartDockMenuItem = restartItem
-        restartDockRowView = restartRow
-        advancedSettingsMenu = advancedMenu
-        refreshRestartDockAction()
-
         advancedItem.submenu = advancedMenu
         dockAwaySettingsMenu.addItem(advancedItem)
 
@@ -5938,28 +5969,41 @@ final class OnboardingPrimaryButton: NSButton {
         hoverActivationDelaySliderView?.setValue(delay, displayText: text)
     }
 
+    private func setDockIconClickAction(_ selected: DockIconClickMinimizeController.Mode, enabled: Bool) {
+        for (mode, key) in [
+            (DockIconClickMinimizeController.Mode.minimize, DockIconClickMinimizeController.preferenceKey),
+            (.hide, DockIconClickMinimizeController.hidePreferenceKey),
+            (.cycle, DockIconClickMinimizeController.cyclePreferenceKey)
+        ] where enabled || mode == selected {
+            UserDefaults.standard.set(enabled && mode == selected, forKey: key)
+        }
+        refreshDockIconClickMinimizeController()
+    }
+
     private func refreshDockIconClickMinimizeController() {
         let hasRequiredPermissions = accessibilityAccessGranted
             && inputMonitoringAccessGranted
         let hideEnabled = UserDefaults.standard.bool(
             forKey: DockIconClickMinimizeController.hidePreferenceKey
         )
-        var minimizeEnabled = UserDefaults.standard.bool(
+        let minimizeEnabled = UserDefaults.standard.bool(
             forKey: DockIconClickMinimizeController.preferenceKey
         )
-        if hideEnabled && minimizeEnabled {
-            minimizeEnabled = false
-            UserDefaults.standard.set(
-                false,
-                forKey: DockIconClickMinimizeController.preferenceKey
-            )
-            dockIconClickMinimizeRowView?.setOn(false)
-        }
+        let cycleEnabled = UserDefaults.standard.bool(forKey: DockIconClickMinimizeController.cyclePreferenceKey)
         let mode = DockIconClickMinimizeController.mode(
-            minimizeEnabled: hasRequiredPermissions && minimizeEnabled,
-            hideEnabled: hasRequiredPermissions && hideEnabled
+            minimizeEnabled: minimizeEnabled, hideEnabled: hideEnabled, cycleEnabled: cycleEnabled
         )
-        dockIconClickMinimizeController.setMode(mode)
+        // Normalize conflicting persisted values as well as live menu choices.
+        if minimizeEnabled && mode != .minimize {
+            UserDefaults.standard.set(false, forKey: DockIconClickMinimizeController.preferenceKey)
+        }
+        if hideEnabled && mode != .hide {
+            UserDefaults.standard.set(false, forKey: DockIconClickMinimizeController.hidePreferenceKey)
+        }
+        dockIconClickMinimizeRowView?.setOn(mode == .minimize)
+        dockIconClickHideRowView?.setOn(mode == .hide)
+        dockIconClickCycleRowView?.setOn(mode == .cycle)
+        dockIconClickMinimizeController.setMode(hasRequiredPermissions ? mode : .disabled)
     }
 
     // MARK: - Desktop Indicator Appearance
@@ -6369,7 +6413,7 @@ final class OnboardingPrimaryButton: NSButton {
         refreshDesktopIndicatorAppearanceMenu()
     }
 
-    // MARK: - Dock Settings
+    // MARK: - Dock Preferences
 
     @objc private func openDesktopAndDockSettings() {
         openSystemSettingsPane("com.apple.Desktop-Settings.extension")
@@ -6403,7 +6447,7 @@ final class OnboardingPrimaryButton: NSButton {
         restartDockRowView?.setControlEnabled(dockSettingsCanRestartDock)
     }
 
-    @objc private func restartDockFromAdvanced() {
+    @objc private func restartDockFromPreferences() {
         statusItem.menu?.cancelTracking()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -6565,6 +6609,9 @@ final class OnboardingPrimaryButton: NSButton {
                 forKey: DockIconClickMinimizeController.hidePreferenceKey
             )
         )
+        dockIconClickCycleRowView?.setOn(
+            UserDefaults.standard.bool(forKey: DockIconClickMinimizeController.cyclePreferenceKey)
+        )
 
         let resettableKeys = [
             Self.dockOrientationKey,
@@ -6578,11 +6625,11 @@ final class OnboardingPrimaryButton: NSButton {
             && animationUsesSystemDefault
             && revealDelayUsesSystemDefault
         if allDockSettingsUseDefaults {
-            restoreDockDefaultsRowView?.setTitle("Restore Default macOS Dock")
+            restoreDockDefaultsRowView?.setTitle("Restore Default macOS Dock Settings")
             restoreDockDefaultsRowView?.setControlEnabled(false)
             restoreDockDefaultsRowView?.setOn(true)
         } else {
-            restoreDockDefaultsRowView?.setTitle("Restore Default macOS Dock")
+            restoreDockDefaultsRowView?.setTitle("Restore Default macOS Dock Settings")
             restoreDockDefaultsRowView?.setControlEnabled(
                 canRestartDock && !resettableKeys.isEmpty
             )
@@ -6819,7 +6866,7 @@ final class OnboardingPrimaryButton: NSButton {
         if let errorMessage {
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = wasManual ? "Restart Dock" : "Dock Settings"
+            alert.messageText = wasManual ? "Restart Dock" : "Dock Preferences"
             alert.informativeText = errorMessage
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
@@ -9348,9 +9395,7 @@ final class OnboardingPrimaryButton: NSButton {
     ) {
         guard let statusButton = statusItem?.button else { return }
 
-        startedPopoverCloseWorkItem?.cancel()
-        startedPopover?.close()
-        closeStartedPopoverConfetti()
+        closeStartedPopover()
 
         let statusImage = NSImageView()
         statusImage.image = NSImage(
@@ -9396,11 +9441,17 @@ final class OnboardingPrimaryButton: NSButton {
                 return true
             }
             emojiImage.isTemplate = false
-            let emojiButton = NSButton(
+            let emojiButton = PopoverCelebrationButton(
                 image: emojiImage,
                 target: self,
                 action: #selector(replayStartedPopoverConfetti(_:))
             )
+            emojiButton.interactionBegan = { [weak self] in
+                self?.startedPopoverCooldown.interactionBegan()
+            }
+            emojiButton.interactionEnded = { [weak self] in
+                self?.startedPopoverCooldown.interactionEnded()
+            }
             emojiButton.font = .systemFont(ofSize: 14)
             emojiButton.isBordered = false
             emojiButton.focusRingType = .none
@@ -9462,6 +9513,7 @@ final class OnboardingPrimaryButton: NSButton {
         monitorStartedPopoverDismissal()
 
         if let celebrationButton {
+            startedPopoverCooldown.start()
             DispatchQueue.main.async { [weak self, weak celebrationButton, weak contentView, weak popover] in
                 guard
                     let self,
@@ -9486,6 +9538,7 @@ final class OnboardingPrimaryButton: NSButton {
             startedPopover != nil
         else { return }
 
+        startedPopoverCooldown.interactionPerformed()
         animatePopoverConfetti(from: sender, in: contentView)
     }
 
@@ -9734,6 +9787,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func monitorStartedPopoverDismissal() {
         removeStartedPopoverEventMonitors()
+        guard let popover = startedPopover else { return }
 
         let mouseEvents: NSEvent.EventTypeMask = [
             .leftMouseDown,
@@ -9742,28 +9796,31 @@ final class OnboardingPrimaryButton: NSButton {
         ]
         startedPopoverLocalEventMonitor = NSEvent.addLocalMonitorForEvents(
             matching: mouseEvents
-        ) { [weak self] event in
-            if self?.startedPopoverCelebrationButtonContainsMouse() == true {
+        ) { [weak self, weak popover] event in
+            guard let self, let popover, self.startedPopover === popover else { return event }
+            // Use the event's window, not the cursor's later position. Native
+            // button tracking and clicks within the popover are not outside clicks.
+            if let window = self.startedPopoverContentView?.window, event.window === window {
                 return event
             }
             // Close before returning the event so a status-item click still
             // reaches the DockAway menu instead of being consumed.
-            let statusItemWasClicked = self?.statusItemContainsMouse() == true
-            self?.closeStartedPopover()
+            let statusItemWasClicked = self.statusItemContainsMouse()
+            self.closeStartedPopover()
             if statusItemWasClicked {
-                self?.reopenStatusMenuAfterPopoverClick()
+                self.reopenStatusMenuAfterPopoverClick()
             }
             return event
         }
         startedPopoverGlobalEventMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: mouseEvents
-        ) { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                let statusItemWasClicked = self.statusItemContainsMouse()
-                let shouldReopenMenu = self.startedPopover != nil && statusItemWasClicked
+        ) { [weak self, weak popover] _ in
+            guard let self, let popover, self.startedPopover === popover else { return }
+            let statusItemWasClicked = self.statusItemContainsMouse()
+            DispatchQueue.main.async { [weak self, weak popover] in
+                guard let self, let popover, self.startedPopover === popover else { return }
                 self.closeStartedPopover()
-                if shouldReopenMenu {
+                if statusItemWasClicked {
                     self.reopenStatusMenuAfterPopoverClick()
                 }
             }
@@ -9773,17 +9830,6 @@ final class OnboardingPrimaryButton: NSButton {
     private func statusItemContainsMouse() -> Bool {
         guard
             let button = statusItem?.button,
-            let window = button.window
-        else { return false }
-
-        let buttonFrameInWindow = button.convert(button.bounds, to: nil)
-        let buttonFrameOnScreen = window.convertToScreen(buttonFrameInWindow)
-        return buttonFrameOnScreen.contains(NSEvent.mouseLocation)
-    }
-
-    private func startedPopoverCelebrationButtonContainsMouse() -> Bool {
-        guard
-            let button = startedPopoverCelebrationButton,
             let window = button.window
         else { return false }
 
@@ -9818,8 +9864,7 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private func closeStartedPopover() {
-        startedPopoverCloseWorkItem?.cancel()
-        startedPopoverCloseWorkItem = nil
+        startedPopoverCooldown.cancel()
         removeStartedPopoverEventMonitors()
         closeStartedPopoverConfetti()
         startedPopover?.close()
@@ -9976,17 +10021,10 @@ final class OnboardingPrimaryButton: NSButton {
         // 2. Set up a listener for the Unix signal
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler { [weak self] in
+            guard let self, !self.isQuitting else { return }
             dockAwayDebugLog("  ⚠️ Caught Unix SIGTERM (Activity Monitor)")
-            self?.isQuitting = true
-            self?.permissionMonitor.stop()
-            self?.runtimePermissionAccess.invalidate()
-            self?.permissionSetupTimer?.invalidate()
-            self?.permissionHealthTimer?.invalidate()
-            self?.restoreDockState()
-            self?.restoreDefaultDockPreferencesBeforeExitIfNeeded()
-            
-            // 3. Manually exit after our cleanup is finished
-            exit(0)
+            // Use the same verified, asynchronous cleanup as the Quit menu.
+            NSApp.terminate(nil)
         }
         source.resume()
         sigtermSource = source
@@ -10002,12 +10040,12 @@ final class OnboardingPrimaryButton: NSButton {
             watcher.simulateOptionCommandDPublic()
             applyStatusIcon(dockVisible: true)
             
-            // The Life Support Hold: Keep the app alive just long enough for the keystroke to register
-            Thread.sleep(forTimeInterval: 0.15)
+            // Pausing leaves the app alive; quit restoration is handled
+            // separately by applicationShouldTerminate, with verification.
         }
     }
 
-    private func restoreDefaultDockPreferencesBeforeExitIfNeeded() {
+    private func restoreDefaultDockPreferencesBeforeExitIfNeeded() -> Bool {
         let resettableKeys: [String] = DockSettingPersistenceOption.allCases.compactMap { option in
             let key = option.dockPreferenceKey
             guard
@@ -10017,7 +10055,7 @@ final class OnboardingPrimaryButton: NSButton {
             else { return nil }
             return key
         }
-        guard !resettableKeys.isEmpty else { return }
+        guard !resettableKeys.isEmpty else { return false }
 
         for key in resettableKeys {
             CFPreferencesSetValue(
@@ -10034,15 +10072,46 @@ final class OnboardingPrimaryButton: NSButton {
             kCFPreferencesCurrentUser,
             kCFPreferencesAnyHost
         ) else {
-            dockAwayDebugLog("⚠️ Could not restore the default Dock settings before exit")
-            return
+            Logger(subsystem: "AK.DockAway", category: "DockQuit")
+                .error("Could not restore the default Dock preferences before exit")
+            return false
         }
 
-        if let dockApplication = NSRunningApplication.runningApplications(
-            withBundleIdentifier: "com.apple.dock"
-        ).first {
-            _ = kill(dockApplication.processIdentifier, SIGTERM)
+        // The quit restorer reloads these settings and verifies the replacement
+        // using the shared current-user-only restart implementation.
+        return true
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Permission relaunches are a handoff, not a user-requested quit.
+        guard !isPermissionRelaunching else { return .terminateNow }
+        guard !quitRestorationCompleted else { return .terminateNow }
+        guard !isQuitting else { return .terminateLater }
+        isQuitting = true
+        dockWatcher?.stop()
+        multitouch.stop()
+        permissionMonitor.stop()
+        runtimePermissionAccess.invalidate()
+        permissionSetupTimer?.invalidate()
+        permissionHealthTimer?.invalidate()
+        statusItemSpaceRefresh.cancel()
+        statusItem?.menu?.cancelTracking()
+        let reloadPreferences = restoreDefaultDockPreferencesBeforeExitIfNeeded()
+        // Reply only after .terminateLater has been returned to AppKit, even
+        // when a managed preference or unsafe process fails synchronously.
+        DockLifecycleRunLoop.perform { [weak self] in
+            guard let self else { sender.reply(toApplicationShouldTerminate: true); return }
+            self.quitDockRestoration.restore(reloadPreferences: reloadPreferences) { [weak self] error in
+                if let error {
+                    Logger(subsystem: "AK.DockAway", category: "DockQuit")
+                        .error("Dock restoration failed: \(error, privacy: .public)")
+                }
+                self?.quitRestorationCompleted = true
+                dockAwayDebugLog(error == nil ? "Dock visibility verified before quitting" : "Dock restoration failed before quitting")
+                sender.reply(toApplicationShouldTerminate: true)
+            }
         }
+        return .terminateLater
     }
 
     @objc private func quit() {
@@ -10053,6 +10122,7 @@ final class OnboardingPrimaryButton: NSButton {
     func applicationWillTerminate(_ notification: Notification) {
         mutedVolumeMenuBarController.stop()
         isQuitting = true
+        statusItemSpaceRefresh.cancel()
         desktopChangeTooltip.dismiss()
         DockSettingKeyRebindRowView.stopRecording()
         screenshotClipboardManager.stopMonitoring()
@@ -10079,10 +10149,7 @@ final class OnboardingPrimaryButton: NSButton {
         multitouch.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         DistributedNotificationCenter.default().removeObserver(self)
-        if !isPermissionRelaunching {
-            restoreDockState()
-            restoreDefaultDockPreferencesBeforeExitIfNeeded()
-        }
+        // Dock restoration has already completed in applicationShouldTerminate.
     }
 }
 
@@ -10171,8 +10238,6 @@ extension AppDelegate: NSMenuDelegate {
             rebuildHoverActivationBlacklistMenu()
         } else if menu === dockSettingsMenu {
             refreshDockSettingsMenu()
-        } else if menu === advancedSettingsMenu {
-            refreshRestartDockAction()
         } else if menu === desktopIndicatorAppearanceMenu {
             refreshDesktopIndicatorAppearanceMenu()
         } else if menu === dockAwaySettingsMenu {
@@ -10275,6 +10340,7 @@ extension AppDelegate: NSMenuDelegate {
             desktopTilesView?.finishVisibilityTransition(enabled: isDesktopManagerEnabled)
             desktopTilesMenuItem?.isHidden = !isDesktopManagerEnabled
             statusMenuIsOpen = false
+            statusItemSpaceRefresh.menuDidClose()
             let previousApplication = settingsMenuPreviousApplication
             settingsMenuPreviousApplication = nil
             DispatchQueue.main.async { [weak self] in
