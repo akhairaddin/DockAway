@@ -1,5 +1,11 @@
 import Cocoa
 
+/// A desktop number or count as shown in the menu bar. Zero means it isn't
+/// known, for example before macOS grants DockAway access, and shows as "?".
+nonisolated func desktopCountText(_ count: Int) -> String {
+    count > 0 ? String(count) : "?"
+}
+
 enum DesktopIndicatorPreference {
     static let enabledKey = "desktopIndicatorEnabled"
     static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
@@ -140,9 +146,9 @@ struct DesktopIndicatorTextStyle: Codable {
                 return ""
             case .custom(let str):
                 let trimmed = str.trimmingCharacters(in: .whitespaces)
-                return trimmed.isEmpty ? " \(total)" : " \(trimmed) \(total)"
+                return trimmed.isEmpty ? " \(desktopCountText(total))" : " \(trimmed) \(desktopCountText(total))"
             default:
-                return " \(title) \(total)"
+                return " \(title) \(desktopCountText(total))"
             }
         }
     }
@@ -217,7 +223,7 @@ struct DesktopIndicatorTextStyle: Codable {
         let suffixInk = hierarchical
             ? pillInk.withAlphaComponent(0.55 * displayAlpha)
             : effectivePillInk
-        let number = isFullscreen ? "FS" : "\(current)"
+        let number = isFullscreen ? "FS" : desktopCountText(current)
         let result = NSMutableAttributedString()
         if badge == .none {
             result.append(NSAttributedString(string: number, attributes: [
