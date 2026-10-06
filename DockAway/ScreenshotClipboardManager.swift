@@ -18,6 +18,7 @@ final class ScreenshotClipboardManager {
     private var recentProcessedOrder: [String] = []
     private var captureAnchorMouseLocation: NSPoint?
     private(set) var lastCopiedFileURL: URL?
+    private let thumbnailSuppression = ScreenshotThumbnailSuppression()
 
     var isEnabled: Bool {
         get {
@@ -30,7 +31,28 @@ final class ScreenshotClipboardManager {
             } else {
                 stopMonitoring()
             }
+            thumbnailSuppression.update(clipboardEnabled: newValue)
         }
+    }
+
+    /// Copy Instantly: hides macOS's floating thumbnail, which otherwise holds
+    /// each screenshot back from being saved, and so copied, for a few seconds.
+    var copiesInstantly: Bool {
+        get { thumbnailSuppression.isRequested }
+        set {
+            thumbnailSuppression.isRequested = newValue
+            thumbnailSuppression.update(clipboardEnabled: isEnabled)
+        }
+    }
+
+    /// Re-applies Copy Instantly, noticing if the user turned the thumbnail back on.
+    func updateThumbnailSuppression() {
+        thumbnailSuppression.update(clipboardEnabled: isEnabled)
+    }
+
+    /// Returns the thumbnail to the user's own setting, for when DockAway quits.
+    func restoreThumbnail() {
+        thumbnailSuppression.restore()
     }
 
     private init() {}
@@ -119,6 +141,7 @@ final class ScreenshotClipboardManager {
             Task { @MainActor [weak self] in
                 guard let self, self.isEnabled else { return }
                 self.validateWatchedDirectory()
+                self.updateThumbnailSuppression()
                 self.checkForNewScreenshots()
             }
         }

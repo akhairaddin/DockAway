@@ -51,13 +51,16 @@ final class OnboardingKeyboardSettingsView: NSView {
     private let backButton = NSButton()
     private let getStartedButton: OnboardingPrimaryButton
     private let bottomControlsStack = NSStackView()
+    private let shortcutRowHeight: CGFloat
 
     init(
+        compact: Bool = false,
         onBack: @escaping () -> Void,
         onGetStarted: @escaping () -> Void
     ) {
         self.onBack = onBack
         self.onGetStarted = onGetStarted
+        shortcutRowHeight = compact ? 32 : 34
 
         // Header
         titleLabel = NSTextField(labelWithString: "Desktop Manager Keyboard Navigation")
@@ -90,8 +93,8 @@ final class OnboardingKeyboardSettingsView: NSView {
         iconContainer.addSubview(iconImageView)
 
         NSLayoutConstraint.activate([
-            iconContainer.widthAnchor.constraint(equalToConstant: 44),
-            iconContainer.heightAnchor.constraint(equalToConstant: 44),
+            iconContainer.widthAnchor.constraint(equalToConstant: compact ? 32 : 44),
+            iconContainer.heightAnchor.constraint(equalToConstant: compact ? 32 : 44),
             iconImageView.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
             iconImageView.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor),
             iconImageView.widthAnchor.constraint(equalToConstant: 24),
@@ -101,8 +104,8 @@ final class OnboardingKeyboardSettingsView: NSView {
         headerStack = NSStackView(views: [iconContainer, titleLabel, subtitleLabel])
         headerStack.orientation = .vertical
         headerStack.alignment = .centerX
-        headerStack.spacing = 6
-        headerStack.setCustomSpacing(8, after: iconContainer)
+        headerStack.spacing = compact ? 4 : 6
+        headerStack.setCustomSpacing(compact ? 6 : 8, after: iconContainer)
         headerStack.translatesAutoresizingMaskIntoConstraints = false
 
         // Keep the master switch, hand switches, and binding selector together
@@ -144,17 +147,17 @@ final class OnboardingKeyboardSettingsView: NSView {
         NSLayoutConstraint.activate([
             masterToggle.leadingAnchor.constraint(equalTo: keyboardNavigationCard.leadingAnchor, constant: 14),
             masterToggle.trailingAnchor.constraint(equalTo: keyboardNavigationCard.trailingAnchor, constant: -14),
-            masterToggle.topAnchor.constraint(equalTo: keyboardNavigationCard.topAnchor, constant: 8),
+            masterToggle.topAnchor.constraint(equalTo: keyboardNavigationCard.topAnchor, constant: compact ? 6 : 8),
 
-            controlsSeparator.topAnchor.constraint(equalTo: masterToggle.bottomAnchor, constant: 10),
+            controlsSeparator.topAnchor.constraint(equalTo: masterToggle.bottomAnchor, constant: compact ? 6 : 10),
             controlsSeparator.leadingAnchor.constraint(equalTo: keyboardNavigationCard.leadingAnchor, constant: 14),
             controlsSeparator.trailingAnchor.constraint(equalTo: keyboardNavigationCard.trailingAnchor, constant: -14),
             controlsSeparator.heightAnchor.constraint(equalToConstant: 1),
 
-            handOptionStack.topAnchor.constraint(equalTo: controlsSeparator.bottomAnchor, constant: 8),
+            handOptionStack.topAnchor.constraint(equalTo: controlsSeparator.bottomAnchor, constant: compact ? 6 : 8),
             handOptionStack.leadingAnchor.constraint(equalTo: keyboardNavigationCard.leadingAnchor, constant: 10),
             handOptionStack.trailingAnchor.constraint(equalTo: keyboardNavigationCard.trailingAnchor, constant: -10),
-            handOptionStack.heightAnchor.constraint(equalToConstant: 56),
+            handOptionStack.heightAnchor.constraint(equalToConstant: compact ? 48 : 56),
             handOptionStack.bottomAnchor.constraint(equalTo: keyboardNavigationCard.bottomAnchor, constant: -6)
         ])
 
@@ -218,9 +221,9 @@ final class OnboardingKeyboardSettingsView: NSView {
             leftHandStack.trailingAnchor.constraint(equalTo: rowsContainer.trailingAnchor),
             leftHandStack.bottomAnchor.constraint(equalTo: rowsContainer.bottomAnchor),
 
-            resetButton.topAnchor.constraint(equalTo: rowsContainer.bottomAnchor, constant: 8),
+            resetButton.topAnchor.constraint(equalTo: rowsContainer.bottomAnchor, constant: compact ? 6 : 8),
             resetButton.centerXAnchor.constraint(equalTo: shortcutsCard.centerXAnchor),
-            resetButton.bottomAnchor.constraint(equalTo: shortcutsCard.bottomAnchor, constant: -9)
+            resetButton.bottomAnchor.constraint(equalTo: shortcutsCard.bottomAnchor, constant: compact ? -6 : -9)
         ])
 
         // Bottom Controls
@@ -265,15 +268,15 @@ final class OnboardingKeyboardSettingsView: NSView {
             headerStack.leadingAnchor.constraint(equalTo: leadingAnchor),
             headerStack.trailingAnchor.constraint(equalTo: trailingAnchor),
 
-            keyboardNavigationCard.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 12),
+            keyboardNavigationCard.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: compact ? 8 : 12),
             keyboardNavigationCard.leadingAnchor.constraint(equalTo: leadingAnchor),
             keyboardNavigationCard.trailingAnchor.constraint(equalTo: trailingAnchor),
 
-            shortcutsCard.topAnchor.constraint(equalTo: keyboardNavigationCard.bottomAnchor, constant: 10),
+            shortcutsCard.topAnchor.constraint(equalTo: keyboardNavigationCard.bottomAnchor, constant: compact ? 8 : 10),
             shortcutsCard.leadingAnchor.constraint(equalTo: leadingAnchor),
             shortcutsCard.trailingAnchor.constraint(equalTo: trailingAnchor),
 
-            bottomControlsStack.topAnchor.constraint(greaterThanOrEqualTo: shortcutsCard.bottomAnchor, constant: 16),
+            bottomControlsStack.topAnchor.constraint(greaterThanOrEqualTo: shortcutsCard.bottomAnchor, constant: compact ? 10 : 16),
             bottomControlsStack.leadingAnchor.constraint(equalTo: leadingAnchor),
             bottomControlsStack.trailingAnchor.constraint(equalTo: trailingAnchor),
             bottomControlsStack.bottomAnchor.constraint(equalTo: bottomAnchor)
@@ -364,7 +367,7 @@ final class OnboardingKeyboardSettingsView: NSView {
             }
             row.setControlEnabled(isNavEnabled && KeyboardNavigationPreferences.isRightHandEnabled)
             row.translatesAutoresizingMaskIntoConstraints = false
-            row.heightAnchor.constraint(equalToConstant: 34).isActive = true
+            row.heightAnchor.constraint(equalToConstant: shortcutRowHeight).isActive = true
             rightHandStack.addArrangedSubview(row)
             rightHandRows.append(row)
         }
@@ -391,7 +394,7 @@ final class OnboardingKeyboardSettingsView: NSView {
             }
             row.setControlEnabled(isNavEnabled && KeyboardNavigationPreferences.isLeftHandEnabled)
             row.translatesAutoresizingMaskIntoConstraints = false
-            row.heightAnchor.constraint(equalToConstant: 34).isActive = true
+            row.heightAnchor.constraint(equalToConstant: shortcutRowHeight).isActive = true
             leftHandStack.addArrangedSubview(row)
             leftHandRows.append(row)
         }

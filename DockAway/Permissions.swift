@@ -102,15 +102,30 @@ struct PermissionRecoveryState {
     mutating func begin(
         authorization: PermissionSnapshot?,
         setupCompleted: Bool,
-        onboardingRequired: Bool
+        onboardingRequired: Bool,
+        onboardingInProgress: Bool = false
     ) -> Int? {
-        guard setupCompleted, !onboardingRequired,
+        guard Self.canRecoverWithoutOnboarding(
+                  setupCompleted: setupCompleted,
+                  onboardingRequired: onboardingRequired,
+                  onboardingInProgress: onboardingInProgress
+              ),
               authorization?.allGranted == true,
               !isRecovering, !attemptedForCurrentGrant else { return nil }
         generation += 1
         isRecovering = true
         attemptedForCurrentGrant = true
         return generation
+    }
+
+    static func canRecoverWithoutOnboarding(
+        setupCompleted: Bool,
+        onboardingRequired: Bool,
+        onboardingInProgress: Bool
+    ) -> Bool {
+        // Saved completion never authorizes skipping an open, user-driven tour.
+        // A permission grant only enables Continue until Get Started is pressed.
+        setupCompleted && !onboardingRequired && !onboardingInProgress
     }
 
     func isCurrent(_ generation: Int) -> Bool {

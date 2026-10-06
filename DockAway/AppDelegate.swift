@@ -2489,7 +2489,7 @@ private final class PermissionSetupView: NSView {
                 alignment: .center
             )
         default:
-            let instruction = "Click “Continue” to finish setup."
+            let instruction = "Click “Continue” to set up keyboard navigation."
             instructionLabel.attributedStringValue = laterEmphasizedText(
                 instruction,
                 font: NSFont.systemFont(ofSize: 11.5),
@@ -2659,13 +2659,8 @@ final class OnboardingPrimaryButton: NSButton {
     private static let keepDockRevealDelayAfterQuitKey = "KeepDockRevealDelayAfterQuit"
     private static let permissionSetupCompletedKey = "PermissionSetupCompleted"
     private static let initialRevealDelayHandledKey = "InitialRevealDelayHandled"
-    private static let showStartedPopoverAfterRelaunchKey =
-        "ShowStartedPopoverAfterPermissionRelaunch"
-    private static let showRestartedPopoverAfterRelaunchKey =
-        "ShowRestartedPopoverAfterPermissionRelaunch"
     private static let automaticPermissionRelaunchAttemptedKey =
         "AutomaticPermissionRelaunchAttempted"
-    private static let permissionRecoveryPendingKey = "PermissionRecoveryPending"
     private static let permissionRelaunchWasPausedKey = "PermissionRelaunchWasPaused"
     private static let dockPreferencesDomain = "com.apple.dock" as CFString
     private static let dockOrientationKey = "orientation"
@@ -2909,6 +2904,7 @@ final class OnboardingPrimaryButton: NSButton {
     private var lockSoundRowView: DockSettingPersistenceRowView?
     private var unlockSoundRowView: DockSettingPersistenceRowView?
     private var screenshotClipboardRowView: DockSettingPersistenceRowView?
+    private var screenshotInstantCopyRowView: DockSettingPersistenceRowView?
     private var greenButtonFillRowView: DockSettingPersistenceRowView?
     private var finderDeleteKeyRowView: DockSettingPersistenceRowView?
     private var quickLookCopyOrientationRowView: DockSettingPersistenceRowView?
@@ -2996,6 +2992,7 @@ final class OnboardingPrimaryButton: NSButton {
     private weak var permissionSetupView: PermissionSetupView?
     private let permissionMonitor = PermissionMonitor()
     private let runtimePermissionAccess = RuntimePermissionAccess()
+    private let permissionConfirmation = PermissionCompletionConfirmation()
     private var permissionRecovery = PermissionRecoveryState(
         relaunchAlreadyAttempted: UserDefaults.standard.bool(
             forKey: AppDelegate.automaticPermissionRelaunchAttemptedKey
@@ -3008,8 +3005,13 @@ final class OnboardingPrimaryButton: NSButton {
     private weak var permissionSetupContinueButton: NSButton?
     private weak var permissionSetupLaunchAtLoginRowView: DockSettingPersistenceRowView?
     private weak var permissionSetupDesktopManagerRowView: OnboardingDesktopManagerRowView?
+    private lazy var separateSpacesPreferenceController = SeparateSpacesPreferenceController()
+    private weak var permissionSetupSeparateSpacesRowView: OnboardingSeparateSpacesRowView?
+    private var nextSeparateSpacesRefresh: TimeInterval = 0
     private weak var permissionSetupKeyboardSettingsView: OnboardingKeyboardSettingsView?
-    private weak var permissionSetupContentStack: NSStackView?
+    private weak var permissionSetupFirstPageView: OnboardingPermissionsPageView?
+    private var permissionSetupFirstPageConstraints = [NSLayoutConstraint]()
+    private var permissionSetupKeyboardPageConstraints = [NSLayoutConstraint]()
     private var onboardingCurrentStep = 1
     private var inputMonitoringSettingsVisitInProgress = false
     private var inputMonitoringRestartPending: Bool {
@@ -3068,6 +3070,14 @@ final class OnboardingPrimaryButton: NSButton {
             && !MajorReleaseOnboarding.needsPresentation()
     }
 
+    private var canRecoverPermissionsWithoutOnboarding: Bool {
+        PermissionRecoveryState.canRecoverWithoutOnboarding(
+            setupCompleted: UserDefaults.standard.bool(forKey: Self.permissionSetupCompletedKey),
+            onboardingRequired: MajorReleaseOnboarding.needsPresentation(),
+            onboardingInProgress: permissionSetupInProgress
+        )
+    }
+
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = DockAwayTheme.current.appearance
@@ -3114,6 +3124,7 @@ final class OnboardingPrimaryButton: NSButton {
         if screenshotClipboardManager.isEnabled {
             screenshotClipboardManager.startMonitoring()
         }
+        screenshotClipboardManager.updateThumbnailSuppression()
 
         setupSleepAndLockAwareness()
         
@@ -3180,6 +3191,7 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        refreshSeparateSpacesOnboardingRow()
         if !permissionContinuePending {
             permissionMonitor.refresh(force: true)
         }
@@ -3621,7 +3633,9 @@ final class OnboardingPrimaryButton: NSButton {
                 }
             }
         }
-        return (1, 1, false)
+        // Without desktop data, for example before access is granted, the
+        // counts are unknown and the indicator shows "? of ?".
+        return (0, 0, false)
     }
 
     private static func makePillBadgeImage(text: String) -> NSImage {
@@ -3703,12 +3717,12 @@ final class OnboardingPrimaryButton: NSButton {
             button.attributedTitle = style.text(current: currentNum, total: totalNum, isFullscreen: isFS, dockIndicator: button.image)
 
         case .compactSlash:
-            let text = isFS ? "FS" : "\(currentNum)/\(totalNum)"
+            let text = isFS ? "FS" : "\(desktopCountText(currentNum))/\(desktopCountText(totalNum))"
             let font = NSFont.monospacedDigitSystemFont(ofSize: 12.0, weight: .medium)
             button.attributedTitle = NSAttributedString(string: text, attributes: [.font: font])
 
         case .pillBadge:
-            let text = isFS ? "FS" : "\(currentNum) of \(totalNum)"
+            let text = isFS ? "FS" : "\(desktopCountText(currentNum)) of \(desktopCountText(totalNum))"
             let pill = Self.makePillBadgeImage(text: text)
             let att = NSTextAttachment()
             att.image = pill
@@ -3723,12 +3737,12 @@ final class OnboardingPrimaryButton: NSButton {
                 att.bounds = CGRect(x: 0, y: -3, width: box.size.width, height: box.size.height)
                 button.attributedTitle = NSAttributedString(attachment: att)
             } else {
-                let box = Self.makeActiveBoxImage(numberText: "\(currentNum)")
+                let box = Self.makeActiveBoxImage(numberText: desktopCountText(currentNum))
                 let att = NSTextAttachment()
                 att.image = box
                 att.bounds = CGRect(x: 0, y: -3, width: box.size.width, height: box.size.height)
                 let str = NSMutableAttributedString(attachment: att)
-                str.append(NSAttributedString(string: " of \(totalNum)", attributes: [
+                str.append(NSAttributedString(string: " of \(desktopCountText(totalNum))", attributes: [
                     .font: NSFont.systemFont(ofSize: 11.5, weight: .regular)
                 ]))
                 button.attributedTitle = str
@@ -3743,11 +3757,11 @@ final class OnboardingPrimaryButton: NSButton {
                 ])
             } else {
                 let str = NSMutableAttributedString()
-                str.append(NSAttributedString(string: "\(currentNum)", attributes: [
+                str.append(NSAttributedString(string: desktopCountText(currentNum), attributes: [
                     .font: NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .bold),
                     .foregroundColor: NSColor.labelColor
                 ]))
-                str.append(NSAttributedString(string: " of \(totalNum)", attributes: [
+                str.append(NSAttributedString(string: " of \(desktopCountText(totalNum))", attributes: [
                     .font: NSFont.systemFont(ofSize: 11.5, weight: .regular),
                     .foregroundColor: NSColor.secondaryLabelColor
                 ]))
@@ -5523,16 +5537,43 @@ final class OnboardingPrimaryButton: NSButton {
             indicatorSize: 16,
             helpHeading: screenshotClipboardTitle,
             helpTextProvider: {
-                "Automatically copies newly captured screenshots to your clipboard.\n\n• Immediately paste (⌘V) your screenshot anywhere.\n• Screenshots are still saved to your folder as usual.\n• Works with standard macOS screenshot shortcuts.\n• macOS natively captures all displays, but DockAway clips the screenshot from the display your mouse is on."
+                "Automatically copies newly captured screenshots to your clipboard.\n\n• Paste (⌘V) your screenshot anywhere once macOS saves it, after its floating thumbnail goes away. Turn on Copy Instantly to paste right away.\n• Screenshots are still saved to your folder as usual.\n• Works with standard macOS screenshot shortcuts.\n• macOS natively captures all displays, but DockAway clips the screenshot from the display your mouse is on."
             }
         ) { [weak self] enabled in
             self?.screenshotClipboardManager.isEnabled = enabled
             self?.screenshotClipboardRowView?.setOn(enabled)
+            self?.screenshotInstantCopyRowView?.setControlEnabled(enabled)
         }
         screenshotClipboardRow.autoresizingMask = [.width]
         screenshotClipboardItem.view = screenshotClipboardRow
         self.screenshotClipboardRowView = screenshotClipboardRow
         extrasMenu.addItem(screenshotClipboardItem)
+
+        // A sub-option of Save Screenshots to Clipboard, indented beneath it.
+        let screenshotInstantCopyTitle = "Copy Instantly"
+        let screenshotInstantCopyItem = NSMenuItem(title: screenshotInstantCopyTitle, action: nil, keyEquivalent: "")
+        let screenshotInstantCopyRow = DockSettingPersistenceRowView(
+            title: screenshotInstantCopyTitle,
+            isOn: screenshotClipboardManager.copiesInstantly,
+            width: settingsRowWidth,
+            leadingInset: 46,
+            hierarchyParentLeadingInset: 18,
+            trailingInset: 12,
+            titleLeadingAdjustment: 1,
+            indicatorSize: 16,
+            helpHeading: screenshotInstantCopyTitle,
+            helpTextProvider: {
+                "Hides the macOS floating screenshot thumbnail, so each screenshot is saved and copied the moment you take it.\n\n• macOS doesn't save a screenshot until its thumbnail goes away, so while the thumbnail shows, DockAway can't copy it any sooner.\n• Turning this off, turning off Save Screenshots to Clipboard, or quitting DockAway restores your thumbnail setting.\n• Turning the thumbnail back on in the Screenshot app's Options menu turns this option off."
+            }
+        ) { [weak self] enabled in
+            self?.screenshotClipboardManager.copiesInstantly = enabled
+            self?.screenshotInstantCopyRowView?.setOn(self?.screenshotClipboardManager.copiesInstantly ?? false)
+        }
+        screenshotInstantCopyRow.autoresizingMask = [.width]
+        screenshotInstantCopyItem.view = screenshotInstantCopyRow
+        self.screenshotInstantCopyRowView = screenshotInstantCopyRow
+        extrasMenu.addItem(screenshotInstantCopyItem)
+        screenshotInstantCopyRow.setControlEnabled(screenshotClipboardManager.isEnabled)
 
         let greenButtonFillTitle = "Green Button Fills Window"
         let greenButtonFillItem = NSMenuItem(title: greenButtonFillTitle, action: nil, keyEquivalent: "")
@@ -5928,6 +5969,10 @@ final class OnboardingPrimaryButton: NSButton {
         lockSoundRowView?.setOn(UserDefaults.standard.bool(forKey: LockscreenSoundPlayer.Event.lock.preferenceKey))
         unlockSoundRowView?.setOn(UserDefaults.standard.bool(forKey: LockscreenSoundPlayer.Event.unlock.preferenceKey))
         screenshotClipboardRowView?.setOn(screenshotClipboardManager.isEnabled)
+        // Catches the thumbnail having been turned back on outside DockAway.
+        screenshotClipboardManager.updateThumbnailSuppression()
+        screenshotInstantCopyRowView?.setOn(screenshotClipboardManager.copiesInstantly)
+        screenshotInstantCopyRowView?.setControlEnabled(screenshotClipboardManager.isEnabled)
         greenButtonFillRowView?.setOn(
             UserDefaults.standard.bool(forKey: GreenButtonFillController.preferenceKey)
         )
@@ -6418,7 +6463,7 @@ final class OnboardingPrimaryButton: NSButton {
                 if !encapsulated {
                     logo.draw(in: NSRect(x: 8, y: (32 - logoSize.height) / 2, width: logoSize.width, height: logoSize.height), from: .zero, operation: .sourceOver, fraction: 1)
                 }
-                let text = isFS ? "FS" : "\(current) of \(total)"
+                let text = isFS ? "FS" : "\(desktopCountText(current)) of \(desktopCountText(total))"
                 let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
                 let textColor: NSColor = isDark ? .white : .labelColor
                 func drawText(_ value: String, x: CGFloat = 42, font: NSFont = font, color: NSColor = textColor) {
@@ -6435,21 +6480,21 @@ final class OnboardingPrimaryButton: NSButton {
                     let size = previewText.size()
                     previewText.draw(at: NSPoint(x: encapsulated ? 8 : 42, y: (32 - size.height) / 2))
                 case .compactSlash:
-                    drawText(isFS ? "FS" : "\(current)/\(total)")
+                    drawText(isFS ? "FS" : "\(desktopCountText(current))/\(desktopCountText(total))")
                 case .pillBadge:
                     let pill = Self.makePillBadgeImage(text: text)
                     pill.draw(in: NSRect(x: 42, y: 8, width: pill.size.width, height: 16), from: .zero, operation: .sourceOver, fraction: 1)
             case .activeBadge:
-                let badge = Self.makeActiveBoxImage(numberText: isFS ? "FS" : "\(current)")
+                let badge = Self.makeActiveBoxImage(numberText: isFS ? "FS" : desktopCountText(current))
                 badge.draw(in: NSRect(x: 42, y: 8, width: badge.size.width, height: 16), from: .zero, operation: .sourceOver, fraction: 1)
-                if !isFS { drawText(" of \(total)", x: 42 + badge.size.width, color: .secondaryLabelColor) }
+                if !isFS { drawText(" of \(desktopCountText(total))", x: 42 + badge.size.width, color: .secondaryLabelColor) }
             case .hierarchical:
                 let strong = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .bold)
-                let number = isFS ? "FS" : "\(current)"
+                let number = isFS ? "FS" : desktopCountText(current)
                 drawText(number, font: strong)
                 if !isFS {
                     let width = (number as NSString).size(withAttributes: [.font: strong]).width
-                    drawText(" of \(total)", x: 42 + width, font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
+                    drawText(" of \(desktopCountText(total))", x: 42 + width, font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
                 }
             }
         }
@@ -8452,6 +8497,10 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func presentPermissionSetup() {
         guard !permissionSetupInProgress, !isQuitting else { return }
+        // The visible tour owns completion until Get Started. Invalidate a
+        // background recovery callback that was queued before it opened.
+        permissionRecovery.cancel()
+        MajorReleaseOnboarding.markStarted()
         permissionSetupInProgress = true
 
         let setupView = PermissionSetupView(
@@ -8476,11 +8525,21 @@ final class OnboardingPrimaryButton: NSButton {
         continueButton.isEnabled = false
         renderPermissionSetupState()
 
+        separateSpacesPreferenceController.startObserving { [weak self] in
+            // Bypass the fallback polling throttle for external edits while
+            // the modeless onboarding panel is visible in System Settings.
+            self?.refreshSeparateSpacesOnboardingRow()
+        }
+
         let refreshTimer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
             // This timer is registered exclusively on the main run loop.
             MainActor.assumeIsolated {
-                guard let self, !self.permissionContinuePending,
-                      self.automaticSuspensionReasons.isEmpty, !self.isQuitting else { return }
+                guard let self, !self.isQuitting else { return }
+                // KVO handles external edits immediately. Retain this slower
+                // fallback for unavailable or managed preference changes.
+                self.refreshSeparateSpacesOnboardingRow(force: false)
+                guard !self.permissionContinuePending,
+                      self.automaticSuspensionReasons.isEmpty else { return }
                 self.permissionMonitor.refresh()
             }
         }
@@ -8517,7 +8576,10 @@ final class OnboardingPrimaryButton: NSButton {
         welcomeEmojiView: NSView,
         iconShineView: AppIconShineView
     ) {
-        let windowSize = NSSize(width: 540, height: 665)
+        let visibleFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+        let windowSize = OnboardingPageLayout.windowSize(for: 1, visibleFrame: visibleFrame)
+        let compactPermissions = OnboardingPageLayout.needsCompactLayout(for: 1, visibleFrame: visibleFrame)
+        let compactKeyboard = OnboardingPageLayout.needsCompactLayout(for: 2, visibleFrame: visibleFrame)
         let panelCornerRadius: CGFloat = 28
         let panel = PermissionSetupPanel(
             contentRect: NSRect(origin: .zero, size: windowSize),
@@ -8654,9 +8716,9 @@ final class OnboardingPrimaryButton: NSButton {
 
         titleLabel.alignment = .center
         NSLayoutConstraint.activate([
-            iconContainer.heightAnchor.constraint(equalToConstant: 92),
-            iconView.widthAnchor.constraint(equalToConstant: 92),
-            iconView.heightAnchor.constraint(equalToConstant: 92),
+            iconContainer.heightAnchor.constraint(equalToConstant: compactPermissions ? 48 : 92),
+            iconView.widthAnchor.constraint(equalToConstant: compactPermissions ? 48 : 92),
+            iconView.heightAnchor.constraint(equalToConstant: compactPermissions ? 48 : 92),
             iconView.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor),
             iconView.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
             iconShineView.leadingAnchor.constraint(equalTo: iconView.leadingAnchor),
@@ -8744,8 +8806,17 @@ final class OnboardingPrimaryButton: NSButton {
         desktopManagerHeading.textColor = .labelColor
         desktopManagerHeading.translatesAutoresizingMaskIntoConstraints = false
 
+        // Separate Spaces changes how the Desktop Manager lays out displays,
+        // so it lives in the same card and drives its preview.
+        let separateSpacesRow = OnboardingSeparateSpacesRowView(
+            snapshot: separateSpacesPreferenceController.refresh(), compact: compactPermissions, embedded: true
+        ) { [weak self] enabled in
+            self?.setSeparateSpacesFromOnboarding(enabled)
+        }
+        permissionSetupSeparateSpacesRowView = separateSpacesRow
+
         let desktopManagerRow = OnboardingDesktopManagerRowView(
-            isOn: isDesktopManagerEnabled
+            isOn: isDesktopManagerEnabled, compact: compactPermissions, separateSpacesRow: separateSpacesRow
         ) { [weak self] enabled in
             self?.setDesktopManagerEnabled(enabled)
         }
@@ -8760,24 +8831,28 @@ final class OnboardingPrimaryButton: NSButton {
                 permissionHeading,
                 setupView,
                 desktopManagerHeading,
-                desktopManagerRow,
-                bottomControlsRow
+                desktopManagerRow
             ]
         )
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
-        contentStack.spacing = 13
+        contentStack.spacing = compactPermissions ? 8 : 13
         contentStack.translatesAutoresizingMaskIntoConstraints = false
-        contentStack.setCustomSpacing(16, after: iconContainer)
-        contentStack.setCustomSpacing(12, after: titleContainer)
-        contentStack.setCustomSpacing(14, after: introductionLabel)
+        contentStack.setCustomSpacing(compactPermissions ? 8 : 16, after: iconContainer)
+        contentStack.setCustomSpacing(compactPermissions ? 8 : 12, after: titleContainer)
+        contentStack.setCustomSpacing(compactPermissions ? 8 : 14, after: introductionLabel)
         contentStack.setCustomSpacing(8, after: permissionHeading)
-        contentStack.setCustomSpacing(14, after: setupView)
+        contentStack.setCustomSpacing(compactPermissions ? 8 : 14, after: setupView)
         contentStack.setCustomSpacing(8, after: desktopManagerHeading)
-        contentStack.setCustomSpacing(14, after: desktopManagerRow)
+        contentStack.setCustomSpacing(compactPermissions ? 8 : 14, after: desktopManagerRow)
         buttonStack.setHuggingPriority(.required, for: .horizontal)
 
-        contentView.addSubview(contentStack)
+        let firstPage = OnboardingPermissionsPageView(
+            body: contentStack, footer: bottomControlsRow,
+            instructions: setupView.instructionView, compact: compactPermissions
+        )
+        permissionSetupFirstPageView = firstPage
+        contentView.addSubview(firstPage)
         if let closeButton = NSWindow.standardWindowButton(.closeButton, for: [.titled, .closable]) {
             closeButton.target = self
             closeButton.action = #selector(closePermissionSetup)
@@ -8792,34 +8867,21 @@ final class OnboardingPrimaryButton: NSButton {
                 closeButton.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 18)
             ])
         }
-        setupView.instructionView.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(setupView.instructionView)
+        permissionSetupFirstPageConstraints = OnboardingPageLayout.edgeConstraints(
+            for: firstPage, in: contentView,
+            topInset: compactPermissions ? 24 : 28, bottomInset: compactPermissions ? 12 : 18
+        )
+        NSLayoutConstraint.activate(permissionSetupFirstPageConstraints)
         NSLayoutConstraint.activate([
-            contentStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 34),
-            contentStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -34),
-            contentStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 28),
             iconContainer.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             titleContainer.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             introductionLabel.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             setupView.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            desktopManagerRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            bottomControlsRow.widthAnchor.constraint(
-                equalTo: contentStack.widthAnchor,
-                constant: -14
-            ),
-            setupView.instructionView.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
-            setupView.instructionView.centerXAnchor.constraint(equalTo: contentStack.centerXAnchor),
-            setupView.instructionView.bottomAnchor.constraint(
-                equalTo: contentView.bottomAnchor,
-                constant: -18
-            ),
-            contentStack.bottomAnchor.constraint(
-                lessThanOrEqualTo: setupView.instructionView.topAnchor,
-                constant: -12
-            )
+            desktopManagerRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
         ])
 
         let keyboardSettingsView = OnboardingKeyboardSettingsView(
+            compact: compactKeyboard,
             onBack: { [weak self] in
                 self?.transitionFromOnboardingStep2ToStep1()
             },
@@ -8828,8 +8890,6 @@ final class OnboardingPrimaryButton: NSButton {
             }
         )
         keyboardSettingsView.translatesAutoresizingMaskIntoConstraints = false
-        keyboardSettingsView.isHidden = true
-        keyboardSettingsView.alphaValue = 0
         keyboardSettingsView.onToggle = { [weak self] enabled in
             self?.setKeyboardNavigationEnabled(enabled)
         }
@@ -8838,17 +8898,16 @@ final class OnboardingPrimaryButton: NSButton {
             self?.openShortcutHotKey?.reloadHotKeys()
             self?.refreshKeyboardNavigationMenu()
         }
+        keyboardSettingsView.isHidden = true
+        keyboardSettingsView.alphaValue = 0
         contentView.addSubview(keyboardSettingsView)
         permissionSetupKeyboardSettingsView = keyboardSettingsView
-        permissionSetupContentStack = contentStack
         onboardingCurrentStep = 1
 
-        NSLayoutConstraint.activate([
-            keyboardSettingsView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 34),
-            keyboardSettingsView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -34),
-            keyboardSettingsView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 28),
-            keyboardSettingsView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -20)
-        ])
+        permissionSetupKeyboardPageConstraints = OnboardingPageLayout.edgeConstraints(
+            for: keyboardSettingsView, in: contentView,
+            topInset: compactKeyboard ? 20 : 28, bottomInset: compactKeyboard ? 16 : 20
+        )
 
         let entranceViews: [NSView] = [
             iconContainer,
@@ -9090,7 +9149,7 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     @objc private func continuePermissionSetup() {
-        guard permissionSetupInProgress, !permissionContinuePending,
+        guard permissionSetupInProgress, onboardingCurrentStep == 1, !permissionContinuePending,
               !permissionRelaunchScheduled, !isQuitting,
               automaticSuspensionReasons.isEmpty else { return }
         permissionContinueGeneration += 1
@@ -9113,7 +9172,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func transitionToOnboardingStep2() {
         guard onboardingCurrentStep == 1,
-              let step1 = permissionSetupContentStack,
+              let step1 = permissionSetupFirstPageView,
               let step2 = permissionSetupKeyboardSettingsView else { return }
         onboardingCurrentStep = 2
         permissionSetupContinueButton?.keyEquivalent = ""
@@ -9122,28 +9181,24 @@ final class OnboardingPrimaryButton: NSButton {
         )
 
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let instructionView = permissionSetupView?.instructionView
-
         if reduceMotion {
             step1.isHidden = true
-            instructionView?.isHidden = true
+            resizePermissionSetupWindow(for: 2)
             step2.isHidden = false
             step2.alphaValue = 1
         } else {
             step1.wantsLayer = true
             step2.wantsLayer = true
-            instructionView?.wantsLayer = true
 
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.20
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 step1.animator().alphaValue = 0
                 step1.layer?.transform = CATransform3DMakeTranslation(-20, 0, 0)
-                instructionView?.animator().alphaValue = 0
             } completionHandler: { [weak self] in
                 guard let self, self.onboardingCurrentStep == 2 else { return }
                 step1.isHidden = true
-                instructionView?.isHidden = true
+                self.resizePermissionSetupWindow(for: 2)
 
                 step2.isHidden = false
                 step2.alphaValue = 0
@@ -9161,24 +9216,20 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func transitionFromOnboardingStep2ToStep1() {
         guard onboardingCurrentStep == 2,
-              let step1 = permissionSetupContentStack,
+              let step1 = permissionSetupFirstPageView,
               let step2 = permissionSetupKeyboardSettingsView else { return }
         onboardingCurrentStep = 1
         permissionSetupContinueButton?.keyEquivalent = "\r"
 
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let instructionView = permissionSetupView?.instructionView
-
         if reduceMotion {
             step2.isHidden = true
+            resizePermissionSetupWindow(for: 1)
             step1.isHidden = false
             step1.alphaValue = 1
-            instructionView?.isHidden = false
-            instructionView?.alphaValue = 1
         } else {
             step1.wantsLayer = true
             step2.wantsLayer = true
-            instructionView?.wantsLayer = true
 
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0.20
@@ -9188,27 +9239,76 @@ final class OnboardingPrimaryButton: NSButton {
             } completionHandler: { [weak self] in
                 guard let self, self.onboardingCurrentStep == 1 else { return }
                 step2.isHidden = true
+                self.resizePermissionSetupWindow(for: 1)
 
                 step1.isHidden = false
                 step1.alphaValue = 0
                 step1.layer?.transform = CATransform3DMakeTranslation(-20, 0, 0)
-
-                instructionView?.isHidden = false
-                instructionView?.alphaValue = 0
 
                 NSAnimationContext.runAnimationGroup { ctx2 in
                     ctx2.duration = 0.24
                     ctx2.timingFunction = CAMediaTimingFunction(name: .easeOut)
                     step1.animator().alphaValue = 1
                     step1.layer?.transform = CATransform3DIdentity
-                    instructionView?.animator().alphaValue = 1
                 }
             }
         }
     }
 
+    private func resizePermissionSetupWindow(for step: Int) {
+        guard let window = permissionSetupWindow else { return }
+        NSLayoutConstraint.deactivate(permissionSetupFirstPageConstraints + permissionSetupKeyboardPageConstraints)
+        NSLayoutConstraint.activate(step == 1 ? permissionSetupFirstPageConstraints : permissionSetupKeyboardPageConstraints)
+        let visibleFrame = (window.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+        let size = OnboardingPageLayout.windowSize(for: step, visibleFrame: visibleFrame)
+        var frame = window.frame
+        // Keep the title and close button stationary across page transitions.
+        frame.origin.y = frame.maxY - size.height
+        frame.size = size
+        if let visibleFrame {
+            frame.origin.y = min(max(frame.minY, visibleFrame.minY + 12),
+                                 visibleFrame.maxY - 12 - frame.height)
+        }
+        window.setFrame(frame, display: true)
+    }
+
+    private func setSeparateSpacesFromOnboarding(_ enabled: Bool) {
+        let result = separateSpacesPreferenceController.setEnabled(enabled)
+        permissionSetupSeparateSpacesRowView?.update(separateSpacesPreferenceController.snapshot)
+        switch result {
+        case .changed, .unchanged:
+            return
+        case .managed, .unavailable, .failed:
+            guard let window = permissionSetupWindow else { return }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Unable to change Displays have separate Spaces"
+            alert.informativeText = result == .managed
+                ? "This macOS setting is managed by your organization."
+                : "macOS did not confirm the change. The switch reflects the last observed setting. You can change it in System Settings > Desktop & Dock > Mission Control."
+            alert.addButton(withTitle: "Open System Settings")
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard response == .alertFirstButtonReturn else { return }
+                self?.openDesktopAndDockSettings()
+            }
+        }
+    }
+
+    private func refreshSeparateSpacesOnboardingRow(force: Bool = true) {
+        guard !isQuitting, onboardingCurrentStep == 1, permissionSetupWindow?.isVisible == true,
+              let row = permissionSetupSeparateSpacesRowView else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard force || now >= nextSeparateSpacesRefresh else { return }
+        nextSeparateSpacesRefresh = now + 1
+        let previous = separateSpacesPreferenceController.snapshot
+        let observed = separateSpacesPreferenceController.refresh()
+        // Do not reset the native switch animation on every polling tick.
+        if force || observed != previous { row.update(observed) }
+    }
+
     private func finishOnboardingFromKeyboardSettings() {
-        guard permissionSetupInProgress, !permissionContinuePending,
+        guard permissionSetupInProgress, onboardingCurrentStep == 2, !permissionContinuePending,
               !permissionRelaunchScheduled, !isQuitting,
               automaticSuspensionReasons.isEmpty else { return }
         permissionContinueGeneration += 1
@@ -9255,9 +9355,9 @@ final class OnboardingPrimaryButton: NSButton {
             case .continueInPlace:
                 self.finishPermissionSetupInPlace(generation: generation)
             case .restart:
+                self.permissionConfirmation.request(.onboarding)
                 MajorReleaseOnboarding.markCompleted()
                 UserDefaults.standard.set(true, forKey: Self.permissionSetupCompletedKey)
-                UserDefaults.standard.set(true, forKey: Self.showStartedPopoverAfterRelaunchKey)
                 self.dismissPermissionSetup()
                 self.scheduleRelaunchAfterPermissionSetup()
             }
@@ -9280,12 +9380,14 @@ final class OnboardingPrimaryButton: NSButton {
             confirmPermissionCompletion(generation: generation, initializationFailed: true)
             return
         }
+        permissionConfirmation.request(.onboarding)
         MajorReleaseOnboarding.markCompleted()
         dismissPermissionSetup(preservingPermissionState: true)
-        completePermissionSetup(forceStartedPopover: true)
+        completePermissionSetup()
     }
 
     @objc private func cancelPermissionSetup() {
+        MajorReleaseOnboarding.markDismissed()
         dismissPermissionSetup()
         NSApp.terminate(self)
     }
@@ -9294,11 +9396,15 @@ final class OnboardingPrimaryButton: NSButton {
         permissionSetupRequested = false
         // Closing is not completion or quitting. Keep permission monitoring alive
         // and leave unfinished setup available from the menu-bar recovery action.
+        // Someone who finished the tour before goes back to normal recovery.
+        MajorReleaseOnboarding.markDismissed()
         dismissPermissionSetup(preservingPermissionState: true)
         updateDockAwayMenuState()
+        permissionMonitor.refresh(force: true)
     }
 
     private func dismissPermissionSetup(preservingPermissionState: Bool = false) {
+        separateSpacesPreferenceController.stopObserving()
         permissionSetupTimer?.invalidate()
         permissionSetupTimer = nil
         permissionSetupWindow?.orderOut(nil)
@@ -9307,8 +9413,12 @@ final class OnboardingPrimaryButton: NSButton {
         permissionSetupContinueButton = nil
         permissionSetupLaunchAtLoginRowView = nil
         permissionSetupDesktopManagerRowView = nil
+        permissionSetupSeparateSpacesRowView = nil
+        nextSeparateSpacesRefresh = 0
         permissionSetupKeyboardSettingsView = nil
-        permissionSetupContentStack = nil
+        permissionSetupFirstPageView = nil
+        permissionSetupFirstPageConstraints.removeAll()
+        permissionSetupKeyboardPageConstraints.removeAll()
         onboardingCurrentStep = 1
         permissionSetupInProgress = false
         permissionContinuePending = false
@@ -9355,9 +9465,7 @@ final class OnboardingPrimaryButton: NSButton {
         permissionRelaunchIsAutomatic = false
         permissionRecovery.allowRetry()
         UserDefaults.standard.removeObject(forKey: Self.automaticPermissionRelaunchAttemptedKey)
-        UserDefaults.standard.removeObject(forKey: Self.showRestartedPopoverAfterRelaunchKey)
         UserDefaults.standard.removeObject(forKey: Self.permissionRelaunchWasPausedKey)
-        UserDefaults.standard.set(false, forKey: Self.showStartedPopoverAfterRelaunchKey)
     }
 
     private func performPermissionRelaunch(automaticRecovery: Bool) {
@@ -9369,8 +9477,6 @@ final class OnboardingPrimaryButton: NSButton {
             isPermissionRelaunching = false
             permissionRelaunchScheduled = false
             permissionRelaunchIsAutomatic = false
-            UserDefaults.standard.set(false, forKey: Self.showStartedPopoverAfterRelaunchKey)
-            UserDefaults.standard.removeObject(forKey: Self.showRestartedPopoverAfterRelaunchKey)
             UserDefaults.standard.removeObject(forKey: Self.permissionRelaunchWasPausedKey)
             if !automaticRecovery { presentPermissionSetup() }
             permissionMonitor.refresh(force: true)
@@ -9402,74 +9508,68 @@ final class OnboardingPrimaryButton: NSButton {
         try helper.run()
     }
 
-    private func completePermissionSetup(
-        allowStartedPopover: Bool = true,
-        forceStartedPopover: Bool = false,
-        restarted: Bool = false
-    ) {
-        guard permissionMonitor.snapshot?.allGranted == true,
+    private func completePermissionSetup() {
+        guard !permissionSetupInProgress, !MajorReleaseOnboarding.needsPresentation(),
+              permissionMonitor.snapshot?.allGranted == true,
               accessibilityAccessGranted, inputMonitoringAccessGranted else { return }
         let defaults = UserDefaults.standard
-        let isFirstCompletedSetup = !defaults.bool(
-            forKey: Self.permissionSetupCompletedKey
-        )
-        let shouldShowAfterRelaunch = defaults.bool(
-            forKey: Self.showStartedPopoverAfterRelaunchKey
-        )
-        let recoveryPending = !isFirstCompletedSetup && defaults.bool(forKey: Self.permissionRecoveryPendingKey)
-        let shouldShowStartedPopover = allowStartedPopover
-            && (isFirstCompletedSetup || shouldShowAfterRelaunch || forceStartedPopover || recoveryPending)
-        let showRestarted = restarted || recoveryPending
-            || defaults.bool(forKey: Self.showRestartedPopoverAfterRelaunchKey)
+        if !defaults.bool(forKey: Self.permissionSetupCompletedKey) {
+            permissionConfirmation.request(.onboarding)
+        }
         defaults.set(true, forKey: Self.permissionSetupCompletedKey)
         defaults.removeObject(forKey: Self.automaticPermissionRelaunchAttemptedKey)
-        if shouldShowStartedPopover {
-            defaults.set(false, forKey: Self.showStartedPopoverAfterRelaunchKey)
-            defaults.removeObject(forKey: Self.showRestartedPopoverAfterRelaunchKey)
-            defaults.removeObject(forKey: Self.permissionRecoveryPendingKey)
-        }
 
         if dockWatcher == nil {
             dockWatcher = DockWatcher()
         }
         // Apply only after this process has usable access, whether onboarding
         // completed in place or a fallback relaunch was needed.
-        if allowStartedPopover {
-            removeInitialDockRevealDelayIfNeeded()
-        }
+        removeInitialDockRevealDelayIfNeeded()
         startMonitoringIfAllowed()
         ensureDockAwayIsOn()
         startupDockRestart.requestIfReady()
         updateDockAwayMenuState()
 
-        if shouldShowStartedPopover {
+        if permissionConfirmation.beginPresentation() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
-                self?.showStartedPopoverAfterDockRestart(restarted: showRestarted)
+                self?.showStartedPopoverAfterDockRestart()
             }
         }
     }
 
-    private func showStartedPopoverAfterDockRestart(restarted: Bool) {
+    private func showStartedPopoverAfterDockRestart() {
         guard !isQuitting, !permissionRelaunchScheduled, !permissionSetupInProgress,
+              completedPermissionOnboarding,
               accessibilityAccessGranted, inputMonitoringAccessGranted,
-              automaticSuspensionReasons.isEmpty else { return }
+              automaticSuspensionReasons.isEmpty else {
+            permissionConfirmation.deferPresentation()
+            return
+        }
         guard !dockSettingsRestartInProgress else {
             // Confirm startup only after the replacement is ready. This does
             // not alter the confetti button's interaction/dismissal cooldown.
             DockLifecycleRunLoop.schedule(after: 0.25) { [weak self] in
-                self?.showStartedPopoverAfterDockRestart(restarted: restarted)
+                self?.showStartedPopoverAfterDockRestart()
             }
             return
         }
-        showDockAwayStartedPopover(restarted: restarted)
+        guard let reason = permissionConfirmation.pendingReason else {
+            permissionConfirmation.deferPresentation()
+            return
+        }
+        if showDockAwayStartedPopover(reason: reason) {
+            permissionConfirmation.didPresent(reason)
+        } else {
+            permissionConfirmation.deferPresentation()
+        }
     }
 
-    private func showDockAwayStartedPopover(restarted: Bool = false) {
-        showMenuBarPopover(
+    private func showDockAwayStartedPopover(reason: PermissionCompletionConfirmation.Reason) -> Bool {
+        return showMenuBarPopover(
             symbolName: "checkmark.circle.fill",
-            symbolDescription: restarted ? "DockAway restarted" : "DockAway started",
+            symbolDescription: reason.accessibilityDescription,
             symbolColor: .systemGreen,
-            title: restarted ? "DockAway has restarted " : "DockAway has successfully started ",
+            title: reason.title,
             detail: "You can manage it here from the menu bar.",
             contentSize: NSSize(width: 275, height: 60),
             celebrationEmoji: "🎉"
@@ -9508,6 +9608,7 @@ final class OnboardingPrimaryButton: NSButton {
         )
     }
 
+    @discardableResult
     private func showMenuBarPopover(
         symbolName: String,
         symbolDescription: String,
@@ -9516,8 +9617,9 @@ final class OnboardingPrimaryButton: NSButton {
         detail: String,
         contentSize: NSSize,
         celebrationEmoji: String? = nil
-    ) {
-        guard let statusButton = statusItem?.button else { return }
+    ) -> Bool {
+        guard let statusButton = statusItem?.button,
+              statusButton.window?.isVisible == true else { return false }
 
         closeStartedPopover()
 
@@ -9612,7 +9714,13 @@ final class OnboardingPrimaryButton: NSButton {
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let contentView = NSView(frame: NSRect(origin: .zero, size: contentSize))
+        var fittedContentSize = contentSize
+        if celebrationButton != nil {
+            // Preserve the one-line title and emoji without compressing either
+            // when the confirmation uses the longer restart wording.
+            fittedContentSize.width = max(contentSize.width, ceil(titleView.fittingSize.width) + 66)
+        }
+        let contentView = NSView(frame: NSRect(origin: .zero, size: fittedContentSize))
         contentView.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
@@ -9638,6 +9746,12 @@ final class OnboardingPrimaryButton: NSButton {
             of: positioningView,
             preferredEdge: .minY
         )
+        guard popover.isShown else {
+            popover.close()
+            anchor?.close()
+            startedPopoverAnchor = nil
+            return false
+        }
         startedPopover = popover
         startedPopoverContentView = contentView
         startedPopoverCelebrationButton = celebrationButton
@@ -9661,6 +9775,7 @@ final class OnboardingPrimaryButton: NSButton {
                 )
             }
         }
+        return true
     }
 
     @objc private func replayStartedPopoverConfetti(_ sender: NSButton) {
@@ -10038,10 +10153,10 @@ final class OnboardingPrimaryButton: NSButton {
         permissionRecovery.observeAuthorization(snapshot)
         if snapshot?.allGranted == false {
             UserDefaults.standard.removeObject(forKey: Self.automaticPermissionRelaunchAttemptedKey)
-            if completedPermissionOnboarding {
+            if canRecoverPermissionsWithoutOnboarding {
                 // Keep the confirmation across macOS's own Quit & Reopen flow,
                 // not just relaunches initiated by DockAway.
-                UserDefaults.standard.set(true, forKey: Self.permissionRecoveryPendingKey)
+                permissionConfirmation.request(.permissionRecovery)
             }
         }
         if snapshot?.allGranted != true {
@@ -10067,7 +10182,7 @@ final class OnboardingPrimaryButton: NSButton {
         renderPermissionSetupState()
         updateDockAwayMenuState()
 
-        if completedPermissionOnboarding, snapshot?.allGranted == true,
+        if canRecoverPermissionsWithoutOnboarding, snapshot?.allGranted == true,
            !permissionContinuePending, !permissionRelaunchScheduled,
            automaticSuspensionReasons.isEmpty, !dockSettingsRestartInProgress {
             // A system grant is not onboarding completion. Existing users only
@@ -10079,12 +10194,10 @@ final class OnboardingPrimaryButton: NSButton {
                 recoverPermissionsWithoutOnboarding(snapshot)
                 return
             }
-            if permissionSetupInProgress || UserDefaults.standard.bool(forKey: Self.permissionRecoveryPendingKey) {
-                if permissionSetupInProgress {
-                    dismissPermissionSetup(preservingPermissionState: true)
-                }
+            if permissionConfirmation.pendingReason != nil {
                 permissionSetupRequested = false
-                completePermissionSetup(forceStartedPopover: true, restarted: true)
+                permissionConfirmation.request(.permissionRecovery)
+                completePermissionSetup()
                 return
             }
         }
@@ -10121,12 +10234,10 @@ final class OnboardingPrimaryButton: NSButton {
         guard let generation = permissionRecovery.begin(
             authorization: authorization,
             setupCompleted: UserDefaults.standard.bool(forKey: Self.permissionSetupCompletedKey),
-            onboardingRequired: MajorReleaseOnboarding.needsPresentation()
+            onboardingRequired: MajorReleaseOnboarding.needsPresentation(),
+            onboardingInProgress: permissionSetupInProgress
         ) else { return }
-        UserDefaults.standard.set(true, forKey: Self.permissionRecoveryPendingKey)
-        if permissionSetupInProgress {
-            dismissPermissionSetup(preservingPermissionState: true)
-        }
+        permissionConfirmation.request(.permissionRecovery)
         updateDockAwayMenuState()
         dockAwayDebugLog("Rechecking runtime access after permissions were restored externally")
         runtimePermissionAccess.refresh { [weak self] in
@@ -10138,7 +10249,7 @@ final class OnboardingPrimaryButton: NSButton {
     private func isPermissionRecoveryCurrent(_ generation: Int) -> Bool {
         permissionRecovery.isCurrent(generation) && !isQuitting
             && !permissionContinuePending && !permissionRelaunchScheduled
-            && automaticSuspensionReasons.isEmpty && completedPermissionOnboarding
+            && automaticSuspensionReasons.isEmpty && canRecoverPermissionsWithoutOnboarding
     }
 
     private func confirmAutomaticPermissionRecovery(generation: Int, initializationFailed: Bool = false) {
@@ -10161,14 +10272,13 @@ final class OnboardingPrimaryButton: NSButton {
                     return
                 }
                 self.permissionRecovery.finish(generation: generation)
-                self.completePermissionSetup(forceStartedPopover: true, restarted: true)
+                self.completePermissionSetup()
                 dockAwayDebugLog("Permission access restored in place without onboarding")
             case .restart:
                 self.permissionRecovery.finish(generation: generation)
                 let defaults = UserDefaults.standard
                 defaults.set(true, forKey: Self.automaticPermissionRelaunchAttemptedKey)
-                defaults.set(true, forKey: Self.showStartedPopoverAfterRelaunchKey)
-                defaults.set(true, forKey: Self.showRestartedPopoverAfterRelaunchKey)
+                self.permissionConfirmation.request(.permissionRecovery)
                 self.scheduleRelaunchAfterPermissionSetup(automaticRecovery: true)
                 dockAwayDebugLog("Permission access requires one automatic DockAway relaunch")
             }
@@ -10364,6 +10474,7 @@ final class OnboardingPrimaryButton: NSButton {
         desktopChangeTooltip.dismiss()
         DockSettingKeyRebindRowView.stopRecording()
         screenshotClipboardManager.stopMonitoring()
+        screenshotClipboardManager.restoreThumbnail()
         greenButtonFillController.stop()
         finderDeleteKeyController.stop()
         quickLookCopyOrientationManager.stop()
@@ -10380,6 +10491,7 @@ final class OnboardingPrimaryButton: NSButton {
         permissionHealthTimer = nil
         permissionSetupTimer?.invalidate()
         permissionSetupTimer = nil
+        separateSpacesPreferenceController.stopObserving()
         permissionContinuePending = false
         permissionMonitor.stop()
         runtimePermissionAccess.invalidate()

@@ -51,7 +51,7 @@ final class PopoverInteractionCooldown {
     private var active = false
     private var interacting = false
 
-    init(delay: TimeInterval = 3.5, schedule: Scheduler? = nil,
+    init(delay: TimeInterval = 5, schedule: Scheduler? = nil,
          dismiss: @escaping () -> Void) {
         self.delay = delay
         self.dismiss = dismiss

@@ -192,6 +192,7 @@ final class DockSettingPersistenceRowView: NSView {
     private var displayedIsOn: Bool?
     private var controlEnabled = true
     private(set) var helpButton: DockSettingHelpButton?
+    private(set) var hierarchyArrowView: NSImageView?
     var helpControl: NSButton? { helpButton }
 
     init(
@@ -200,6 +201,7 @@ final class DockSettingPersistenceRowView: NSView {
         width: CGFloat = 190,
         shortcut: String? = nil,
         leadingInset: CGFloat = 18,
+        hierarchyParentLeadingInset: CGFloat? = nil,
         trailingInset: CGFloat = 12,
         titleLeadingAdjustment: CGFloat = 0,
         fullRowHitTarget: Bool = true,
@@ -275,6 +277,27 @@ final class DockSettingPersistenceRowView: NSView {
             ),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
         ]
+
+        if let hierarchyParentLeadingInset {
+            let arrow = NSImageView()
+            arrow.image = NSImage(systemSymbolName: "arrow.turn.down.right", accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
+            arrow.contentTintColor = .secondaryLabelColor
+            arrow.imageScaling = .scaleProportionallyDown
+            arrow.translatesAutoresizingMaskIntoConstraints = false
+            arrow.setAccessibilityElement(false)
+            hierarchyArrowView = arrow
+            addSubview(arrow)
+            // Align the symbol's vertical stem beneath the parent checkbox.
+            // Its right-facing end points toward the indented child control.
+            rowConstraints += [
+                arrow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: hierarchyParentLeadingInset + 5),
+                arrow.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 2),
+                arrow.widthAnchor.constraint(equalToConstant: 18),
+                arrow.heightAnchor.constraint(equalToConstant: 18),
+                arrow.trailingAnchor.constraint(lessThanOrEqualTo: checkbox.leadingAnchor, constant: -5)
+            ]
+        }
 
         if let helpTextProvider {
             let button = DockSettingHelpButton(
@@ -398,6 +421,7 @@ final class DockSettingPersistenceRowView: NSView {
         checkbox.isEnabled = enabled
         titleLabel.alphaValue = enabled || isShowingResetActionSuccess ? 1 : 0.45
         shortcutLabel.alphaValue = enabled ? 1 : 0.45
+        hierarchyArrowView?.alphaValue = enabled ? 1 : 0.45
         helpButton?.isEnabled = true
         helpButton?.alphaValue = enabled ? 1 : 0.65
     }

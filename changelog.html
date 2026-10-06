@@ -9,6 +9,27 @@
     </style>
 </head>
 <body>
+    <h3>Version 2.1.1 <span style="font-weight: normal;">(10-6-26)</span></h3>
+    <h4>New Features</h4>
+    <ul>
+        <li><b>Copy Instantly:</b> A new nested option under Extras &gt; Save Screenshots to Clipboard hides macOS's floating screenshot thumbnail, so screenshots save and copy without waiting for it to disappear. Files still save to your screenshot folder. The indented checkbox and down-and-right arrow make its relationship to the parent option clear. Turning either option off or quitting DockAway restores your thumbnail preference; manually re-enabling the thumbnail in Screenshot Options turns Copy Instantly off.</li>
+        <li><b>Separate Spaces in Onboarding:</b> A native “Displays have separate Spaces” switch in the Desktop Manager card controls the actual macOS setting and stays in sync with System Settings. Your existing choice is preserved, and an inline “Requires log out” notice appears only when logging out and back in is needed to apply a change.</li>
+        <li><b>Dynamic Desktop Manager Preview:</b> The onboarding preview smoothly switches between separate display sections and a shared All Displays layout as you toggle Separate Spaces. The enlarged preview updates too, letting you see how either choice will look before logging out.</li>
+    </ul>
+    <h4>Improvements</h4>
+    <ul>
+        <li><b>Adaptive Onboarding:</b> Both setup pages use compact layouts on shorter displays, keeping their navigation controls visible without scrolling.</li>
+        <li><b>Longer Startup Confirmation:</b> Startup and restart confirmations now stay visible for five seconds instead of 3.5. Confetti clicks reset the countdown, and holding the button keeps it paused.</li>
+    </ul>
+    <h4>Bug Fixes</h4>
+    <ul>
+        <li><b>Complete Onboarding at Your Own Pace:</b> Granting permissions no longer closes onboarding or skips keyboard navigation setup. Continue advances to the keyboard page, and Get Started completes the tour. Unfinished onboarding also resumes after macOS quits and reopens DockAway during permission setup. If you've completed onboarding before, closing or quitting setup lets DockAway resume as soon as access is restored.</li>
+        <li><b>Accurate Unavailable Desktop Counts:</b> The Menubar Desktop Indicator shows “? of ?” instead of a misleading “1 of 1” when desktop information is unavailable, including before permissions are granted. Other indicator styles and their previews also show unknown counts appropriately.</li>
+        <li><b>Correct Start and Restart Messages:</b> Completing onboarding shows “DockAway has successfully started,” even when permission setup required a relaunch. Permission recovery shows “DockAway has successfully restarted.” Confirmations wait until DockAway is ready, and the pill fits either message on one line.</li>
+        <li><b>Enlarged Preview Closes When You Continue:</b> The enlarged Desktop Manager preview in onboarding no longer stays on screen after you press Return to continue to the keyboard navigation page.</li>
+    </ul>
+    <hr>
+
     <h3>Version 2.1 <span style="font-weight: normal;">(10-4-26)</span></h3>
     <h4>New Features</h4>
     <ul>
