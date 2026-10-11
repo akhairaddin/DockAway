@@ -36,6 +36,20 @@ nonisolated struct AccessibilityRequestBudget {
         } ?? nil
     }
 
+    /// Reads an attribute, telling a value that doesn't exist apart from a
+    /// read that failed or ran out of time.
+    func attribute(_ name: String, of element: AXUIElement) -> (value: CFTypeRef?, failed: Bool) {
+        var value: CFTypeRef?
+        guard let error = perform(on: element, {
+            AXUIElementCopyAttributeValue(element, name as CFString, &value)
+        }) else { return (nil, true) }
+        switch error {
+        case .success: return (value, false)
+        case .noValue, .attributeUnsupported: return (nil, false)
+        default: return (nil, true)
+        }
+    }
+
     func string(_ name: String, of element: AXUIElement) -> String? {
         perform(on: element) { element.string(name) } ?? nil
     }

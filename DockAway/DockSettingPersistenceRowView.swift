@@ -193,6 +193,9 @@ final class DockSettingPersistenceRowView: NSView {
     private var controlEnabled = true
     private(set) var helpButton: DockSettingHelpButton?
     private(set) var hierarchyArrowView: NSImageView?
+    /// Plays a preview, such as a sound, without changing the setting.
+    private(set) var previewButton: NSButton?
+    private let previewHandler: (() -> Void)?
     var helpControl: NSButton? { helpButton }
 
     init(
@@ -214,8 +217,11 @@ final class DockSettingPersistenceRowView: NSView {
         leadingControlStyle: LeadingControlStyle = .checkbox,
         helpHeading: String? = nil,
         helpTextProvider: (() -> String)? = nil,
+        previewAccessibilityLabel: String? = nil,
+        previewHandler: (() -> Void)? = nil,
         changeHandler: @escaping (Bool) -> Void
     ) {
+        self.previewHandler = previewHandler
         self.itemIcon = icon?.copy() as? NSImage
         self.changeHandler = changeHandler
         self.centeredTitle = centeredTitle
@@ -271,12 +277,12 @@ final class DockSettingPersistenceRowView: NSView {
             multiline && checkboxOnFirstLine
                 ? checkbox.centerYAnchor.constraint(equalTo: titleLabel.topAnchor, constant: 6)
                 : checkbox.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.leadingAnchor.constraint(
-                equalTo: checkbox.trailingAnchor,
-                constant: 6 + titleLeadingAdjustment
-            ),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
         ]
+        rowConstraints.append(titleLabel.leadingAnchor.constraint(
+            equalTo: checkbox.trailingAnchor,
+            constant: 6 + titleLeadingAdjustment
+        ))
 
         if let hierarchyParentLeadingInset {
             let arrow = NSImageView()
@@ -337,6 +343,33 @@ final class DockSettingPersistenceRowView: NSView {
             )
         }
 
+        if previewHandler != nil {
+            let button = NSButton()
+            button.isBordered = false
+            button.imagePosition = .imageOnly
+            button.image = NSImage(systemSymbolName: "play.circle", accessibilityDescription: previewAccessibilityLabel)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 14, weight: .regular))
+            button.contentTintColor = .secondaryLabelColor
+            button.setAccessibilityLabel(previewAccessibilityLabel ?? "Preview")
+            button.target = self
+            button.action = #selector(playPreview(_:))
+            button.translatesAutoresizingMaskIntoConstraints = false
+            previewButton = button
+            addSubview(button)
+            // Follows the end of the title.
+            titleLabel.setContentHuggingPriority(.required, for: .horizontal)
+            var buttonConstraints = [
+                button.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 6),
+                button.centerYAnchor.constraint(equalTo: centerYAnchor),
+                button.widthAnchor.constraint(equalToConstant: 16),
+                button.heightAnchor.constraint(equalToConstant: 16)
+            ]
+            if let helpButton {
+                buttonConstraints.append(button.trailingAnchor.constraint(lessThanOrEqualTo: helpButton.leadingAnchor, constant: -8))
+            }
+            rowConstraints.append(contentsOf: buttonConstraints)
+        }
+
         if (multiline || centeredTitle) && helpTextProvider == nil {
             rowConstraints.append(titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12))
         }
@@ -366,6 +399,9 @@ final class DockSettingPersistenceRowView: NSView {
         if let helpButton, helpButton.frame.insetBy(dx: -4, dy: -4).contains(localPoint) {
             return helpButton
         }
+        if let previewButton, previewButton.frame.insetBy(dx: -3, dy: -4).contains(localPoint) {
+            return previewButton
+        }
         guard controlEnabled else { return nil }
         if checkbox.frame.contains(localPoint) {
             return checkbox.hitTest(localPoint) ?? checkbox
@@ -382,12 +418,22 @@ final class DockSettingPersistenceRowView: NSView {
             helpButton.performHelpAction(self)
             return
         }
+        if let previewButton, previewButton.frame.insetBy(dx: -3, dy: -4).contains(localPoint) {
+            // Menus deliver clicks to the row, so play here and keep the menu open.
+            playPreview(previewButton)
+            return
+        }
         guard controlEnabled else { return }
         helpButton?.closePopover()
         checkbox.performClick(nil)
     }
 
     var checkboxControl: NSButton { checkbox }
+
+    @objc private func playPreview(_ sender: Any?) {
+        helpButton?.closePopover()
+        previewHandler?()
+    }
 
     override var toolTip: String? {
         get {
@@ -710,6 +756,11 @@ final class DockAwayMenuRowView: NSView {
         didSet { toolTip = customToolTip }
     }
 
+    /// A value shown at the trailing edge, such as a submenu's current choice.
+    var detail: String? {
+        didSet { needsDisplay = true }
+    }
+
     private let hasSubmenu: Bool
     private let shortcut: String?
     private let leadingInset: CGFloat
@@ -717,6 +768,7 @@ final class DockAwayMenuRowView: NSView {
     private let actionHandler: (() -> Void)?
     private var controlEnabled = true
     private(set) var helpButton: DockSettingHelpButton?
+    private var hierarchyArrowView: NSImageView?
 
     init(
         title: String,
@@ -724,6 +776,7 @@ final class DockAwayMenuRowView: NSView {
         hasSubmenu: Bool = false,
         shortcut: String? = nil,
         leadingInset: CGFloat = 12,
+        hierarchyParentLeadingInset: CGFloat? = nil,
         titleLeadingAdjustment: CGFloat = 2,
         width: CGFloat = 190,
         height: CGFloat = 26,
@@ -750,6 +803,24 @@ final class DockAwayMenuRowView: NSView {
         setAccessibilityLabel(title)
         if actionHandler != nil {
             setAccessibilityRole(.button)
+        }
+        if let hierarchyParentLeadingInset {
+            // Matches DockSettingPersistenceRowView's nested-option arrow.
+            let arrow = NSImageView()
+            arrow.image = NSImage(systemSymbolName: "arrow.turn.down.right", accessibilityDescription: nil)?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
+            arrow.contentTintColor = .secondaryLabelColor
+            arrow.imageScaling = .scaleProportionallyDown
+            arrow.translatesAutoresizingMaskIntoConstraints = false
+            arrow.setAccessibilityElement(false)
+            hierarchyArrowView = arrow
+            addSubview(arrow)
+            NSLayoutConstraint.activate([
+                arrow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: hierarchyParentLeadingInset + 5),
+                arrow.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 2),
+                arrow.widthAnchor.constraint(equalToConstant: 18),
+                arrow.heightAnchor.constraint(equalToConstant: 18)
+            ])
         }
         if let helpTextProvider {
             let button = DockSettingHelpButton(heading: helpHeading ?? title, textProvider: helpTextProvider)
@@ -817,7 +888,16 @@ final class DockAwayMenuRowView: NSView {
         let textHeight = ceil(text.size().height)
 
         let textX: CGFloat = leadingInset + 16 + 6 + titleLeadingAdjustment
-        let rightMargin: CGFloat = helpButton != nil ? 36 : hasSubmenu ? 26 : (shortcut != nil ? 44 : 12)
+        var rightMargin: CGFloat = helpButton != nil ? 36 : hasSubmenu ? 26 : (shortcut != nil ? 44 : 12)
+        var detailText: NSAttributedString?
+        if let detail {
+            let text = NSAttributedString(string: detail, attributes: [
+                .font: NSFont.menuFont(ofSize: 13),
+                .foregroundColor: highlighted ? NSColor.selectedMenuItemTextColor : .secondaryLabelColor
+            ])
+            detailText = text
+            rightMargin += ceil(text.size().width) + 8
+        }
         let textWidth = max(0, bounds.width - textX - rightMargin)
         text.draw(in: NSRect(x: textX, y: (bounds.height - textHeight) / 2, width: textWidth, height: textHeight))
 
@@ -828,6 +908,13 @@ final class DockAwayMenuRowView: NSView {
             drawnIcon.draw(in: iconRect)
         }
         helpButton?.contentTintColor = highlighted ? .selectedMenuItemTextColor : .secondaryLabelColor
+        hierarchyArrowView?.contentTintColor = highlighted ? .selectedMenuItemTextColor : .secondaryLabelColor
+
+        if let detailText {
+            let size = detailText.size()
+            let trailing: CGFloat = helpButton != nil ? 36 : hasSubmenu ? 26 : 12
+            detailText.draw(at: NSPoint(x: bounds.maxX - trailing - ceil(size.width), y: (bounds.height - size.height) / 2))
+        }
 
         if hasSubmenu {
             let chevronColor: NSColor = highlighted ? .selectedMenuItemTextColor : .secondaryLabelColor

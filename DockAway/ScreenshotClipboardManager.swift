@@ -18,6 +18,14 @@ final class ScreenshotClipboardManager {
     private var recentProcessedOrder: [String] = []
     private var captureAnchorMouseLocation: NSPoint?
     private(set) var lastCopiedFileURL: URL?
+    /// Folder scans and image conversion run here, off the main thread that
+    /// DockAway's input handling shares. Only the clipboard write is on main.
+    private let workQueue = DispatchQueue(label: "AK.DockAway.screenshot-clipboard", qos: .userInitiated)
+    /// Lets a newer scan, or a monitoring restart, supersede one in flight.
+    private var scanGeneration = 0
+    /// The capture date of the screenshot last put on the clipboard. An older
+    /// capture that finishes later never replaces a newer one.
+    private var newestCopiedCaptureDate: Date?
     private let thumbnailSuppression = ScreenshotThumbnailSuppression()
 
     var isEnabled: Bool {
@@ -73,7 +81,7 @@ final class ScreenshotClipboardManager {
         self.watchedDirectoryURL = folderURL
         self.isMonitoring = true
 
-        populateExistingFiles(in: folderURL)
+        populateExistingFiles(in: folderURL, scan: scanGeneration)
 
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
@@ -96,6 +104,7 @@ final class ScreenshotClipboardManager {
     func stopMonitoring() {
         pendingDebounceItem?.cancel()
         pendingDebounceItem = nil
+        scanGeneration += 1
 
         healthCheckTimer?.invalidate()
         healthCheckTimer = nil
@@ -154,49 +163,47 @@ final class ScreenshotClipboardManager {
             captureAnchorMouseLocation = nil
             return
         }
+        scanGeneration += 1
+        let scan = scanGeneration
+        workQueue.async {
+            let recent = Self.recentScreenshots(in: folderURL, now: Date())
+            DispatchQueue.main.async { [weak self] in
+                // A newer scan sees the same recent files and any that followed.
+                guard let self, self.scanGeneration == scan else { return }
+                self.processRecentScreenshots(recent)
+            }
+        }
+    }
 
-        let folderName = folderURL.lastPathComponent.lowercased()
-        let isDedicated = folderName.contains("screenshot")
-            || CFPreferencesCopyAppValue("location" as CFString, "com.apple.screencapture" as CFString) != nil
-            || CFPreferencesCopyAppValue("location-screenshot" as CFString, "com.apple.screencapture" as CFString) != nil
-
+    /// Recent screenshots in the folder: files modified in the last 15 seconds
+    /// that macOS tagged as screenshots or that have a screenshot name.
+    nonisolated static func recentScreenshots(in folderURL: URL, now: Date) -> [(url: URL, identifier: String, date: Date)] {
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: folderURL,
-            includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey, .fileSizeKey, .isRegularFileKey],
+            includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
-        ) else {
-            captureAnchorMouseLocation = nil
-            return
-        }
+        ) else { return [] }
 
-        let now = Date()
-        var pendingScreenshots: [(url: URL, identifier: String, date: Date)] = []
-
+        var recent: [(url: URL, identifier: String, date: Date)] = []
         for fileURL in contents {
             let fileName = fileURL.lastPathComponent
-            guard Self.isPotentialScreenshot(fileName: fileName, isInDedicatedScreenshotFolder: isDedicated) else {
-                continue
-            }
-
-            guard let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey, .fileSizeKey, .isRegularFileKey]),
+            guard isSupportedImage(fileName: fileName),
+                  let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey, .fileSizeKey, .isRegularFileKey]),
                   values.isRegularFile == true,
-                  let fileSize = values.fileSize, fileSize > 0 else {
-                continue
-            }
-
+                  let fileSize = values.fileSize, fileSize > 0 else { continue }
             let fileDate = values.contentModificationDate ?? values.creationDate ?? .distantPast
-            // Only process recent files (created/modified within last 15 seconds)
-            guard now.timeIntervalSince(fileDate) <= 15.0 else {
-                continue
-            }
-
-            let fileIdentifier = "\(fileURL.path)_\(fileDate.timeIntervalSince1970)_\(fileSize)"
-            guard !processedFileIdentifiers.contains(fileIdentifier) else {
-                continue
-            }
-
-            pendingScreenshots.append((fileURL, fileIdentifier, fileDate))
+            guard now.timeIntervalSince(fileDate) <= 15.0 else { continue }
+            // Ordinary images saved to the same folder must never replace the clipboard.
+            let isTagged = captureMetadata(for: fileURL)?.isScreenCapture == true
+            guard isPotentialScreenshot(fileName: fileName, isTaggedScreenCapture: isTagged) else { continue }
+            recent.append((fileURL, "\(fileURL.path)_\(fileDate.timeIntervalSince1970)_\(fileSize)", fileDate))
         }
+        return recent
+    }
+
+    private func processRecentScreenshots(_ recent: [(url: URL, identifier: String, date: Date)]) {
+        let now = Date()
+        let pendingScreenshots = recent.filter { !processedFileIdentifiers.contains($0.identifier) }
 
         guard !pendingScreenshots.isEmpty else {
             captureAnchorMouseLocation = nil
@@ -229,9 +236,14 @@ final class ScreenshotClipboardManager {
             Self.baseScreenshotName(from: item.url.lastPathComponent)
         }
 
-        for (_, group) in grouped {
+        // Oldest capture first, so the newest one is copied last.
+        let orderedGroups = grouped.values.sorted {
+            ($0.map(\.date).max() ?? .distantPast) < ($1.map(\.date).max() ?? .distantPast)
+        }
+        for group in orderedGroups {
             if group.count == 1 {
-                verifyAndCopyScreenshot(at: group[0].url, fileIdentifier: group[0].identifier, attempt: 0)
+                verifyAndCopyScreenshot(at: group[0].url, fileIdentifier: group[0].identifier,
+                                        captureDate: group[0].date, attempt: 0)
             } else {
                 // Multi-display capture detected!
                 // 1. Mark ALL candidate files in this group in processedFileIdentifiers immediately
@@ -246,7 +258,8 @@ final class ScreenshotClipboardManager {
 
                 // 3. Unmark only the chosen target and copy it
                 processedFileIdentifiers.remove(targetIdentifier)
-                verifyAndCopyScreenshot(at: targetURL, fileIdentifier: targetIdentifier, attempt: 0)
+                let targetDate = group.first(where: { $0.url == targetURL })?.date ?? group[0].date
+                verifyAndCopyScreenshot(at: targetURL, fileIdentifier: targetIdentifier, captureDate: targetDate, attempt: 0)
             }
         }
     }
@@ -265,6 +278,16 @@ final class ScreenshotClipboardManager {
         guard urls.count > 1 else { return urls[0] }
 
         let point = mousePoint ?? NSEvent.mouseLocation
+        // Each display's file records the area it captured, which identifies
+        // the display exactly, even when two share a resolution.
+        if let primary = NSScreen.screens.first {
+            let globalPoint = CGPoint(x: point.x, y: primary.frame.maxY - point.y)
+            if let match = screenshot(containing: globalPoint, in: urls, captureRect: { captureMetadata(for: $0)?.globalRect }) {
+                return match
+            }
+        }
+
+        // Without that record, fall back to the display's pixel size.
         let activeScreen = NSScreen.screens.first(where: { NSPointInRect(point, $0.frame) }) ?? NSScreen.main
         guard let activeScreen else { return urls[0] }
 
@@ -299,79 +322,105 @@ final class ScreenshotClipboardManager {
         return bestURL ?? urls[0]
     }
 
-    private func verifyAndCopyScreenshot(at url: URL, fileIdentifier: String, attempt: Int) {
-        guard isEnabled else { return }
+    private func verifyAndCopyScreenshot(at url: URL, fileIdentifier: String, captureDate: Date, attempt: Int) {
+        guard isEnabled, !isOlderThanCopiedCapture(captureDate) else { return }
 
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
            CGImageSourceGetStatus(source) == .statusComplete {
-            copyScreenshotToClipboard(from: url, fileIdentifier: fileIdentifier)
+            copyScreenshotToClipboard(from: url, fileIdentifier: fileIdentifier, captureDate: captureDate)
             return
         }
 
         if attempt < 10 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.verifyAndCopyScreenshot(at: url, fileIdentifier: fileIdentifier, attempt: attempt + 1)
+                self?.verifyAndCopyScreenshot(at: url, fileIdentifier: fileIdentifier,
+                                              captureDate: captureDate, attempt: attempt + 1)
             }
         }
     }
 
-    func copyScreenshotToClipboard(from url: URL, fileIdentifier: String) {
-        guard isEnabled else { return }
-        guard !processedFileIdentifiers.contains(fileIdentifier) else { return }
+    private func isOlderThanCopiedCapture(_ captureDate: Date?) -> Bool {
+        guard let captureDate, let newestCopiedCaptureDate else { return false }
+        return captureDate < newestCopiedCaptureDate
+    }
 
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return }
-
-        let ext = url.pathExtension.lowercased()
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-
-        let item = NSPasteboardItem()
-
-        if ext == "png" {
-            item.setData(data, forType: .png)
-        } else if ext == "jpg" || ext == "jpeg" {
-            item.setData(data, forType: .init("public.jpeg"))
-        } else if ext == "heic" {
-            item.setData(data, forType: .init("public.heic"))
-        } else if ext == "tiff" || ext == "tif" {
-            item.setData(data, forType: .tiff)
+    /// Loads and converts the image off the main thread, then puts it on the
+    /// clipboard. `completion` runs on the main thread once that's done or skipped.
+    func copyScreenshotToClipboard(from url: URL, fileIdentifier: String, captureDate: Date? = nil,
+                                   completion: (() -> Void)? = nil) {
+        guard isEnabled, !processedFileIdentifiers.contains(fileIdentifier),
+              !isOlderThanCopiedCapture(captureDate) else {
+            completion?()
+            return
         }
+        // Claimed now so a later scan doesn't start a second copy of the same file.
+        recordProcessedIdentifier(fileIdentifier)
+        workQueue.async {
+            let representations = Self.pasteboardRepresentations(for: url)
+            DispatchQueue.main.async { [weak self] in
+                defer { completion?() }
+                guard let self else { return }
+                guard let representations else {
+                    // Let a later scan try again once the file is readable.
+                    self.processedFileIdentifiers.remove(fileIdentifier)
+                    return
+                }
+                guard self.isEnabled, !self.isOlderThanCopiedCapture(captureDate) else { return }
 
-        if let image = NSImage(contentsOf: url), let tiff = image.tiffRepresentation {
-            item.setData(tiff, forType: .tiff)
-            if item.data(forType: .png) == nil,
-               let rep = NSBitmapImageRep(data: tiff),
-               let png = rep.representation(using: .png, properties: [:]) {
-                item.setData(png, forType: .png)
+                let item = NSPasteboardItem()
+                for (type, data) in representations {
+                    item.setData(data, forType: type)
+                }
+                item.setString(url.absoluteString, forType: .fileURL)
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.writeObjects([item])
+
+                if let captureDate {
+                    self.newestCopiedCaptureDate = max(self.newestCopiedCaptureDate ?? captureDate, captureDate)
+                }
+                self.lastCopiedFileURL = url
+                dockAwayDebugLog("Screenshot automatically copied to clipboard: \(url.lastPathComponent)")
             }
         }
+    }
 
-        item.setString(url.absoluteString, forType: .fileURL)
-
-        pasteboard.writeObjects([item])
-
-        lastCopiedFileURL = url
-        recordProcessedIdentifier(fileIdentifier)
-        dockAwayDebugLog("Screenshot automatically copied to clipboard: \(url.lastPathComponent)")
+    /// The clipboard data for an image file, original format first.
+    nonisolated static func pasteboardRepresentations(for url: URL) -> [(NSPasteboard.PasteboardType, Data)]? {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+        var representations: [(NSPasteboard.PasteboardType, Data)] = []
+        switch url.pathExtension.lowercased() {
+        case "png": representations.append((.png, data))
+        case "jpg", "jpeg": representations.append((.init("public.jpeg"), data))
+        case "heic": representations.append((.init("public.heic"), data))
+        case "tiff", "tif": representations.append((.tiff, data))
+        default: break
+        }
+        if let image = NSImage(data: data), let tiff = image.tiffRepresentation {
+            representations.removeAll { $0.0 == .tiff }
+            representations.append((.tiff, tiff))
+            if !representations.contains(where: { $0.0 == .png }),
+               let bitmap = NSBitmapImageRep(data: tiff),
+               let png = bitmap.representation(using: .png, properties: [:]) {
+                representations.append((.png, png))
+            }
+        }
+        return representations
     }
 
     func isProcessed(fileIdentifier: String) -> Bool {
         processedFileIdentifiers.contains(fileIdentifier)
     }
 
-    private func populateExistingFiles(in folderURL: URL) {
-        guard let contents = try? FileManager.default.contentsOfDirectory(
-            at: folderURL,
-            includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ) else { return }
-
-        for fileURL in contents {
-            if let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey, .fileSizeKey]),
-               let fileSize = values.fileSize {
-                let fileDate = values.contentModificationDate ?? values.creationDate ?? .distantPast
-                let identifier = "\(fileURL.path)_\(fileDate.timeIntervalSince1970)_\(fileSize)"
-                processedFileIdentifiers.insert(identifier)
+    /// Marks files that were already recent when monitoring started, so they
+    /// aren't copied as if they were new. Older files are skipped by the
+    /// 15-second window anyway, which keeps this list small.
+    private func populateExistingFiles(in folderURL: URL, scan: Int) {
+        workQueue.async {
+            let existing = Self.recentScreenshots(in: folderURL, now: Date()).map(\.identifier)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.scanGeneration == scan else { return }
+                existing.forEach(self.recordProcessedIdentifier)
             }
         }
     }
@@ -386,20 +435,22 @@ final class ScreenshotClipboardManager {
         }
     }
 
-    static let supportedExtensions: Set<String> = ["png", "jpg", "jpeg", "heic", "tiff", "tif"]
+    nonisolated static let supportedExtensions: Set<String> = ["png", "jpg", "jpeg", "heic", "tiff", "tif"]
 
-    static func isPotentialScreenshot(fileName: String, isInDedicatedScreenshotFolder: Bool) -> Bool {
-        let ext = (fileName as NSString).pathExtension.lowercased()
-        guard supportedExtensions.contains(ext) else { return false }
-        guard !fileName.hasPrefix(".") else { return false }
+    nonisolated static func isSupportedImage(fileName: String) -> Bool {
+        supportedExtensions.contains((fileName as NSString).pathExtension.lowercased()) && !fileName.hasPrefix(".")
+    }
 
-        if isInDedicatedScreenshotFolder {
-            return true
-        }
+    /// A file counts when macOS tagged it as a screenshot, or when it has a
+    /// standard or custom screenshot name. An ordinary image saved to the same
+    /// folder, or one with a date in its name, doesn't.
+    nonisolated static func isPotentialScreenshot(fileName: String, isTaggedScreenCapture: Bool) -> Bool {
+        guard isSupportedImage(fileName: fileName) else { return false }
+        if isTaggedScreenCapture { return true }
 
         if let customName = CFPreferencesCopyAppValue("name" as CFString, "com.apple.screencapture" as CFString) as? String,
            !customName.isEmpty,
-           fileName.localizedCaseInsensitiveContains(customName) {
+           fileName.range(of: customName, options: [.caseInsensitive, .anchored]) != nil {
             return true
         }
 
@@ -425,11 +476,46 @@ final class ScreenshotClipboardManager {
             }
         }
 
-        if fileName.range(of: #"\d{4}-\d{2}-\d{2}"#, options: .regularExpression) != nil {
-            return true
-        }
-
         return false
+    }
+
+    /// What macOS records on each screenshot it saves: whether the file is a
+    /// screenshot, and the screen area it captured, in global coordinates with
+    /// the origin at the top left of the main display.
+    struct CaptureMetadata: Equatable {
+        let isScreenCapture: Bool
+        let globalRect: CGRect?
+    }
+
+    nonisolated static func captureMetadata(for url: URL) -> CaptureMetadata? {
+        let isCapture = extendedAttribute("com.apple.metadata:kMDItemIsScreenCapture", of: url) as? Bool
+        let rectValues = extendedAttribute("com.apple.metadata:kMDItemScreenCaptureGlobalRect", of: url) as? [NSNumber]
+        guard isCapture != nil || rectValues != nil else { return nil }
+        let rect = rectValues.flatMap { values in
+            values.count == 4
+                ? CGRect(x: values[0].doubleValue, y: values[1].doubleValue,
+                         width: values[2].doubleValue, height: values[3].doubleValue)
+                : nil
+        }
+        return CaptureMetadata(isScreenCapture: isCapture ?? false, globalRect: rect)
+    }
+
+    /// The file whose captured area contains the point, for multi-display captures.
+    nonisolated static func screenshot(containing globalPoint: CGPoint, in urls: [URL],
+                                       captureRect: (URL) -> CGRect?) -> URL? {
+        urls.first { captureRect($0)?.contains(globalPoint) == true }
+    }
+
+    private nonisolated static func extendedAttribute(_ name: String, of url: URL) -> Any? {
+        url.withUnsafeFileSystemRepresentation { path -> Any? in
+            guard let path else { return nil }
+            let size = getxattr(path, name, nil, 0, 0, 0)
+            guard size > 0 else { return nil }
+            var data = Data(count: size)
+            let read = data.withUnsafeMutableBytes { getxattr(path, name, $0.baseAddress, size, 0, 0) }
+            guard read == size else { return nil }
+            return try? PropertyListSerialization.propertyList(from: data, format: nil)
+        }
     }
 
     static func currentScreenshotDirectoryURL() -> URL {

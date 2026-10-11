@@ -29,7 +29,14 @@ final class DockIconClickMinimizeController {
         case disabled
         case minimize
         case hide
-        case cycle
+        /// Cycles through the app's windows. With only one window, the
+        /// fallback minimizes or hides it instead, if the user chose one.
+        case cycle(fallback: CycleFallback?)
+    }
+
+    enum CycleFallback: Equatable {
+        case minimize
+        case hide
     }
 
     enum ClickAction: Equatable {
@@ -112,7 +119,8 @@ final class DockIconClickMinimizeController {
     }
 
     static func mode(minimizeEnabled: Bool, hideEnabled: Bool, cycleEnabled: Bool = false) -> Mode {
-        if cycleEnabled { return .cycle }
+        // Minimize and hide exclude each other; hide wins a conflicting save.
+        if cycleEnabled { return .cycle(fallback: hideEnabled ? .hide : minimizeEnabled ? .minimize : nil) }
         if hideEnabled { return .hide }
         if minimizeEnabled { return .minimize }
         return .disabled
@@ -275,8 +283,20 @@ final class DockIconClickMinimizeController {
                 for: processIdentifier,
                 appWasFrontmost: appWasFrontmost
             )
-        case .cycle:
-            return prepareCycleAction(for: processIdentifier, appWasFrontmost: appWasFrontmost)
+        case .cycle(let fallback):
+            if let cycle = prepareCycleAction(for: processIdentifier, appWasFrontmost: appWasFrontmost) {
+                return cycle
+            }
+            // Nothing to cycle through, such as a single window: minimize or
+            // hide instead, or keep macOS's behavior when neither is chosen.
+            switch fallback {
+            case .minimize:
+                return prepareMinimizeAction(for: processIdentifier, appWasFrontmost: appWasFrontmost)
+            case .hide:
+                return prepareHideAction(for: processIdentifier, appWasFrontmost: appWasFrontmost)
+            case nil:
+                return nil
+            }
         }
     }
 
@@ -642,20 +662,23 @@ final class DockIconClickMinimizeController {
               Self.dockOwns(point: point, processIdentifier: dockPID) else { return nil }
 
         let dock = AXUIElementCreateApplication(dockPID)
-        AXUIElementSetMessagingTimeout(dock, 0.25)
-        guard let children = dock.elements(kAXChildrenAttribute) else { return nil }
+        // Runs inside the click's event tap: one deadline for the whole lookup,
+        // and the click goes to the Dock untouched if it runs out.
+        let budget = AccessibilityRequestBudget(seconds: 0.12, messageLimit: 0.05)
+        guard let children = budget.perform(on: dock, { dock.elements(kAXChildrenAttribute) }) ?? nil else { return nil }
 
-        for list in children where list.string(kAXRoleAttribute) == "AXList" {
-            guard let listFrame = Self.frame(of: list),
-                  let items = list.elements(kAXChildrenAttribute) else { continue }
+        for list in children where budget.string(kAXRoleAttribute, of: list) == "AXList" {
+            guard let listFrame = Self.frame(of: list, budget: budget),
+                  let items = budget.perform(on: list, { list.elements(kAXChildrenAttribute) }) ?? nil else { continue }
             let horizontal = listFrame.width >= listFrame.height
             for item in items {
-                guard let itemFrame = Self.frame(of: item) else { continue }
+                guard !budget.expired else { return nil }
+                guard let itemFrame = Self.frame(of: item, budget: budget) else { continue }
                 let matchesLongAxis = horizontal
                     ? (point.x >= itemFrame.minX && point.x <= itemFrame.maxX)
                     : (point.y >= itemFrame.minY && point.y <= itemFrame.maxY)
                 guard matchesLongAxis,
-                      let bundleURL = item.url(kAXURLAttribute) else { continue }
+                      let bundleURL = budget.perform(on: item, { item.url(kAXURLAttribute) }) ?? nil else { continue }
                 let bundlePath = bundleURL.standardizedFileURL.path
                 guard let app = NSWorkspace.shared.runningApplications.first(where: {
                     $0.activationPolicy == .regular
@@ -691,23 +714,28 @@ final class DockIconClickMinimizeController {
         processIdentifier: pid_t
     ) -> [WindowReference] {
         let application = AXUIElementCreateApplication(processIdentifier)
-        AXUIElementSetMessagingTimeout(application, 0.35)
-        guard let windows = application.elements(kAXWindowsAttribute) else { return [] }
+        // Runs inside the Dock click's event tap. If the app can't answer in
+        // time, the click passes through rather than minimizing only some windows.
+        let budget = AccessibilityRequestBudget(seconds: 0.25, messageLimit: 0.05)
+        guard let windows = budget.perform(on: application, {
+            application.elements(kAXWindowsAttribute)
+        }) ?? nil else { return [] }
 
-        return windows.compactMap { window in
-            guard window.string(kAXRoleAttribute) == kAXWindowRole,
-                  window.string(kAXSubroleAttribute) != kAXSystemDialogSubrole,
-                  window.bool(kAXMinimizedAttribute) != true,
-                  window.bool("AXFullScreen") != true,
-                  let windowID = window.windowID else { return nil }
+        var references: [WindowReference] = []
+        for window in windows {
+            guard !budget.expired else { return [] }
+            guard budget.string(kAXRoleAttribute, of: window) == kAXWindowRole,
+                  budget.string(kAXSubroleAttribute, of: window) != kAXSystemDialogSubrole,
+                  (budget.perform(on: window, { window.bool(kAXMinimizedAttribute) }) ?? nil) != true,
+                  (budget.perform(on: window, { window.bool("AXFullScreen") }) ?? nil) != true,
+                  let windowID = budget.perform(on: window, { window.windowID }) ?? nil else { continue }
             var isSettable = DarwinBoolean(false)
-            guard AXUIElementIsAttributeSettable(
-                window,
-                kAXMinimizedAttribute as CFString,
-                &isSettable
-            ) == .success, isSettable.boolValue else { return nil }
-            return WindowReference(element: window, windowID: windowID)
+            guard budget.perform(on: window, {
+                AXUIElementIsAttributeSettable(window, kAXMinimizedAttribute as CFString, &isSettable)
+            }) == .success, isSettable.boolValue else { continue }
+            references.append(WindowReference(element: window, windowID: windowID))
         }
+        return budget.expired ? [] : references
     }
 
     nonisolated private static func onScreenWindowIDs(processIdentifier: pid_t,
@@ -743,8 +771,8 @@ final class DockIconClickMinimizeController {
     }
 
     /// Empty frames cannot contain a click, so treat them as unreadable.
-    private static func frame(of element: AXUIElement) -> CGRect? {
-        guard let frame = element.frame, frame.width > 0, frame.height > 0 else { return nil }
+    private static func frame(of element: AXUIElement, budget: AccessibilityRequestBudget) -> CGRect? {
+        guard let frame = budget.frame(of: element), frame.width > 0, frame.height > 0 else { return nil }
         return frame
     }
 }

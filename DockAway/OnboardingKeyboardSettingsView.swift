@@ -47,6 +47,11 @@ final class OnboardingKeyboardSettingsView: NSView {
     private var isResetting = false
     private var resetSuccessTimer: Timer?
 
+    // The header and cards scroll beneath the fixed bottom controls.
+    private let scrollView = NSScrollView()
+    private let documentView = FlippedDocumentView()
+    private var extrasIconContainer: NSView?
+
     // Bottom Controls
     private let backButton = NSButton()
     private let getStartedButton: OnboardingPrimaryButton
@@ -55,6 +60,7 @@ final class OnboardingKeyboardSettingsView: NSView {
 
     init(
         compact: Bool = false,
+        extras: NSView? = nil,
         onBack: @escaping () -> Void,
         onGetStarted: @escaping () -> Void
     ) {
@@ -257,30 +263,72 @@ final class OnboardingKeyboardSettingsView: NSView {
 
         super.init(frame: .zero)
 
-        // Add subviews to main view
-        addSubview(headerStack)
-        addSubview(keyboardNavigationCard)
-        addSubview(shortcutsCard)
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.drawsBackground = false
+        scrollView.contentView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = documentView
+
+        documentView.addSubview(headerStack)
+        documentView.addSubview(keyboardNavigationCard)
+        documentView.addSubview(shortcutsCard)
+        addSubview(scrollView)
         addSubview(bottomControlsStack)
 
-        NSLayoutConstraint.activate([
-            headerStack.topAnchor.constraint(equalTo: topAnchor),
-            headerStack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            headerStack.trailingAnchor.constraint(equalTo: trailingAnchor),
+        var constraints = [
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomControlsStack.topAnchor, constant: compact ? -10 : -16),
+
+            documentView.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+            documentView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+
+            headerStack.topAnchor.constraint(equalTo: documentView.topAnchor),
+            headerStack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            headerStack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
 
             keyboardNavigationCard.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: compact ? 8 : 12),
-            keyboardNavigationCard.leadingAnchor.constraint(equalTo: leadingAnchor),
-            keyboardNavigationCard.trailingAnchor.constraint(equalTo: trailingAnchor),
+            keyboardNavigationCard.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            keyboardNavigationCard.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
 
             shortcutsCard.topAnchor.constraint(equalTo: keyboardNavigationCard.bottomAnchor, constant: compact ? 8 : 10),
-            shortcutsCard.leadingAnchor.constraint(equalTo: leadingAnchor),
-            shortcutsCard.trailingAnchor.constraint(equalTo: trailingAnchor),
+            shortcutsCard.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            shortcutsCard.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
 
-            bottomControlsStack.topAnchor.constraint(greaterThanOrEqualTo: shortcutsCard.bottomAnchor, constant: compact ? 10 : 16),
             bottomControlsStack.leadingAnchor.constraint(equalTo: leadingAnchor),
             bottomControlsStack.trailingAnchor.constraint(equalTo: trailingAnchor),
             bottomControlsStack.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
+        ]
+        var lastSection: NSView = shortcutsCard
+        if let extras {
+            let (extrasHeader, iconContainer) = Self.makeSectionHeader(
+                symbolName: "ellipsis.circle",
+                title: "Extras",
+                subtitle: "Optional, everyday tweaks I use that make macOS better and may replace a couple of apps for you. Change them anytime in DockAway Settings > Extras.",
+                compact: compact
+            )
+            extrasIconContainer = iconContainer
+            extras.translatesAutoresizingMaskIntoConstraints = false
+            documentView.addSubview(extrasHeader)
+            documentView.addSubview(extras)
+            constraints += [
+                extrasHeader.topAnchor.constraint(equalTo: shortcutsCard.bottomAnchor, constant: compact ? 20 : 28),
+                extrasHeader.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+                extrasHeader.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+                extras.topAnchor.constraint(equalTo: extrasHeader.bottomAnchor, constant: compact ? 8 : 12),
+                extras.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+                extras.trailingAnchor.constraint(equalTo: documentView.trailingAnchor)
+            ]
+            lastSection = extras
+        }
+        constraints.append(lastSection.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -2))
+        NSLayoutConstraint.activate(constraints)
 
         // Wire actions
         masterToggle.target = self
@@ -334,6 +382,54 @@ final class OnboardingKeyboardSettingsView: NSView {
         shortcutsCard.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
         shortcutsCard.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
         iconContainer.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+        extrasIconContainer?.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+    }
+
+    /// A section header styled like the page's keyboard navigation header.
+    private static func makeSectionHeader(
+        symbolName: String, title: String, subtitle: String, compact: Bool
+    ) -> (header: NSStackView, iconContainer: NSView) {
+        let iconContainer = NSView()
+        iconContainer.translatesAutoresizingMaskIntoConstraints = false
+        iconContainer.wantsLayer = true
+        iconContainer.layer?.cornerRadius = 12
+        iconContainer.layer?.cornerCurve = .continuous
+        iconContainer.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: title)
+        icon.contentTintColor = .systemBlue
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        iconContainer.addSubview(icon)
+        NSLayoutConstraint.activate([
+            iconContainer.widthAnchor.constraint(equalToConstant: compact ? 32 : 44),
+            iconContainer.heightAnchor.constraint(equalToConstant: compact ? 32 : 44),
+            icon.centerXAnchor.constraint(equalTo: iconContainer.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: iconContainer.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 24),
+            icon.heightAnchor.constraint(equalToConstant: 24)
+        ])
+
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        titleLabel.textColor = .labelColor
+        titleLabel.alignment = .center
+
+        let subtitleLabel = NSTextField(wrappingLabelWithString: subtitle)
+        subtitleLabel.font = .systemFont(ofSize: 12.5)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.alignment = .center
+        subtitleLabel.maximumNumberOfLines = 2
+
+        let header = NSStackView(views: [iconContainer, titleLabel, subtitleLabel])
+        header.orientation = .vertical
+        header.alignment = .centerX
+        header.spacing = compact ? 4 : 6
+        header.setCustomSpacing(compact ? 6 : 8, after: iconContainer)
+        header.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.widthAnchor.constraint(lessThanOrEqualTo: header.widthAnchor).isActive = true
+        return (header, iconContainer)
     }
 
     private func buildRows() {
@@ -751,4 +847,9 @@ private final class KeyboardHandOptionCardView: NSView {
             ? NSColor.systemBlue.withAlphaComponent(0.12).cgColor
             : NSColor.white.withAlphaComponent(0.035).cgColor
     }
+}
+
+/// Lays the scrolling content out from the top.
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
 }

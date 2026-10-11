@@ -6,19 +6,6 @@ nonisolated func desktopCountText(_ count: Int) -> String {
     count > 0 ? String(count) : "?"
 }
 
-enum DesktopIndicatorPreference {
-    static let enabledKey = "desktopIndicatorEnabled"
-    static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
-        if let saved = defaults.object(forKey: enabledKey) as? Bool { return saved }
-        // Preserve the former None choice when migrating to the explicit toggle.
-        return (defaults.object(forKey: "DesktopIndicatorAppearance") as? Int) != 0
-    }
-    static func setEnabled(_ enabled: Bool, in defaults: UserDefaults = .standard) {
-        defaults.set(enabled, forKey: enabledKey)
-        defaults.set(enabled ? 1 : 0, forKey: "DesktopIndicatorAppearance")
-    }
-}
-
 struct DesktopIndicatorTextStyle: Codable {
     enum Badge: Int, Codable { case none, filled, outline, filledOutline }
     var hasFill: Bool { badge == .filled || badge == .filledOutline }
@@ -368,7 +355,7 @@ final class DesktopIndicatorSeparatorOptionsView: NSView {
     private var customEditButton: CustomSeparatorEditButton?
 
     static let pairs: [(col0: DesktopIndicatorTextStyle.Separator, col1: DesktopIndicatorTextStyle.Separator)] = [
-        (.none, .of),
+        (.of, .none),
         (.slash, .backslash),
         (.dash, .emDash),
         (.hollowBullet, .bullet),
@@ -499,7 +486,7 @@ final class DesktopIndicatorSeparatorOptionsView: NSView {
 
     private func presentCustomSeparatorPrompt(currentValue: String?) {
         let alert = NSAlert()
-        alert.messageText = "Custom Indicator Separator"
+        alert.messageText = "Custom Desktop Indicator Separator"
         alert.informativeText = "Enter a custom symbol, text, or emoji to use between desktop numbers (e.g., “|”, “~”, “to”):"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
@@ -582,7 +569,7 @@ final class DesktopIndicatorSeparatorMenu: NSMenu {
     private let optionsView = DesktopIndicatorSeparatorOptionsView(frame: .zero)
 
     init() {
-        super.init(title: "Indicator Separator")
+        super.init(title: "Desktop Indicator Separator")
         autoenablesItems = false
         let item = NSMenuItem()
         item.view = optionsView

@@ -175,6 +175,24 @@ private final class DockWatcherSpaceAPI {
         )
     }
 
+    /// Apps whose fullscreen Space is showing on any display, including both
+    /// sides of a split view.
+    func currentFullscreenApplicationPIDs() -> Set<pid_t> {
+        guard let mainConnectionIDFn, let copyManagedDisplaySpacesFn,
+              let rawDisplays = copyManagedDisplaySpacesFn(mainConnectionIDFn())?.takeRetainedValue(),
+              let displays = Self.dictionaryArray(from: rawDisplays) else { return [] }
+        var pids = Set<pid_t>()
+        for display in displays {
+            guard let current = display["Current Space"] as? [String: Any],
+                  (current["type"] as? NSNumber)?.intValue == 4,
+                  let layout = current["TileLayoutManager"] as? NSDictionary,
+                  let rawTiles = layout["TileSpaces"] as? NSArray,
+                  let tiles = Self.dictionaryArray(from: rawTiles) else { continue }
+            pids.formUnion(tiles.compactMap { ($0["pid"] as? NSNumber)?.int32Value })
+        }
+        return pids
+    }
+
     func currentDesktopInfo(on displayID: CGDirectDisplayID) -> DesktopInfo? {
         guard
             let mainConnectionIDFn,
@@ -3365,6 +3383,10 @@ final class DockWatcher {
     func refreshStatus() {
         guard isRunning else { return }
         evaluateFrontmostApp(quiet: true)
+    }
+
+    func currentFullscreenApplicationPIDs() -> Set<pid_t> {
+        spaceAPI.currentFullscreenApplicationPIDs()
     }
 
     func desktopSelection(on displayID: CGDirectDisplayID) -> DesktopSelectionSnapshot? {

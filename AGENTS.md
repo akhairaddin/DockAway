@@ -30,6 +30,7 @@ Use exactly these three categories in this order:
 - **Empty categories**: If a category has no qualifying entries, write a short `"No entries recorded for this release."` message.
 - **Historical integrity**: Preserve existing release descriptions, images, and links when reorganizing historical notes.
 - **Consistency**: Apply the exact same policy to both `changelog.html` and GitHub Releases.
+- **Unreleased versions**: When adding a new version section to `changelog.html`, write `(Unreleased)` in place of the date. Replace it with the release date (`M-D-YY`) only when the user explicitly asks to release that version.
 
 ## Development and Testing Workflow
 
