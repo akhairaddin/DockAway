@@ -26,7 +26,7 @@ A native macOS menu-bar utility that shows the Dock on empty desktops and hides 
 - **Green Button Fills Window:** Bring a window forward and toggle between filling the available display area and its remembered size. Without a saved size, restore to a centered smaller window. Option-click enters fullscreen.
 - **Mission Control Enhancements:** Optional automatic desktop-strip expansion and hovered-window actions for closing, minimizing, or quitting. Ability to use keyboard shortcuts to close or minimize apps.
 - **Dock controls:** Adjust position, animation speed, reveal delay, and which settings persist after quitting. Optional Dock-icon actions minimize or hide windows and restore them on another click.
-- **Extras and appearance:** Optional screenshot-to-clipboard copying, lock/unlock sounds, a mute-aware volume menu-bar icon, and Auto/Light/Dark themes.
+- **Extras and appearance:** Optional screenshot copying, lock/unlock sounds, a mute-aware volume icon, and keyboard dimming for fullscreen video. Appearance follows macOS.
 - **Everyday essentials:** Pause/resume DockAway, Launch at Login, configurable automatic updates through Sparkle, Signed and Apple-Notarized official releases.
 
 ### Dock behavior and blacklist

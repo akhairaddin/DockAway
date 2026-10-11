@@ -9,6 +9,40 @@
     </style>
 </head>
 <body>
+    <h3>Version 2.1.2 <span style="font-weight: normal;">(10-11-26)</span></h3>
+    <h4>New Features</h4>
+    <ul>
+        <li><b>App Icons in the Desktop Change Pill:</b> A new Show App Icons option in Desktop Change Pill adds the apps on the desktop you switched to, centered in a row under the desktop number and display name, just like the Desktop Manager tiles. Fullscreen apps show their icon too, and an empty desktop gets the regular pill. More than six apps split evenly over two centered rows, up to six per row, followed by a count of any others. Switching desktops while the pill is showing smoothly grows or shrinks it to fit, with the icons fading in place.</li>
+        <li><b>Keyboard Light Off for Fullscreen Video:</b> A new option in Extras turns your MacBook's keyboard backlight off while a video plays fullscreen. It comes back on when the video pauses or ends, or when you leave fullscreen or switch apps, and pressing a key lights it briefly. It uses macOS's own dimming, so your keyboard brightness and low-light settings stay as they are. Turning it on sets the keyboard's inactivity timer to Never so the light stays on the rest of the time, and turning it off puts your previous setting back. A nested Turn Off After Inactivity menu mirrors the matching System Settings option, so you can change it right from DockAway.</li>
+        <li><b>Menubar Dock Indicator:</b> A new switch at the top of Menubar Dock/Desktop Indicator, above the desktop indicator switch, hides the Dock arrows in the menu bar, leaving just your desktop indicator. At least one indicator always stays on: turning off the only one showing switches the other on, so DockAway's menu bar item never disappears. With more than one display, the Dock arrows now appear in front of your displays' desktop indicators instead of being left out. The live preview greys out whichever indicator is turned off.</li>
+    </ul>
+    <h4>Improvements</h4>
+    <ul>
+        <li><b>Extras in Onboarding:</b> The keyboard navigation page now includes an Extras section, so you can turn on screenshot, sound, Finder, and keyboard light options while setting up DockAway. Each option has a short description, nested options appear beneath the ones they belong to, and the page scrolls while Back and Get Started stay in place. Changes stay in sync with DockAway Settings &gt; Extras. The onboarding window keeps the same size on both pages, with smooth Continue and Back transitions.</li>
+        <li><b>Cycle Windows, Then Minimize or Hide:</b> Cycle App Windows can now be combined with Minimize/Expand or Hide/Unhide in Dock Icon Actions. Clicking an app with several windows still cycles through them, and clicking an app with one window minimizes or hides it instead. Minimize and Hide still can't both be on.</li>
+        <li><b>Separate Looks for One and Multiple Displays:</b> The menu bar indicator now remembers one look for when you have a single display and another for two or more, so you can use “/” with two screens and “of” with one. Each also keeps its own Menubar Dock Indicator and Menubar Desktop Indicator switches. The menu changes whichever layout you have connected, and your current single-display look carries over when you update.</li>
+        <li><b>Faster Screenshot Copying:</b> Save Screenshots to Clipboard now reads and converts screenshots in the background, keeping large-image processing off DockAway's main thread.</li>
+        <li><b>More Responsive Dock Clicks:</b> Green Button Fills Window and Dock Icon Actions now limit more of their Accessibility queries, reducing delays when another app is slow to respond.</li>
+        <li><b>Smoother Activate on Hover:</b> Moving focus between two windows of the same app no longer pauses DockAway's main thread between focus changes.</li>
+        <li><b>Preview Lockscreen Sounds:</b> A play button next to Lockscreen Lock Sound and Lockscreen Unlock Sound, in both the Extras menu and onboarding, lets you hear each sound before turning it on. The menu stays open while it plays.</li>
+        <li><b>Simpler Desktop Change Pill Layout:</b> The desktop change pill now always shows the desktop number, with the display symbol beside it, centered above the display name, so the Place Display Name Underneath option has been removed.</li>
+        <li><b>Always Matches Your Mac's Appearance:</b> DockAway's menus and Desktop Change Pill now always follow your Mac's Light or Dark appearance, so the Theme option has been removed. If you had chosen Light or Dark, DockAway now follows your system setting.</li>
+        <li><b>New Default Menu Bar Look:</b> Fresh installs now start with a filled desktop count without the accent color, filled only on the active display, accent pill numbers in Desktop Manager, and the Desktop Change Pill with app icons turned on. Existing installs keep their saved indicator switches, number styling, and whether the pill is enabled.</li>
+    </ul>
+    <h4>Bug Fixes</h4>
+    <ul>
+        <li><b>Holding Delete or Return Stops When You Let Go:</b> In Desktop Manager, a held Delete or Return no longer keeps removing or adding desktops after you release it. Previously this could happen if macOS briefly paused DockAway's keyboard handling while the key was down.</li>
+        <li><b>Screenshot Detection and Ordering:</b> Save Screenshots to Clipboard now checks macOS screenshot metadata and screenshot names. Ordinary photos and downloads no longer qualify just because they are in your screenshot folder or have a date in their name. Capture-area metadata distinguishes displays with the same resolution, and an older capture finishing later no longer replaces a newer screenshot on the clipboard.</li>
+        <li><b>Hover Switches Between Windows of the Same App:</b> Activate on Hover now focuses a background window even when another window of the same app overlaps it. Pop-ups such as browser address-bar suggestions still don't steal focus from the window they belong to.</li>
+        <li><b>Safer Finder Delete Handling:</b> With Delete Finder Items with Delete Key on, pressing Delete in other apps no longer waits on DockAway. If Finder is slow to respond or cannot report what is focused, DockAway leaves the original Delete key untouched instead of issuing a Move to Trash shortcut.</li>
+        <li><b>Apps Stay Behind on Hover:</b> With Bring Window to Front off, hovering over Electron apps, JetBrains IDEs, Arc, or Dia no longer pulls them in front of the window you're using. These apps naturally move themselves forward whenever they're focused, so 'Activate on Hover' now leaves them alone while another app's window overlaps them. Click to switch to them as usual.</li>
+        <li><b>Desktop Indicator Matches the Menu Bar:</b> When your wallpaper makes the menu bar light or dark, the desktop indicator now follows it instead of staying white on a light menu bar. It adapts when the menu bar's appearance changes.</li>
+        <li><b>Launch at Login Explains Problems:</b> If macOS needs your approval to open DockAway at login, DockAway now says so and offers to open Login Items settings, instead of the checkbox silently turning itself back off. Other errors are shown too, and the checkbox stays in sync with System Settings.</li>
+        <li><b>Desktop Manager Menu Grows to the Right:</b> When adding or removing a desktop changes the menu's width, the menu now keeps its left edge under DockAway's menu bar item and smoothly grows or shrinks on the right, instead of shifting to the left.</li>
+        <li><b>Desktop Change Pill Text Stays Steady:</b> Switching desktops while the desktop change pill is showing no longer makes the display name briefly flash dark or take on your wallpaper's color. Only the desktop number fades to its new value.</li>
+    </ul>
+    <hr>
+
     <h3>Version 2.1.1 <span style="font-weight: normal;">(10-6-26)</span></h3>
     <h4>New Features</h4>
     <ul>

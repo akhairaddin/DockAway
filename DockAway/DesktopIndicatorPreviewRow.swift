@@ -94,7 +94,7 @@ extension SubmenuLabelView {
     }
 
     static func desktopIndicatorAppearance() -> SubmenuLabelView {
-        SubmenuLabelView(title: "Menubar Desktop Indicator",
+        SubmenuLabelView(title: "Menubar Dock/Desktop Indicator",
                          style: .icon(symbolName: "menubar.rectangle", symbolHeight: 10),
                          highlightsWithMenuItem: false)
     }
@@ -108,12 +108,9 @@ extension SubmenuLabelView {
                          style: .icon(symbolName: "rectangle.3.group"), highlightsWithMenuItem: false)
     }
 
-    static func theme() -> SubmenuLabelView {
-        SubmenuLabelView(title: "Theme", style: .icon(symbolName: "paintpalette"), highlightsWithMenuItem: false)
-    }
 
     static func indicatorSeparator() -> SubmenuLabelView {
-        SubmenuLabelView(title: "Indicator Separator", style: .plain)
+        SubmenuLabelView(title: "Desktop Indicator Separator", style: .plain)
     }
 
     static func desktopNumberIndicator() -> SubmenuLabelView {
@@ -130,22 +127,38 @@ extension SubmenuLabelView {
 // small icon column. This stays inside the existing native submenu.
 final class DesktopIndicatorPreviewRow: NSButton {
     private let indicatorSwitch = DockMenuSwitch()
+    private let dockIndicatorSwitch = DockMenuSwitch()
     private var helpButton: DockSettingHelpButton?
     var onPreviewClick: ((NSPoint) -> Void)?
     var onToggle: ((Bool) -> Void)? {
         didSet {
             indicatorSwitch.isHidden = onToggle == nil
             helpButton?.isHidden = onToggle == nil
-            frame.size.height = onToggle != nil ? 76 : 42
-            needsLayout = true
+            updateHeight()
         }
     }
+    /// Adds a Menubar Dock Indicator switch between the title and the preview.
+    var onDockIndicatorToggle: ((Bool) -> Void)? {
+        didSet {
+            dockIndicatorSwitch.isHidden = onDockIndicatorToggle == nil
+            updateHeight()
+        }
+    }
+    var dockIndicatorOn = true {
+        didSet {
+            let state: NSControl.StateValue = dockIndicatorOn ? .on : .off
+            if dockIndicatorSwitch.state != state { dockIndicatorSwitch.state = state }
+        }
+    }
+    private static let dockIndicatorTitle = "Menubar Dock Indicator"
+    /// Vertical room the Dock indicator line adds above the preview.
+    private var dockLineHeight: CGFloat { onToggle != nil && onDockIndicatorToggle != nil ? 30 : 0 }
     private var previewLeading: CGFloat { onToggle == nil ? 24 : 20 }
     private let previewImageView = NSImageView()
     private var previewBackground: NSView!
     var preview: NSImage? {
         didSet {
-            let targetAppearance = DockAwayTheme.current.appearance ?? NSApp.effectiveAppearance
+            let targetAppearance = NSApp.effectiveAppearance
             previewImageView.appearance = targetAppearance
             previewBackground?.appearance = targetAppearance
             if onToggle == nil, oldValue?.size != preview?.size {
@@ -208,7 +221,7 @@ final class DesktopIndicatorPreviewRow: NSButton {
             previewImageView.autoresizingMask = [.width, .height]
             previewBackground = effect
         }
-        let targetAppearance = DockAwayTheme.current.appearance ?? NSApp.effectiveAppearance
+        let targetAppearance = NSApp.effectiveAppearance
         previewImageView.appearance = targetAppearance
         previewBackground.appearance = targetAppearance
         previewBackground.setAccessibilityElement(false)
@@ -220,11 +233,19 @@ final class DesktopIndicatorPreviewRow: NSButton {
         indicatorSwitch.isHidden = true
         indicatorSwitch.setAccessibilityLabel("Menubar Desktop Indicator")
         addSubview(indicatorSwitch)
+        dockIndicatorSwitch.controlSize = .small
+        dockIndicatorSwitch.sizeToFit()
+        dockIndicatorSwitch.target = self
+        dockIndicatorSwitch.action = #selector(toggleDockIndicator(_:))
+        dockIndicatorSwitch.isHidden = true
+        dockIndicatorSwitch.state = .on
+        dockIndicatorSwitch.setAccessibilityLabel(Self.dockIndicatorTitle)
+        addSubview(dockIndicatorSwitch)
 
         let help = DockSettingHelpButton(
             heading: "Menubar Desktop Indicator",
             textProvider: {
-                "Displays the active macOS desktop space number for each connected display directly in your menu bar.\n\n• Keeps track of your active space without opening Mission Control.\n• Supports multi-display setups with stacked or horizontal layouts.\n• Fully customizable with pills, fills, outlines, and DockAway blue.\n• Click any display in the preview above to customize its appearance individually."
+                "Displays the active macOS desktop space number for each connected display directly in your menu bar.\n\n• Keeps track of your active space without opening Mission Control.\n• Supports multi-display setups with stacked or horizontal layouts.\n• Fully customizable with pills, fills, outlines, and DockAway blue.\n• Click any display in the preview above to customize its appearance individually.\n• One display and two or more each remember their own look and switches. Changes apply to the layout you have connected."
             }
         )
         help.isHidden = true
@@ -240,27 +261,50 @@ final class DesktopIndicatorPreviewRow: NSButton {
         onToggle?(selected)
     }
 
+    @objc private func toggleDockIndicator(_ sender: DockMenuSwitch) {
+        dockIndicatorOn = sender.state == .on
+        onDockIndicatorToggle?(dockIndicatorOn)
+    }
+
+    private func updateHeight() {
+        frame.size.height = onToggle != nil ? 76 + dockLineHeight : 42
+        needsLayout = true
+    }
+
 
     override func layout() {
         super.layout()
         if onToggle != nil {
+            // The Dock indicator line comes first when shown. The desktop
+            // indicator line and its help button follow it.
+            let desktopCenterY = 21 + dockLineHeight
             let switchSize = indicatorSwitch.intrinsicContentSize
             helpButton?.frame = NSRect(
                 x: bounds.width - 12 - 16,
-                y: 21 - 8,
+                y: desktopCenterY - 8,
                 width: 16,
                 height: 16
             )
             indicatorSwitch.frame = NSRect(
                 x: (helpButton?.frame.minX ?? bounds.width - 28) - 8 - switchSize.width,
-                y: 21 - switchSize.height / 2,
+                y: desktopCenterY - switchSize.height / 2,
                 width: switchSize.width,
                 height: switchSize.height
             )
             helpButton?.isHidden = false
+            if dockLineHeight > 0 {
+                let dockSwitchSize = dockIndicatorSwitch.intrinsicContentSize
+                // Shares the right edge with the switch below it.
+                dockIndicatorSwitch.frame = NSRect(
+                    x: indicatorSwitch.frame.maxX - dockSwitchSize.width,
+                    y: 21 - dockSwitchSize.height / 2,
+                    width: dockSwitchSize.width,
+                    height: dockSwitchSize.height
+                )
+            }
             previewBackground.frame = NSRect(
                 x: (bounds.width - (preview?.size.width ?? 96)) / 2,
-                y: 38,
+                y: 38 + dockLineHeight,
                 width: preview?.size.width ?? 96,
                 height: 30
             )
@@ -285,6 +329,9 @@ final class DesktopIndicatorPreviewRow: NSButton {
         }
         if onToggle != nil, indicatorSwitch.frame.contains(local) {
             return indicatorSwitch.hitTest(local)
+        }
+        if dockLineHeight > 0, dockIndicatorSwitch.frame.contains(local) {
+            return dockIndicatorSwitch.hitTest(local)
         }
         return self
     }
@@ -326,16 +373,20 @@ final class DesktopIndicatorPreviewRow: NSButton {
         }
         let color: NSColor = (highlighted && onToggle == nil) ? .selectedMenuItemTextColor : .labelColor
         if onToggle != nil {
-            let titleFont = NSFont.systemFont(ofSize: 15, weight: .regular)
-            let titleRightLimit = indicatorSwitch.frame.minX
-            let titleRect = NSRect(x: 20, y: 10, width: max(0, titleRightLimit - 26), height: 22)
-            (title as NSString).draw(
-                in: titleRect,
-                withAttributes: [
-                    .font: titleFont,
-                    .foregroundColor: NSColor.labelColor
-                ]
-            )
+            // The same font as the submenu's other rows.
+            let titleFont = NSFont.menuFont(ofSize: 13)
+            let lineHeight = ceil(titleFont.ascender - titleFont.descender + titleFont.leading)
+            func drawTitle(_ text: String, centerY: CGFloat, rightLimit: CGFloat, color: NSColor) {
+                (text as NSString).draw(
+                    in: NSRect(x: 20, y: centerY - lineHeight / 2, width: max(0, rightLimit - 26), height: lineHeight),
+                    withAttributes: [.font: titleFont, .foregroundColor: color]
+                )
+            }
+            if dockLineHeight > 0 {
+                drawTitle(Self.dockIndicatorTitle, centerY: 21,
+                          rightLimit: dockIndicatorSwitch.frame.minX, color: .labelColor)
+            }
+            drawTitle(title, centerY: 21 + dockLineHeight, rightLimit: indicatorSwitch.frame.minX, color: .labelColor)
         } else {
             let previewWidth = preview?.size.width ?? 96
             let titleX = previewLeading + previewWidth + 12

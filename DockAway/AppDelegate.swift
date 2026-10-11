@@ -2897,7 +2897,9 @@ final class OnboardingPrimaryButton: NSButton {
     private weak var desktopChangeTooltipMenu: NSMenu?
     private var desktopChangeTooltipRowView: DockSettingToggleRowView?
     private var desktopChangeTooltipDurationSliderView: DockSettingSliderView?
-    private var desktopChangeTooltipDisplayUnderneathRowView: DockSettingToggleRowView?
+    private var desktopChangeTooltipAppIconsRowView: DockSettingToggleRowView?
+    /// Desktop app icons drawn once per app, shared by Desktop Manager and the pill.
+    private var desktopTileIconCache: [String: NSImage] = [:]
     private let desktopChangeTooltip = DesktopChangeTooltip()
     private var teleportCursorRowView: DockSettingPersistenceRowView?
     private var teleportWindowMoveRowView: DockSettingPersistenceRowView?
@@ -2924,6 +2926,12 @@ final class OnboardingPrimaryButton: NSButton {
     private let lockscreenSoundPlayer = LockscreenSoundPlayer()
     private let mutedVolumeMenuBarController = MutedVolumeMenuBarController()
     private weak var mutedVolumeMenuBarRow: DockSettingPersistenceRowView?
+    private lazy var fullscreenVideoKeyboardLightController = FullscreenVideoKeyboardLightController { [weak self] in
+        self?.dockWatcher?.currentFullscreenApplicationPIDs() ?? []
+    }
+    private var fullscreenVideoKeyboardLightRowView: DockSettingPersistenceRowView?
+    private var keyboardLightTimeoutRowView: DockAwayMenuRowView?
+    private var keyboardLightTimeoutChoiceRows: [(seconds: TimeInterval, row: DockSettingPersistenceRowView)] = []
     private let screenshotClipboardManager = ScreenshotClipboardManager.shared
     private let greenButtonFillController = GreenButtonFillController()
     private let finderDeleteKeyController = FinderDeleteKeyController()
@@ -2999,6 +3007,8 @@ final class OnboardingPrimaryButton: NSButton {
         )
     )
     private var permissionContinuePending = false
+    /// Set once a Continue check has run long enough to say so on screen.
+    private var permissionContinueCheckIsSlow = false
     private var permissionContinueGeneration = 0
     private var permissionSetupRequested = false
     private var permissionSetupTimer: Timer?
@@ -3009,6 +3019,12 @@ final class OnboardingPrimaryButton: NSButton {
     private weak var permissionSetupSeparateSpacesRowView: OnboardingSeparateSpacesRowView?
     private var nextSeparateSpacesRefresh: TimeInterval = 0
     private weak var permissionSetupKeyboardSettingsView: OnboardingKeyboardSettingsView?
+    private weak var permissionSetupExtrasView: OnboardingExtrasView?
+    private var menuBarAppearanceObservation: NSKeyValueObservation?
+    /// Whether the menu bar indicator was last drawn for a dark menu bar.
+    private var renderedMenuBarIsDark: Bool?
+    /// Lets a newer page transition supersede one still animating.
+    private var onboardingTransitionGeneration = 0
     private weak var permissionSetupFirstPageView: OnboardingPermissionsPageView?
     private var permissionSetupFirstPageConstraints = [NSLayoutConstraint]()
     private var permissionSetupKeyboardPageConstraints = [NSLayoutConstraint]()
@@ -3080,7 +3096,9 @@ final class OnboardingPrimaryButton: NSButton {
 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.appearance = DockAwayTheme.current.appearance
+        // DockAway follows the system's Light or Dark appearance. Drop the
+        // Theme choice saved by 2.1.1 and earlier.
+        UserDefaults.standard.removeObject(forKey: "dockAwayTheme")
         dockAwayDebugLog("🚀 APP LAUNCHED")
         if UserDefaults.standard.bool(forKey: Self.permissionRelaunchWasPausedKey) {
             dockAwayEnabled = false
@@ -3091,6 +3109,10 @@ final class OnboardingPrimaryButton: NSButton {
             self?.mutedVolumeMenuBarRow?.setOn(false)
         }
         mutedVolumeMenuBarController.setEnabled(UserDefaults.standard.bool(forKey: MutedVolumeMenuBarController.preferenceKey))
+        fullscreenVideoKeyboardLightController.recoverPreviousSession()
+        fullscreenVideoKeyboardLightController.setEnabled(
+            UserDefaults.standard.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey)
+        )
         NSApp.setActivationPolicy(.accessory)
 
         // These are first-run defaults only. UserDefaults preserves any later
@@ -3102,6 +3124,7 @@ final class OnboardingPrimaryButton: NSButton {
             Self.openDockAwayShortcutEnabledKey: true,
             LockscreenSoundPlayer.Event.lock.preferenceKey: false,
             LockscreenSoundPlayer.Event.unlock.preferenceKey: false,
+            FullscreenVideoKeyboardLightController.preferenceKey: false,
             ScreenshotClipboardManager.preferenceKey: false,
             GreenButtonFillController.preferenceKey: false,
             FinderDeleteKeyController.preferenceKey: false,
@@ -3120,6 +3143,16 @@ final class OnboardingPrimaryButton: NSButton {
             ChromiumWebAppPlacementController.preferenceKey: true,
             DisplayListOrder.preferenceKey: DisplayListOrder.activeFirst.rawValue
         ])
+
+        // One display and two or more each keep their own indicator look and
+        // switches, starting from what one display showed before.
+        MenuBarIndicatorPreference.separateSingleDisplayLayout()
+        MenuBarIndicatorPreference.ensureOneIsShown()
+        separateSingleDisplayIndicatorStyle()
+
+        desktopChangeTooltip.appIconProvider = { [weak self] spaceID, completion in
+            self?.fetchDesktopApplicationIcons(for: spaceID, completion: completion)
+        }
 
         if screenshotClipboardManager.isEnabled {
             screenshotClipboardManager.startMonitoring()
@@ -3483,6 +3516,11 @@ final class OnboardingPrimaryButton: NSButton {
         // status item clips the wider chevron lockup.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.imagePosition = .imageLeading
+        // The menu bar turns light or dark with the wallpaper behind it, not
+        // just with dark mode, so redraw the indicator whenever it flips.
+        menuBarAppearanceObservation = statusItem.button?.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async { self?.menuBarAppearanceDidChange() }
+        }
         applyStatusIcon(dockVisible: isDockCurrentlyVisible())
         updateMenuBarDesktopBadge()
         buildMenu()
@@ -3520,8 +3558,14 @@ final class OnboardingPrimaryButton: NSButton {
         button.window?.displayIfNeeded()
     }
 
+    /// One desktop count or one per display. Each remembers its own look and
+    /// switches, and the menu edits whichever is showing.
+    private var indicatorLayout: MenuBarIndicatorLayout {
+        MenuBarIndicatorLayout(indicatorCount: desktopDisplaySections.count)
+    }
+
     private var currentDesktopIndicatorAppearance: DesktopIndicatorAppearance {
-        DesktopIndicatorPreference.isEnabled() ? .systemText : .none
+        DesktopIndicatorPreference.isEnabled(for: indicatorLayout) ? .systemText : .none
     }
 
     private var indicatorEditingDisplay: String?
@@ -3545,11 +3589,44 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private var cleanDesktopTextStyle: DesktopIndicatorTextStyle {
-        indicatorEditingDisplay.map { displayTextStyle($0) } ?? globalDesktopTextStyle
+        if indicatorLayout == .singleDisplay { return singleDisplayIndicatorStyle }
+        return indicatorEditingDisplay.map { displayTextStyle($0) } ?? globalDesktopTextStyle
     }
 
     private var singleDisplayTextStyle: DesktopIndicatorTextStyle {
-        (desktopDisplaySections.first.map { displayTextStyle(indicatorDisplayKey($0.snapshot.displayID)) } ?? globalDesktopTextStyle).resolvedForDisplay(isActive: true)
+        singleDisplayIndicatorStyle.resolvedForDisplay(isActive: true)
+    }
+
+    /// The one-display look, separate from the All Displays and per-display
+    /// styles used with two or more displays.
+    private var singleDisplayIndicatorStyle: DesktopIndicatorTextStyle {
+        if let data = UserDefaults.standard.data(forKey: SingleDisplayIndicatorStyle.key),
+           let style = try? JSONDecoder().decode(DesktopIndicatorTextStyle.self, from: data) {
+            return style
+        }
+        return desktopDisplaySections.first.map { displayTextStyle(indicatorDisplayKey($0.snapshot.displayID)) }
+            ?? globalDesktopTextStyle
+    }
+
+    /// Gives the one-display layout its own look the first time, starting
+    /// from what one display showed before.
+    private func separateSingleDisplayIndicatorStyle() {
+        let defaults = UserDefaults.standard
+        guard defaults.data(forKey: SingleDisplayIndicatorStyle.key) == nil else { return }
+        var count: UInt32 = 0
+        CGGetOnlineDisplayList(0, nil, &count)
+        var online = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetOnlineDisplayList(count, &online, &count)
+        online = Array(online.prefix(Int(count)))
+        let overrides = Set((defaults.dictionary(forKey: "displayIndicatorStyles") ?? [:]).keys)
+        let start = SingleDisplayIndicatorStyle.startingOverrideKey(
+            overrideKeys: overrides,
+            builtInKey: online.first { CGDisplayIsBuiltin($0) != 0 }.map(indicatorDisplayKey),
+            onlineKeys: online.map(indicatorDisplayKey))
+        let style = start.map { displayTextStyle($0) } ?? globalDesktopTextStyle
+        if let data = try? JSONEncoder().encode(style) {
+            defaults.set(data, forKey: SingleDisplayIndicatorStyle.key)
+        }
     }
 
     private var globalDesktopTextStyle: DesktopIndicatorTextStyle {
@@ -3577,6 +3654,13 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private func saveCleanDesktopTextStyle(_ style: DesktopIndicatorTextStyle) {
+        if indicatorLayout == .singleDisplay {
+            // One display's look never touches the styles for two or more.
+            if let data = try? JSONEncoder().encode(style) {
+                UserDefaults.standard.set(data, forKey: SingleDisplayIndicatorStyle.key)
+            }
+            return
+        }
         var overrides = UserDefaults.standard.dictionary(forKey: "displayIndicatorStyles") ?? [:]
         if let key = indicatorEditingDisplay {
             overrides[key] = try? JSONEncoder().encode(style)
@@ -3682,6 +3766,23 @@ final class OnboardingPrimaryButton: NSButton {
         }
     }
 
+    /// The Dock arrows in the menu bar. MenuBarIndicatorPreference never lets
+    /// both indicators be off; the fallback only guards an unexpected state.
+    private var showsMenuBarDockIndicator: Bool {
+        MenuBarIndicatorPreference.isDockIndicatorEnabled(for: indicatorLayout)
+            || currentDesktopIndicatorAppearance == .none
+    }
+
+    private func menuBarAppearanceDidChange() {
+        guard let button = statusItem?.button,
+              Self.isDark(button.effectiveAppearance) != renderedMenuBarIsDark else { return }
+        updateMenuBarDesktopBadge(refreshMenu: false)
+    }
+
+    private static func isDark(_ appearance: NSAppearance) -> Bool {
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
     private func updateMenuBarDesktopBadge(liveCustomization: Bool = false, refreshMenu: Bool = true) {
         // Keep the status item's anchor stable while a desktop drop settles.
         // menuDidClose applies the deferred appearance and number update.
@@ -3690,10 +3791,21 @@ final class OnboardingPrimaryButton: NSButton {
         // when an unrelated display-list update is waiting for tracking to end.
         if statusMenuIsOpen && pendingDisplayLayoutRefresh && !liveCustomization { return }
         guard let button = statusItem?.button else { return }
+        // The indicator's colors are chosen as it's built, so build it in the
+        // menu bar's own appearance rather than DockAway's.
+        let menuBarAppearance = button.effectiveAppearance
+        renderedMenuBarIsDark = Self.isDark(menuBarAppearance)
+        menuBarAppearance.performAsCurrentDrawingAppearance {
+            renderMenuBarDesktopBadge(on: button)
+        }
+    }
 
+    private func renderMenuBarDesktopBadge(on button: NSStatusBarButton) {
         let appearance = currentDesktopIndicatorAppearance
         let style = singleDisplayTextStyle
-        button.imagePosition = appearance != .none && style.usesPill && style.encapsulatesDockIndicator ? .noImage : .imageLeading
+        let showsDockIndicator = showsMenuBarDockIndicator
+        button.imagePosition = !showsDockIndicator
+            || (appearance != .none && style.usesPill && style.encapsulatesDockIndicator) ? .noImage : .imageLeading
         guard appearance != .none else {
             button.title = ""
             button.attributedTitle = NSAttributedString()
@@ -3701,7 +3813,8 @@ final class OnboardingPrimaryButton: NSButton {
         }
 
         if let group = groupedDisplayIndicatorText() {
-            button.imagePosition = .noImage
+            // With more than one display, the Dock arrows lead the whole group.
+            button.imagePosition = showsDockIndicator ? .imageLeading : .noImage
             button.attributedTitle = group
             return
         }
@@ -3714,7 +3827,8 @@ final class OnboardingPrimaryButton: NSButton {
             button.attributedTitle = NSAttributedString()
 
         case .systemText:
-            button.attributedTitle = style.text(current: currentNum, total: totalNum, isFullscreen: isFS, dockIndicator: button.image)
+            button.attributedTitle = style.text(current: currentNum, total: totalNum, isFullscreen: isFS,
+                                                dockIndicator: showsDockIndicator ? button.image : nil)
 
         case .compactSlash:
             let text = isFS ? "FS" : "\(desktopCountText(currentNum))/\(desktopCountText(totalNum))"
@@ -3839,8 +3953,13 @@ final class OnboardingPrimaryButton: NSButton {
         if statusMenuIsOpen {
             pendingDisplayLayoutRefresh = true
             refreshDesktopIndicatorAppearanceMenu()
-        } else if let text = groupedDisplayIndicatorText(), currentDesktopIndicatorAppearance != .none {
-            statusItem.button?.attributedTitle = text
+        } else if currentDesktopIndicatorAppearance != .none, let button = statusItem.button {
+            // Colors are chosen as the text is built, so use the menu bar's appearance.
+            var text: NSAttributedString?
+            button.effectiveAppearance.performAsCurrentDrawingAppearance {
+                text = groupedDisplayIndicatorText()
+            }
+            if let text { button.attributedTitle = text }
         }
     }
 
@@ -4266,10 +4385,10 @@ final class OnboardingPrimaryButton: NSButton {
             trailingInset: 12,
             helpHeading: dockIconClickMinimizeTitle,
             helpTextProvider: {
-                "Click the Dock icon of the app you are using to minimize its open windows. Click it again to restore only the windows DockAway minimized.\n\n• Windows minimized another way stay minimized.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
+                "Click the Dock icon of the app you are using to minimize its open windows. Click it again to restore only the windows DockAway minimized.\n\n• With Cycle App Windows on, this happens only when the app has one window to show.\n• Turning this on turns off Hides/Unhides App When Dock Icon Clicked.\n• Windows minimized another way stay minimized.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
-            self?.setDockIconClickAction(.minimize, enabled: enabled)
+            self?.setDockIconClickOption(DockIconClickMinimizeController.preferenceKey, enabled: enabled)
         }
         dockIconClickMinimizeRow.autoresizingMask = [.width]
         dockIconClickMinimizeItem.view = dockIconClickMinimizeRow
@@ -4289,10 +4408,10 @@ final class OnboardingPrimaryButton: NSButton {
             trailingInset: 12,
             helpHeading: dockIconClickHideTitle,
             helpTextProvider: {
-                "Click the Dock icon of the app you are using to hide the entire app. Click its Dock icon again to unhide and reactivate it.\n\n• Clicking an app that is not currently active keeps the normal macOS activation behavior.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
+                "Click the Dock icon of the app you are using to hide the entire app. Click its Dock icon again to unhide and reactivate it.\n\n• With Cycle App Windows on, this happens only when the app has one window to show.\n• Turning this on turns off Minimize/Expands App When Dock Icon Clicked.\n• Clicking an app that is not currently active keeps the normal macOS activation behavior.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
-            self?.setDockIconClickAction(.hide, enabled: enabled)
+            self?.setDockIconClickOption(DockIconClickMinimizeController.hidePreferenceKey, enabled: enabled)
         }
         dockIconClickHideRow.autoresizingMask = [.width]
         dockIconClickHideItem.view = dockIconClickHideRow
@@ -4307,10 +4426,10 @@ final class OnboardingPrimaryButton: NSButton {
             trailingInset: 12,
             helpHeading: dockIconClickCycleTitle,
             helpTextProvider: {
-                "Click an active app's Dock icon to bring its next window forward. Repeated clicks cycle through its windows in a stable order.\n\n• Windows on the current desktop are included, across displays.\n• Minimized windows stay minimized, and fullscreen windows and dialogs are not cycled.\n• The first click on a background app activates it normally.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior.\n• Only one Dock Icon Action can be enabled at a time."
+                "Click an active app's Dock icon to bring its next window forward. Repeated clicks cycle through its windows in a stable order.\n\n• Windows on the current desktop are included, across displays.\n• Minimized windows stay minimized, and fullscreen windows and dialogs are not cycled.\n• The first click on a background app activates it normally.\n• To minimize or hide an app with only one window, also turn on Minimize/Expands or Hides/Unhides.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
-            self?.setDockIconClickAction(.cycle, enabled: enabled)
+            self?.setDockIconClickOption(DockIconClickMinimizeController.cyclePreferenceKey, enabled: enabled)
         }
         dockIconClickCycleItem.view = dockIconClickCycleRow
 
@@ -4574,7 +4693,8 @@ final class OnboardingPrimaryButton: NSButton {
             isOn: KeyboardNavigationPreferences.isEnabled,
             width: navSubmenuWidth,
             leadingInset: 18,
-            trailingInset: 12
+            // Lines up with the Right Hand and Left Hand switches below.
+            trailingInset: 18
         ) { [weak self] enabled in
             self?.setKeyboardNavigationEnabled(enabled)
         }
@@ -5024,19 +5144,19 @@ final class OnboardingPrimaryButton: NSButton {
         dockAwaySettingsMenu.addItem(displayOrderItem)
         refreshDisplayOrderMenu()
 
-        let desktopIndicatorAppearanceItem = NSMenuItem(title: "Menubar Desktop Indicator", action: nil, keyEquivalent: "")
+        let desktopIndicatorAppearanceItem = NSMenuItem(title: "Menubar Dock/Desktop Indicator", action: nil, keyEquivalent: "")
         desktopIndicatorAppearanceItem.view = SubmenuLabelView.desktopIndicatorAppearance()
         desktopIndicatorAppearanceItem.state = .on
         desktopIndicatorAppearanceItem.onStateImage = menuIcon(from: NSImage(
             systemSymbolName: "menubar.rectangle",
-            accessibilityDescription: "Menubar Desktop Indicator"
+            accessibilityDescription: "Menubar Dock/Desktop Indicator"
         ))
-        let desktopIndicatorAppearanceMenu = NSMenu(title: "Menubar Desktop Indicator")
+        let desktopIndicatorAppearanceMenu = NSMenu(title: "Menubar Dock/Desktop Indicator")
         desktopIndicatorAppearanceMenu.autoenablesItems = false
         desktopIndicatorAppearanceMenu.delegate = self
 
         let tooltipSubmenuWidth: CGFloat = 280
-        let desktopTooltipTitle = "Desktop Change Tooltip"
+        let desktopTooltipTitle = "Desktop Change Pill"
         let desktopChangeTooltipMenu = NSMenu(title: desktopTooltipTitle)
         desktopChangeTooltipMenu.autoenablesItems = false
         desktopChangeTooltipMenu.delegate = self
@@ -5048,11 +5168,11 @@ final class OnboardingPrimaryButton: NSButton {
             leadingTitle: "1 sec",
             trailingTitle: "10 sec",
             accessibilityLabel: "Tooltip display duration",
-            accessibilityHelp: "Set how long the desktop change tooltip remains visible on screen.",
+            accessibilityHelp: "Set how long the desktop change pill remains visible on screen.",
             width: tooltipSubmenuWidth,
             helpHeading: "Display Duration",
             helpTextProvider: {
-                "Controls how long the desktop change tooltip stays on screen after switching desktops.\n\n• The tooltip appears centered below the menu bar on the active display.\n• Slide left for a shorter duration or right for a longer duration.\n• Default duration in DockAway is 4.0 seconds.\n• Changes apply immediately."
+                "Controls how long the desktop change pill stays on screen after switching desktops.\n\n• The tooltip appears centered below the menu bar on the active display.\n• Slide left for a shorter duration or right for a longer duration.\n• Default duration in DockAway is 4.0 seconds.\n• Changes apply immediately."
             }
         )
         tooltipDurationView.slider.minValue = DesktopChangeTooltip.minDuration
@@ -5075,30 +5195,31 @@ final class OnboardingPrimaryButton: NSButton {
             trailingInset: 14
         ))
 
-        let displayUnderneathTitle = "Place Display Name Underneath"
-        let displayUnderneathItem = NSMenuItem(title: displayUnderneathTitle, action: nil, keyEquivalent: "")
-        let displayUnderneathRow = DockSettingToggleRowView(
-            title: displayUnderneathTitle,
-            isOn: DesktopChangeTooltip.isDisplayUnderneath,
+        let appIconsTitle = "Show App Icons"
+        let appIconsItem = NSMenuItem(title: appIconsTitle, action: nil, keyEquivalent: "")
+        let appIconsRow = DockSettingToggleRowView(
+            title: appIconsTitle,
+            isOn: DesktopChangeTooltip.showsAppIcons,
             width: tooltipSubmenuWidth,
             leadingInset: 18,
             trailingInset: 12
         ) { [weak self] enabled in
-            DesktopChangeTooltip.isDisplayUnderneath = enabled
+            DesktopChangeTooltip.showsAppIcons = enabled
             self?.desktopChangeTooltip.resetPanel()
             self?.refreshDesktopChangeTooltipMenu()
         }
-        displayUnderneathRow.autoresizingMask = [.width]
-        displayUnderneathItem.view = displayUnderneathRow
-        self.desktopChangeTooltipDisplayUnderneathRowView = displayUnderneathRow
-        desktopChangeTooltipMenu.addItem(displayUnderneathItem)
+        appIconsRow.autoresizingMask = [.width]
+        appIconsItem.view = appIconsRow
+        self.desktopChangeTooltipAppIconsRowView = appIconsRow
+        desktopChangeTooltipMenu.addItem(appIconsItem)
 
         for appearance in [DesktopIndicatorAppearance.systemText] {
             let item = NSMenuItem()
             item.tag = -105
             let indicatorRow = DesktopIndicatorPreviewRow(title: "Menubar Desktop Indicator")
             indicatorRow.onPreviewClick = { [weak self] point in
-                guard let self, !self.desktopDisplaySections.isEmpty else { return }
+                // One display has a single look of its own, nothing to pick.
+                guard let self, self.desktopDisplaySections.count > 1 else { return }
                 let sections = self.orderedIndicatorSections
                 let count = sections.count
                 let stacked = UserDefaults.standard.object(forKey: "stackDisplayIndicators") as? Bool ?? true
@@ -5131,9 +5252,20 @@ final class OnboardingPrimaryButton: NSButton {
             indicatorRow.onToggle = { [weak self] enabled in
                 guard let self else { return }
                 self.saveCleanDesktopTextStyle(self.cleanDesktopTextStyle)
-                DesktopIndicatorPreference.setEnabled(enabled)
+                MenuBarIndicatorPreference.setDesktopIndicatorEnabled(enabled, for: self.indicatorLayout)
                 self.desktopChangeTooltip.dismiss(animated: true)
                 self.pendingDisplayLayoutRefresh = true
+                self.updateMenuBarDesktopBadge(liveCustomization: true)
+            }
+            indicatorRow.onDockIndicatorToggle = { [weak self] enabled in
+                guard let self else { return }
+                let layout = self.indicatorLayout
+                let desktopWasShown = DesktopIndicatorPreference.isEnabled(for: layout)
+                MenuBarIndicatorPreference.setDockIndicatorEnabled(enabled, for: layout)
+                if !desktopWasShown, DesktopIndicatorPreference.isEnabled(for: layout) {
+                    // Turning the arrows off brought the desktop indicator back.
+                    self.pendingDisplayLayoutRefresh = true
+                }
                 self.updateMenuBarDesktopBadge(liveCustomization: true)
             }
             item.view = indicatorRow
@@ -5312,7 +5444,7 @@ final class OnboardingPrimaryButton: NSButton {
                 paddingItem.isHidden = !cleanDesktopTextStyle.usesPill
                 desktopIndicatorAppearanceMenu.addItem(paddingItem)
                 desktopIndicatorAppearanceMenu.addItem(.separator())
-                let separatorItem = NSMenuItem(title: "Indicator Separator", action: nil, keyEquivalent: "")
+                let separatorItem = NSMenuItem(title: "Desktop Indicator Separator", action: nil, keyEquivalent: "")
                 separatorItem.tag = -101
                 separatorItem.view = SubmenuLabelView.indicatorSeparator()
                 separatorItem.submenu = separatorMenu
@@ -5402,24 +5534,6 @@ final class OnboardingPrimaryButton: NSButton {
         dockAwaySettingsMenu.addItem(desktopIndicatorAppearanceItem)
         dockAwaySettingsMenu.addItem(missionControlItem)
 
-        let themeItem = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
-        themeItem.view = SubmenuLabelView.theme()
-        themeItem.state = .on
-        themeItem.onStateImage = menuIcon(from: NSImage(
-            systemSymbolName: "paintpalette",
-            accessibilityDescription: "Theme"
-        ))
-        let themeMenu = NSMenu(title: "Theme")
-        for theme in DockAwayTheme.allCases {
-            let item = NSMenuItem(title: theme.title, action: #selector(selectDockAwayTheme(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = theme.rawValue
-            item.state = theme == DockAwayTheme.current ? .on : .off
-            themeMenu.addItem(item)
-        }
-        themeItem.submenu = themeMenu
-        dockAwaySettingsMenu.addItem(themeItem)
-
         let extrasItem = NSMenuItem(title: "Extras", action: nil, keyEquivalent: "")
         extrasItem.view = DockAwayMenuRowView(
             title: "Extras",
@@ -5455,21 +5569,11 @@ final class OnboardingPrimaryButton: NSButton {
                 "Uses the native macOS Sound menu bar icon. Set Sound to Show When Active in System Settings first.\n\nWhile muted or at zero volume, DockAway switches Sound to Always Show. When audible again, it restores Show When Active. macOS may still show the icon during audio activity.\n\nDisabling this option or quitting restores Show When Active. Changing the Sound visibility setting manually disables this option."
             }
         ) { [weak self] enabled in
-            guard let self else { return }
-            let accepted = self.mutedVolumeMenuBarController.setEnabled(enabled)
-            self.mutedVolumeMenuBarRow?.setOn(enabled && accepted)
-            if !accepted {
-                let alert = NSAlert()
-                alert.messageText = "Set Sound to Show When Active"
-                alert.informativeText = "In System Settings, open Menu Bar (or Control Center on older macOS versions) and set Sound to Show When Active. Then enable this option again."
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-            }
+            self?.setMutedSoundIconEnabled(enabled)
         }
         mutedSoundRow.autoresizingMask = [.width]
         mutedSoundItem.view = mutedSoundRow
         mutedVolumeMenuBarRow = mutedSoundRow
-        extrasMenu.addItem(mutedSoundItem)
 
         let lockSoundTitle = "Lockscreen Lock Sound"
         let lockSoundItem = NSMenuItem(title: lockSoundTitle, action: nil, keyEquivalent: "")
@@ -5483,14 +5587,14 @@ final class OnboardingPrimaryButton: NSButton {
             indicatorSize: 16,
             helpHeading: lockSoundTitle,
             helpTextProvider: {
-                "Plays a sound whenever you lock your Mac.\n\n• Uses your current sound output and volume.\n• Works while DockAway is running."
-            }
-        ) { [weak self] enabled in
-            UserDefaults.standard.set(enabled, forKey: LockscreenSoundPlayer.Event.lock.preferenceKey)
-            self?.lockSoundRowView?.setOn(enabled)
-            if enabled {
+                "Plays a sound whenever you lock your Mac.\n\n• Press ▶︎ to hear it.\n• Uses your current sound output and volume.\n• Works while DockAway is running."
+            },
+            previewAccessibilityLabel: "Play Lockscreen Lock Sound",
+            previewHandler: { [weak self] in
                 self?.lockscreenSoundPlayer.play(.lock)
             }
+        ) { [weak self] enabled in
+            self?.setLockscreenSoundEnabled(.lock, enabled)
         }
         lockSoundRow.autoresizingMask = [.width]
         lockSoundItem.view = lockSoundRow
@@ -5509,19 +5613,79 @@ final class OnboardingPrimaryButton: NSButton {
             indicatorSize: 16,
             helpHeading: unlockSoundTitle,
             helpTextProvider: {
-                "Plays a sound whenever you unlock your Mac.\n\n• Uses your current sound output and volume.\n• Works while DockAway is running."
-            }
-        ) { [weak self] enabled in
-            UserDefaults.standard.set(enabled, forKey: LockscreenSoundPlayer.Event.unlock.preferenceKey)
-            self?.unlockSoundRowView?.setOn(enabled)
-            if enabled {
+                "Plays a sound whenever you unlock your Mac.\n\n• Press ▶︎ to hear it.\n• Uses your current sound output and volume.\n• Works while DockAway is running."
+            },
+            previewAccessibilityLabel: "Play Lockscreen Unlock Sound",
+            previewHandler: { [weak self] in
                 self?.lockscreenSoundPlayer.play(.unlock)
             }
+        ) { [weak self] enabled in
+            self?.setLockscreenSoundEnabled(.unlock, enabled)
         }
         unlockSoundRow.autoresizingMask = [.width]
         unlockSoundItem.view = unlockSoundRow
         self.unlockSoundRowView = unlockSoundRow
         extrasMenu.addItem(unlockSoundItem)
+        extrasMenu.addItem(mutedSoundItem)
+
+        if fullscreenVideoKeyboardLightController.isAvailable {
+            let keyboardLightTitle = "Keyboard Lighting Off Only for FS Video"
+            let keyboardLightItem = NSMenuItem(title: keyboardLightTitle, action: nil, keyEquivalent: "")
+            let keyboardLightRow = DockSettingPersistenceRowView(
+                title: keyboardLightTitle,
+                isOn: UserDefaults.standard.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey),
+                width: settingsRowWidth,
+                leadingInset: 18,
+                trailingInset: 12,
+                titleLeadingAdjustment: 1,
+                indicatorSize: 16,
+                helpHeading: keyboardLightTitle,
+                helpTextProvider: {
+                    "Turns your keyboard backlight off while a video plays fullscreen, and keeps it on the rest of the time.\n\n• Turning this on sets Turn Off After Inactivity to Never. Turning it off puts your previous setting back.\n• Comes back on when the video pauses or ends, or when you leave fullscreen or switch apps.\n• Pressing a key during the video lights it briefly.\n• Uses macOS's own dimming, so your keyboard brightness and low-light settings aren't changed.\n• Other fullscreen apps that keep your display awake, such as video calls and presentations, also turn the backlight off."
+                }
+            ) { [weak self] enabled in
+                self?.setKeyboardLightOffForVideo(enabled)
+            }
+            keyboardLightRow.autoresizingMask = [.width]
+            keyboardLightItem.view = keyboardLightRow
+            self.fullscreenVideoKeyboardLightRowView = keyboardLightRow
+            extrasMenu.addItem(keyboardLightItem)
+
+            // Mirrors System Settings > Keyboard > "Turn keyboard backlight off
+            // after inactivity", using the same setting.
+            let timeoutTitle = "Turn Off After Inactivity"
+            let timeoutItem = NSMenuItem(title: timeoutTitle, action: nil, keyEquivalent: "")
+            let timeoutRow = DockAwayMenuRowView(
+                title: timeoutTitle,
+                icon: NSImage(systemSymbolName: "timer", accessibilityDescription: timeoutTitle),
+                hasSubmenu: true,
+                leadingInset: 46,
+                hierarchyParentLeadingInset: 18,
+                titleLeadingAdjustment: 1,
+                width: settingsRowWidth
+            )
+            timeoutItem.view = timeoutRow
+            self.keyboardLightTimeoutRowView = timeoutRow
+            let timeoutMenu = NSMenu(title: timeoutTitle)
+            timeoutMenu.autoenablesItems = false
+            keyboardLightTimeoutChoiceRows = FullscreenVideoKeyboardLightController.inactivityChoices.map { choice in
+                let item = NSMenuItem()
+                let row = DockSettingPersistenceRowView(
+                    title: choice.title,
+                    isOn: false,
+                    width: 170,
+                    leadingInset: 20
+                ) { [weak self] _ in
+                    self?.setKeyboardLightTimeout(choice.seconds)
+                }
+                item.view = row
+                timeoutMenu.addItem(item)
+                return (choice.seconds, row)
+            }
+            timeoutItem.submenu = timeoutMenu
+            extrasMenu.addItem(timeoutItem)
+            refreshKeyboardLightTimeoutMenu()
+        }
 
         extrasMenu.addItem(wideMenuSeparator(width: settingsRowWidth, leadingInset: 18, trailingInset: 14))
 
@@ -5540,9 +5704,7 @@ final class OnboardingPrimaryButton: NSButton {
                 "Automatically copies newly captured screenshots to your clipboard.\n\n• Paste (⌘V) your screenshot anywhere once macOS saves it, after its floating thumbnail goes away. Turn on Copy Instantly to paste right away.\n• Screenshots are still saved to your folder as usual.\n• Works with standard macOS screenshot shortcuts.\n• macOS natively captures all displays, but DockAway clips the screenshot from the display your mouse is on."
             }
         ) { [weak self] enabled in
-            self?.screenshotClipboardManager.isEnabled = enabled
-            self?.screenshotClipboardRowView?.setOn(enabled)
-            self?.screenshotInstantCopyRowView?.setControlEnabled(enabled)
+            self?.setScreenshotClipboardEnabled(enabled)
         }
         screenshotClipboardRow.autoresizingMask = [.width]
         screenshotClipboardItem.view = screenshotClipboardRow
@@ -5566,8 +5728,7 @@ final class OnboardingPrimaryButton: NSButton {
                 "Hides the macOS floating screenshot thumbnail, so each screenshot is saved and copied the moment you take it.\n\n• macOS doesn't save a screenshot until its thumbnail goes away, so while the thumbnail shows, DockAway can't copy it any sooner.\n• Turning this off, turning off Save Screenshots to Clipboard, or quitting DockAway restores your thumbnail setting.\n• Turning the thumbnail back on in the Screenshot app's Options menu turns this option off."
             }
         ) { [weak self] enabled in
-            self?.screenshotClipboardManager.copiesInstantly = enabled
-            self?.screenshotInstantCopyRowView?.setOn(self?.screenshotClipboardManager.copiesInstantly ?? false)
+            self?.setScreenshotCopiesInstantly(enabled)
         }
         screenshotInstantCopyRow.autoresizingMask = [.width]
         screenshotInstantCopyItem.view = screenshotInstantCopyRow
@@ -5588,9 +5749,7 @@ final class OnboardingPrimaryButton: NSButton {
                 "Makes a normal click on the green macOS traffic-light button fill the window instead of entering full screen.\n\nHold Option while clicking the green button to enter full screen."
             }
         ) { [weak self] enabled in
-            UserDefaults.standard.set(enabled, forKey: GreenButtonFillController.preferenceKey)
-            self?.greenButtonFillRowView?.setOn(enabled)
-            self?.refreshGreenButtonFillController()
+            self?.setGreenButtonFillEnabled(enabled)
         }
         greenButtonFillRow.autoresizingMask = [.width]
         greenButtonFillItem.view = greenButtonFillRow
@@ -5618,12 +5777,7 @@ final class OnboardingPrimaryButton: NSButton {
                 "Press Delete in Finder to move the selected files or folders to Trash, without holding Command.\n\n• Uses Finder's native Move to Trash command.\n• Rename fields, search fields, dialogs, and modified shortcuts keep their normal Delete-key behavior.\n• Holding Delete triggers the action only once per key press."
             }
         ) { [weak self] enabled in
-            UserDefaults.standard.set(
-                enabled,
-                forKey: FinderDeleteKeyController.preferenceKey
-            )
-            self?.finderDeleteKeyRowView?.setOn(enabled)
-            self?.refreshFinderDeleteKeyController()
+            self?.setFinderDeleteKeyEnabled(enabled)
         }
         finderDeleteKeyRow.autoresizingMask = [.width]
         finderDeleteKeyItem.view = finderDeleteKeyRow
@@ -5651,12 +5805,7 @@ final class OnboardingPrimaryButton: NSButton {
                 "Keeps images copied from Finder's Quick Look in their displayed orientation.\n\n• Applies the image's built-in orientation before placing it on the clipboard.\n• Prevents pasted images from turning sideways.\n• Regular Finder file copies and images copied from other apps are unchanged."
             }
         ) { [weak self] enabled in
-            UserDefaults.standard.set(
-                enabled,
-                forKey: QuickLookCopyOrientationManager.preferenceKey
-            )
-            self?.quickLookCopyOrientationRowView?.setOn(enabled)
-            self?.refreshQuickLookCopyOrientationManager()
+            self?.setQuickLookCopyOrientationEnabled(enabled)
         }
         quickLookOrientationRow.autoresizingMask = [.width]
         quickLookOrientationItem.view = quickLookOrientationRow
@@ -5758,8 +5907,6 @@ final class OnboardingPrimaryButton: NSButton {
 
         installDesktopMenuDelegates(in: menu)
         statusItem.menu = menu
-        DockAwayTheme.current.apply(to: menu)
-        statusItem.button?.appearance = DockAwayTheme.current.appearance
     }
 
     // MARK: - Desktop Manager Setting
@@ -5948,8 +6095,8 @@ final class OnboardingPrimaryButton: NSButton {
         let isEnabled = UserDefaults.standard.bool(forKey: DesktopChangeTooltip.preferenceKey)
         desktopChangeTooltipRowView?.setOn(isEnabled)
         desktopChangeTooltipDurationSliderView?.slider.isEnabled = isEnabled
-        desktopChangeTooltipDisplayUnderneathRowView?.setOn(DesktopChangeTooltip.isDisplayUnderneath)
-        desktopChangeTooltipDisplayUnderneathRowView?.setControlEnabled(isEnabled)
+        desktopChangeTooltipAppIconsRowView?.setOn(DesktopChangeTooltip.showsAppIcons)
+        desktopChangeTooltipAppIconsRowView?.setControlEnabled(isEnabled)
         let duration = DesktopChangeTooltip.duration
         let durationText = String(format: "%.1f sec", duration)
         desktopChangeTooltipDurationSliderView?.setValue(duration, displayText: durationText)
@@ -5961,6 +6108,173 @@ final class OnboardingPrimaryButton: NSButton {
         desktopChangeTooltipDurationSliderView?.setValue(duration, displayText: durationText)
     }
 
+    // MARK: - Extras
+
+    // The Extras menu and onboarding change these settings through the same
+    // methods, so each stays in sync with the other.
+
+    private func setMutedSoundIconEnabled(_ enabled: Bool) {
+        let accepted = mutedVolumeMenuBarController.setEnabled(enabled)
+        mutedVolumeMenuBarRow?.setOn(enabled && accepted)
+        extrasDidChange()
+        guard !accepted else { return }
+        let alert = NSAlert()
+        alert.messageText = "Set Sound to Show When Active"
+        alert.informativeText = "In System Settings, open Menu Bar (or Control Center on older macOS versions) and set Sound to Show When Active. Then enable this option again."
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func setLockscreenSoundEnabled(_ event: LockscreenSoundPlayer.Event, _ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: event.preferenceKey)
+        (event == .lock ? lockSoundRowView : unlockSoundRowView)?.setOn(enabled)
+        if enabled {
+            lockscreenSoundPlayer.play(event)
+        }
+        extrasDidChange()
+    }
+
+    private func setKeyboardLightOffForVideo(_ enabled: Bool) {
+        fullscreenVideoKeyboardLightController.setEnabledFromMenu(enabled)
+        fullscreenVideoKeyboardLightRowView?.setOn(enabled)
+        refreshKeyboardLightTimeoutMenu()
+        extrasDidChange()
+    }
+
+    private func setKeyboardLightTimeout(_ seconds: TimeInterval) {
+        fullscreenVideoKeyboardLightController.setInactivityTimeout(seconds)
+        refreshKeyboardLightTimeoutMenu()
+        extrasDidChange()
+    }
+
+    private func setScreenshotClipboardEnabled(_ enabled: Bool) {
+        screenshotClipboardManager.isEnabled = enabled
+        screenshotClipboardRowView?.setOn(enabled)
+        screenshotInstantCopyRowView?.setControlEnabled(enabled)
+        extrasDidChange()
+    }
+
+    private func setScreenshotCopiesInstantly(_ enabled: Bool) {
+        screenshotClipboardManager.copiesInstantly = enabled
+        screenshotInstantCopyRowView?.setOn(screenshotClipboardManager.copiesInstantly)
+        extrasDidChange()
+    }
+
+    private func setGreenButtonFillEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: GreenButtonFillController.preferenceKey)
+        greenButtonFillRowView?.setOn(enabled)
+        refreshGreenButtonFillController()
+        extrasDidChange()
+    }
+
+    private func setFinderDeleteKeyEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: FinderDeleteKeyController.preferenceKey)
+        finderDeleteKeyRowView?.setOn(enabled)
+        refreshFinderDeleteKeyController()
+        extrasDidChange()
+    }
+
+    private func setQuickLookCopyOrientationEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: QuickLookCopyOrientationManager.preferenceKey)
+        quickLookCopyOrientationRowView?.setOn(enabled)
+        refreshQuickLookCopyOrientationManager()
+        extrasDidChange()
+    }
+
+    private func extrasDidChange() {
+        permissionSetupExtrasView?.refresh()
+    }
+
+    /// The Extras settings as onboarding shows them, in the menu's order.
+    private func makeOnboardingExtrasOptions() -> [OnboardingExtrasOption] {
+        let defaults = UserDefaults.standard
+        var options: [OnboardingExtrasOption] = [
+            OnboardingExtrasOption(
+                title: "Lockscreen Lock Sound",
+                detail: "Plays a sound when you lock your Mac",
+                control: .toggle(isOn: { defaults.bool(forKey: LockscreenSoundPlayer.Event.lock.preferenceKey) },
+                                 setOn: { [weak self] in self?.setLockscreenSoundEnabled(.lock, $0) }),
+                preview: { [weak self] in self?.lockscreenSoundPlayer.play(.lock) }
+            ),
+            OnboardingExtrasOption(
+                title: "Lockscreen Unlock Sound",
+                detail: "Plays a sound when you unlock your Mac",
+                control: .toggle(isOn: { defaults.bool(forKey: LockscreenSoundPlayer.Event.unlock.preferenceKey) },
+                                 setOn: { [weak self] in self?.setLockscreenSoundEnabled(.unlock, $0) }),
+                preview: { [weak self] in self?.lockscreenSoundPlayer.play(.unlock) }
+            ),
+            OnboardingExtrasOption(
+                title: "Show Sound Icon When Muted",
+                detail: "Shows the Sound icon in the menu bar while muted",
+                control: .toggle(isOn: { defaults.bool(forKey: MutedVolumeMenuBarController.preferenceKey) },
+                                 setOn: { [weak self] in self?.setMutedSoundIconEnabled($0) })
+            )
+        ]
+        if fullscreenVideoKeyboardLightController.isAvailable {
+            options += [
+                OnboardingExtrasOption(
+                    title: "Keyboard Light Off Only for Fullscreen Video",
+                    detail: "Turns the keyboard light off only while a video plays fullscreen",
+                    control: .toggle(isOn: { defaults.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey) },
+                                     setOn: { [weak self] in self?.setKeyboardLightOffForVideo($0) })
+                ),
+                OnboardingExtrasOption(
+                    title: "Turn Off After Inactivity",
+                    detail: "Matches System Settings > Keyboard",
+                    isNested: true,
+                    control: .choice(
+                        choices: FullscreenVideoKeyboardLightController.inactivityChoices.map { ($0.seconds, $0.title) },
+                        current: { [weak self] in self?.fullscreenVideoKeyboardLightController.inactivityTimeout },
+                        select: { [weak self] in self?.setKeyboardLightTimeout($0) }
+                    )
+                )
+            ]
+        }
+        options += [
+            OnboardingExtrasOption(
+                title: "Save Screenshots to Clipboard",
+                detail: "Copies each new screenshot so you can paste it anywhere",
+                control: .toggle(isOn: { [weak self] in self?.screenshotClipboardManager.isEnabled ?? false },
+                                 setOn: { [weak self] in self?.setScreenshotClipboardEnabled($0) })
+            ),
+            OnboardingExtrasOption(
+                title: "Copy Instantly",
+                detail: "Skips the floating thumbnail so you can paste right away",
+                isNested: true,
+                isEnabled: { [weak self] in self?.screenshotClipboardManager.isEnabled ?? false },
+                control: .toggle(isOn: { [weak self] in self?.screenshotClipboardManager.copiesInstantly ?? false },
+                                 setOn: { [weak self] in self?.setScreenshotCopiesInstantly($0) })
+            ),
+            OnboardingExtrasOption(
+                title: "Green Button Fills Window",
+                detail: "Fills the window; hold Option to enter full screen",
+                control: .toggle(isOn: { defaults.bool(forKey: GreenButtonFillController.preferenceKey) },
+                                 setOn: { [weak self] in self?.setGreenButtonFillEnabled($0) })
+            ),
+            OnboardingExtrasOption(
+                title: "Delete Finder Items with Delete Key",
+                detail: "Moves selected Finder items to the Trash",
+                control: .toggle(isOn: { defaults.bool(forKey: FinderDeleteKeyController.preferenceKey) },
+                                 setOn: { [weak self] in self?.setFinderDeleteKeyEnabled($0) })
+            ),
+            OnboardingExtrasOption(
+                title: "Correct Quick Look Copy Orientation",
+                detail: "Keeps images copied from Quick Look upright when pasted",
+                control: .toggle(isOn: { defaults.bool(forKey: QuickLookCopyOrientationManager.preferenceKey) },
+                                 setOn: { [weak self] in self?.setQuickLookCopyOrientationEnabled($0) })
+            )
+        ]
+        return options
+    }
+
+    private func refreshKeyboardLightTimeoutMenu() {
+        guard let timeout = fullscreenVideoKeyboardLightController.inactivityTimeout else { return }
+        keyboardLightTimeoutRowView?.detail = FullscreenVideoKeyboardLightController.inactivityLabel(for: timeout)
+        for choice in keyboardLightTimeoutChoiceRows {
+            choice.row.setOn(choice.seconds == timeout)
+        }
+    }
+
     private func refreshDockAwaySettingsMenu() {
         desktopManagerRowView?.setOn(isDesktopManagerEnabled)
         refreshDesktopChangeTooltipMenu()
@@ -5968,6 +6282,11 @@ final class OnboardingPrimaryButton: NSButton {
         teleportWindowMoveRowView?.setOn(isTeleportWindowMoveEnabled)
         lockSoundRowView?.setOn(UserDefaults.standard.bool(forKey: LockscreenSoundPlayer.Event.lock.preferenceKey))
         unlockSoundRowView?.setOn(UserDefaults.standard.bool(forKey: LockscreenSoundPlayer.Event.unlock.preferenceKey))
+        fullscreenVideoKeyboardLightRowView?.setOn(
+            UserDefaults.standard.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey)
+        )
+        // Catches changes made in System Settings.
+        refreshKeyboardLightTimeoutMenu()
         screenshotClipboardRowView?.setOn(screenshotClipboardManager.isEnabled)
         // Catches the thumbnail having been turned back on outside DockAway.
         screenshotClipboardManager.updateThumbnailSuppression()
@@ -6067,13 +6386,15 @@ final class OnboardingPrimaryButton: NSButton {
         hoverActivationDelaySliderView?.setValue(delay, displayText: text)
     }
 
-    private func setDockIconClickAction(_ selected: DockIconClickMinimizeController.Mode, enabled: Bool) {
-        for (mode, key) in [
-            (DockIconClickMinimizeController.Mode.minimize, DockIconClickMinimizeController.preferenceKey),
-            (.hide, DockIconClickMinimizeController.hidePreferenceKey),
-            (.cycle, DockIconClickMinimizeController.cyclePreferenceKey)
-        ] where enabled || mode == selected {
-            UserDefaults.standard.set(enabled && mode == selected, forKey: key)
+    /// Minimize and hide exclude each other. Cycle combines with either one,
+    /// which then handles apps with only one window.
+    private func setDockIconClickOption(_ key: String, enabled: Bool) {
+        let defaults = UserDefaults.standard
+        defaults.set(enabled, forKey: key)
+        if enabled, key == DockIconClickMinimizeController.preferenceKey {
+            defaults.set(false, forKey: DockIconClickMinimizeController.hidePreferenceKey)
+        } else if enabled, key == DockIconClickMinimizeController.hidePreferenceKey {
+            defaults.set(false, forKey: DockIconClickMinimizeController.preferenceKey)
         }
         refreshDockIconClickMinimizeController()
     }
@@ -6084,23 +6405,21 @@ final class OnboardingPrimaryButton: NSButton {
         let hideEnabled = UserDefaults.standard.bool(
             forKey: DockIconClickMinimizeController.hidePreferenceKey
         )
-        let minimizeEnabled = UserDefaults.standard.bool(
+        var minimizeEnabled = UserDefaults.standard.bool(
             forKey: DockIconClickMinimizeController.preferenceKey
         )
         let cycleEnabled = UserDefaults.standard.bool(forKey: DockIconClickMinimizeController.cyclePreferenceKey)
+        // Normalize a conflicting saved pair; hide wins, matching mode(…).
+        if minimizeEnabled && hideEnabled {
+            minimizeEnabled = false
+            UserDefaults.standard.set(false, forKey: DockIconClickMinimizeController.preferenceKey)
+        }
         let mode = DockIconClickMinimizeController.mode(
             minimizeEnabled: minimizeEnabled, hideEnabled: hideEnabled, cycleEnabled: cycleEnabled
         )
-        // Normalize conflicting persisted values as well as live menu choices.
-        if minimizeEnabled && mode != .minimize {
-            UserDefaults.standard.set(false, forKey: DockIconClickMinimizeController.preferenceKey)
-        }
-        if hideEnabled && mode != .hide {
-            UserDefaults.standard.set(false, forKey: DockIconClickMinimizeController.hidePreferenceKey)
-        }
-        dockIconClickMinimizeRowView?.setOn(mode == .minimize)
-        dockIconClickHideRowView?.setOn(mode == .hide)
-        dockIconClickCycleRowView?.setOn(mode == .cycle)
+        dockIconClickMinimizeRowView?.setOn(minimizeEnabled)
+        dockIconClickHideRowView?.setOn(hideEnabled)
+        dockIconClickCycleRowView?.setOn(cycleEnabled)
         dockIconClickMinimizeController.setMode(hasRequiredPermissions ? mode : .disabled)
     }
 
@@ -6152,23 +6471,6 @@ final class OnboardingPrimaryButton: NSButton {
         history.removeAll { $0 == key }
         history.insert(key, at: 0)
         UserDefaults.standard.set(Array(history.prefix(32)), forKey: DisplayListOrder.historyKey)
-    }
-
-    @objc private func selectDockAwayTheme(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let theme = DockAwayTheme(rawValue: raw) else { return }
-        UserDefaults.standard.set(raw, forKey: DockAwayTheme.preferenceKey)
-        NSApp.appearance = theme.appearance
-        desktopChangeTooltip.applyTheme(theme)
-        statusItem.button?.appearance = theme.appearance
-        if let menu = statusItem.menu { theme.apply(to: menu) }
-        for item in sender.menu?.items ?? [] {
-            item.state = (item.representedObject as? String) == raw ? .on : .off
-        }
-        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
-            refreshDesktopIndicatorAppearanceMenu()
-            updateMenuBarDesktopBadge()
-        }
     }
 
     @objc private func reloadMissionControlKeyboardShortcuts() {
@@ -6258,15 +6560,15 @@ final class OnboardingPrimaryButton: NSButton {
     @objc private func selectDesktopIndicatorAppearance(_ sender: NSMenuItem) {
         guard let appearance = DesktopIndicatorAppearance(rawValue: sender.tag) else { return }
         saveCleanDesktopTextStyle(cleanDesktopTextStyle)
-        DesktopIndicatorPreference.setEnabled(appearance != .none)
+        DesktopIndicatorPreference.setEnabled(appearance != .none, for: indicatorLayout)
         refreshDesktopIndicatorAppearanceMenu()
         updateMenuBarDesktopBadge(liveCustomization: true)
     }
 
     private func refreshDesktopIndicatorAppearanceMenu() {
         guard let menu = desktopIndicatorAppearanceMenu else { return }
-        if desktopDisplaySections.count == 1, let display = desktopDisplaySections.first {
-            indicatorEditingDisplay = indicatorDisplayKey(display.snapshot.displayID)
+        if indicatorLayout == .singleDisplay {
+            indicatorEditingDisplay = nil
         } else if let selected = indicatorEditingDisplay,
                   !desktopDisplaySections.contains(where: { indicatorDisplayKey($0.snapshot.displayID) == selected }) {
             indicatorEditingDisplay = nil
@@ -6280,7 +6582,7 @@ final class OnboardingPrimaryButton: NSButton {
         desktopIndicatorPreviewContext = opacityContext
         for item in menu.items {
             if item.tag == -106, let targets = item.submenu {
-                let hideSelector = desktopDisplaySections.isEmpty
+                let hideSelector = desktopDisplaySections.count <= 1
                 if item.isHidden != hideSelector { item.isHidden = hideSelector }
                 if item.view == nil {
                     item.view = SubmenuLabelView.customizeDisplays()
@@ -6300,7 +6602,7 @@ final class OnboardingPrimaryButton: NSButton {
                         choice.representedObject = key
                         let helpHeading = key.isEmpty ? "All Displays" : name
                         let helpText = key.isEmpty
-                            ? "When All Displays is selected, appearance style changes (pills, fills, outlines, and accents) are applied globally across all connected monitors.\n\n• Changes update every display's menu bar indicator in unison.\n• Perfect for maintaining a consistent look across all screens."
+                            ? "When All Displays is selected, appearance style changes (pills, fills, outlines, and accents) are applied globally across all connected monitors.\n\n• Changes update every display's menu bar indicator in unison.\n• Perfect for maintaining a consistent look across all screens.\n• With only one display, DockAway keeps a separate look and switches, so changes here don't affect it."
                             : "When \(name) is selected, appearance style changes are isolated specifically to this monitor.\n\n• Customize pills, outlines, and badges independently per display.\n• Other displays retain their existing appearances."
                         let row = DockSettingPersistenceRowView(
                             title: name,
@@ -6325,13 +6627,14 @@ final class OnboardingPrimaryButton: NSButton {
             }
             if item.isSeparatorItem {
                 if item.tag == -107 {
-                    let hideSelector = desktopDisplaySections.isEmpty
+                    let hideSelector = desktopDisplaySections.count <= 1
                     if item.isHidden != hideSelector { item.isHidden = hideSelector }
                 }
                 continue
             }
             if item.tag == -105, let row = item.view as? DesktopIndicatorPreviewRow {
                 row.selected = current != .none
+                row.dockIndicatorOn = showsMenuBarDockIndicator
                 row.preview = desktopIndicatorPreview(.systemText, current: cur, total: tot, isFS: isFS)
                 continue
             }
@@ -6396,7 +6699,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func desktopIndicatorPreview(_ appearance: DesktopIndicatorAppearance, current: Int, total: Int, isFS: Bool) -> NSImage {
         let style = cleanDesktopTextStyle
-        let targetAppearance = DockAwayTheme.current.appearance ?? NSApp.effectiveAppearance
+        let targetAppearance = NSApp.effectiveAppearance
         let isDark = targetAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         if appearance == .systemText {
             // Render the prospective status-item content, not a separate mockup.
@@ -6406,10 +6709,15 @@ final class OnboardingPrimaryButton: NSButton {
             var text: NSAttributedString!
             targetAppearance.performAsCurrentDrawingAppearance {
                 grouped = self.groupedDisplayIndicatorText()
-                text = grouped ?? style.text(current: current, total: total,
-                    isFullscreen: isFS, dockIndicator: self.statusItem.button?.image)
+                text = grouped ?? style.text(current: current, total: total, isFullscreen: isFS,
+                    dockIndicator: self.showsMenuBarDockIndicator ? self.statusItem.button?.image : nil)
             }
-            let showsLogo = grouped == nil && !(style.usesPill && style.encapsulatesDockIndicator)
+            // The preview shows both parts and greys out whichever is turned off.
+            let desktopIndicatorAlpha: CGFloat = currentDesktopIndicatorAppearance == .none ? 0.35 : 1
+            let dockIndicatorAlpha: CGFloat = showsMenuBarDockIndicator ? 1 : 0.35
+            // A single display's pill can hold the Dock arrows; a group of
+            // displays shows them in front, like the menu bar does.
+            let showsLogo = grouped != nil || !(style.usesPill && style.encapsulatesDockIndicator)
             let rawLogo = showsLogo ? (statusItem.button?.image ?? NSImage(named: isDockCurrentlyVisible() ? "DockAwayStatus-Up" : "DockAwayStatus-Down")) : nil
             let logoSize = rawLogo?.size ?? .zero
             let logoColor: NSColor = isDark ? .white : .black
@@ -6427,8 +6735,20 @@ final class OnboardingPrimaryButton: NSButton {
             let preview = NSImage(size: NSSize(width: ceil(logoWidth + textSize.width) + 16, height: height), flipped: false) { rect in
                 targetAppearance.performAsCurrentDrawingAppearance {
                     logo?.draw(in: NSRect(x: 8, y: (rect.height - logoSize.height) / 2,
-                                         width: logoSize.width, height: logoSize.height))
-                    text.draw(at: NSPoint(x: 8 + logoWidth, y: (rect.height - textSize.height) / 2))
+                                         width: logoSize.width, height: logoSize.height),
+                               from: .zero, operation: .sourceOver, fraction: dockIndicatorAlpha)
+                    let textOrigin = NSPoint(x: 8 + logoWidth, y: (rect.height - textSize.height) / 2)
+                    if desktopIndicatorAlpha < 1 {
+                        // Fade the finished indicator as one image, so badges
+                        // drawn as attachments dim along with the text.
+                        let indicator = NSImage(size: textSize, flipped: false) { _ in
+                            text.draw(at: .zero)
+                            return true
+                        }
+                        indicator.draw(at: textOrigin, from: .zero, operation: .sourceOver, fraction: desktopIndicatorAlpha)
+                    } else {
+                        text.draw(at: textOrigin)
+                    }
                 }
                 return true
             }
@@ -7812,6 +8132,14 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private func desktopTileIcon(for app: NSRunningApplication) -> NSImage? {
+        let cacheKey = app.bundleURL?.path ?? "pid:\(app.processIdentifier)"
+        if let cached = desktopTileIconCache[cacheKey] { return cached }
+        guard let image = drawDesktopTileIcon(for: app) else { return nil }
+        desktopTileIconCache[cacheKey] = image
+        return image
+    }
+
+    private func drawDesktopTileIcon(for app: NSRunningApplication) -> NSImage? {
         // Use the bundle's Finder icon, then flatten its representations once
         // before miniature drawing. Avoid scaling a live application icon surface.
         guard let source = app.bundleURL.map({ NSWorkspace.shared.icon(forFile: $0.path) }) ?? app.icon,
@@ -7831,6 +8159,33 @@ final class OnboardingPrimaryButton: NSButton {
         image.addRepresentation(bitmap)
         image.isTemplate = false
         return image
+    }
+
+    /// One icon per app with a window on a desktop, sorted by name, as
+    /// Desktop Manager's tiles show them.
+    private func desktopApplicationIcons(for pids: [Int32],
+                                         applications: [Int32: NSRunningApplication]? = nil) -> [DesktopApplicationIcon] {
+        var seen = Set<String>()
+        return pids.compactMap { pid -> DesktopApplicationIcon? in
+            guard let app = applications?[pid] ?? NSRunningApplication(processIdentifier: pid),
+                  app.activationPolicy == .regular,
+                  let image = desktopTileIcon(for: app) else { return nil }
+            let identity = app.bundleIdentifier ?? app.bundleURL?.path ?? "pid:\(pid)"
+            guard seen.insert(identity).inserted else { return nil }
+            return DesktopApplicationIcon(name: app.localizedName ?? "App", image: image, bundleIdentifier: app.bundleIdentifier)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// Looks up one desktop's apps off the main thread, for the desktop-change pill.
+    private func fetchDesktopApplicationIcons(for spaceID: UInt64, completion: @escaping @MainActor ([NSImage]) -> Void) {
+        Task { [weak self] in
+            let pids: [Int32] = await Task.detached(priority: .userInitiated) {
+                DockAwayCopyDesktopApplicationPIDs([NSNumber(value: spaceID)])?[NSNumber(value: spaceID)]?
+                    .map(\.int32Value) ?? []
+            }.value
+            guard let self else { return }
+            completion(self.desktopApplicationIcons(for: pids).map(\.image))
+        }
     }
 
     private func desktopApplicationSpaceIDs() -> [UInt64] {
@@ -7864,13 +8219,7 @@ final class OnboardingPrimaryButton: NSButton {
                         }
                     }
                     for (sid, pids) in owners {
-                        var seen = Set<String>()
-                        icons[sid] = pids.compactMap { pid -> DesktopApplicationIcon? in
-                            guard let app = appCache[pid], let image = self.desktopTileIcon(for: app) else { return nil }
-                            let identity = app.bundleIdentifier ?? app.bundleURL?.path ?? "pid:\(pid)"
-                            guard seen.insert(identity).inserted else { return nil }
-                            return DesktopApplicationIcon(name: app.localizedName ?? "App", image: image, bundleIdentifier: app.bundleIdentifier)
-                        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                        icons[sid] = self.desktopApplicationIcons(for: pids, applications: appCache)
                     }
                     if self.desktopTilesView?.hasActiveDesktopGesture != true {
                         self.desktopTilesView?.updateApplicationIcons(icons)
@@ -8391,17 +8740,51 @@ final class OnboardingPrimaryButton: NSButton {
         guard #available(macOS 13.0, *) else { return }
         let service = SMAppService.mainApp
         do {
-            if service.status == .enabled {
+            switch service.status {
+            case .enabled:
                 try service.unregister()
-            } else {
+            case .requiresApproval:
+                // Already registered; only the user can approve it.
+                SMAppService.openSystemSettingsLoginItems()
+            default:
                 try service.register()
+                if service.status == .requiresApproval {
+                    showLaunchAtLoginApprovalAlert()
+                }
             }
         } catch {
             dockAwayDebugLog("⚠️ Launch at login error: \(error)")
+            showLaunchAtLoginError(error)
         }
+        refreshLaunchAtLoginRows()
+    }
+
+    private func refreshLaunchAtLoginRows() {
         let isEnabled = isLaunchAtLoginEnabled()
         launchAtLoginRowView?.setOn(isEnabled)
         permissionSetupLaunchAtLoginRowView?.setOn(isEnabled)
+    }
+
+    @available(macOS 13.0, *)
+    private func showLaunchAtLoginApprovalAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Allow DockAway in Login Items"
+        alert.informativeText = "macOS needs your approval before DockAway can open at login. Turn on DockAway in System Settings > General > Login Items & Extensions."
+        alert.addButton(withTitle: "Open Login Items")
+        alert.addButton(withTitle: "Not Now")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            SMAppService.openSystemSettingsLoginItems()
+        }
+    }
+
+    private func showLaunchAtLoginError(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn't change Launch at Login"
+        alert.informativeText = "\(error.localizedDescription)\n\nYou can also change this in System Settings > General > Login Items & Extensions."
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     // MARK: - About
@@ -8577,9 +8960,9 @@ final class OnboardingPrimaryButton: NSButton {
         iconShineView: AppIconShineView
     ) {
         let visibleFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
-        let windowSize = OnboardingPageLayout.windowSize(for: 1, visibleFrame: visibleFrame)
-        let compactPermissions = OnboardingPageLayout.needsCompactLayout(for: 1, visibleFrame: visibleFrame)
-        let compactKeyboard = OnboardingPageLayout.needsCompactLayout(for: 2, visibleFrame: visibleFrame)
+        let windowSize = OnboardingPageLayout.windowSize(visibleFrame: visibleFrame)
+        let compactPermissions = OnboardingPageLayout.needsCompactLayout(visibleFrame: visibleFrame)
+        let compactKeyboard = compactPermissions
         let panelCornerRadius: CGFloat = 28
         let panel = PermissionSetupPanel(
             contentRect: NSRect(origin: .zero, size: windowSize),
@@ -8596,6 +8979,9 @@ final class OnboardingPrimaryButton: NSButton {
         panel.hidesOnDeactivate = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // Both pages share one width; content must never widen the window.
+        panel.contentMinSize = NSSize(width: OnboardingPageLayout.windowWidth, height: 1)
+        panel.contentMaxSize = NSSize(width: OnboardingPageLayout.windowWidth, height: .greatestFiniteMagnitude)
 
         let contentView = NSView(frame: NSRect(origin: .zero, size: windowSize))
         let backgroundView: NSView
@@ -8880,8 +9266,11 @@ final class OnboardingPrimaryButton: NSButton {
             desktopManagerRow.widthAnchor.constraint(equalTo: contentStack.widthAnchor)
         ])
 
+        let extrasView = OnboardingExtrasView(options: makeOnboardingExtrasOptions(), compact: compactKeyboard)
+        permissionSetupExtrasView = extrasView
         let keyboardSettingsView = OnboardingKeyboardSettingsView(
             compact: compactKeyboard,
+            extras: extrasView,
             onBack: { [weak self] in
                 self?.transitionFromOnboardingStep2ToStep1()
             },
@@ -9155,7 +9544,15 @@ final class OnboardingPrimaryButton: NSButton {
         permissionContinueGeneration += 1
         let generation = permissionContinueGeneration
         permissionContinuePending = true
+        permissionContinueCheckIsSlow = false
         renderPermissionSetupState()
+        // A quick check keeps the descriptions as they are. Only a slow one
+        // says "Checking…", so nothing flashes before the next page.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
+            guard let self, self.isPermissionCompletionCurrent(generation) else { return }
+            self.permissionContinueCheckIsSlow = true
+            self.renderPermissionSetupState()
+        }
         // Check authorization first, then actual access in this running process.
         permissionMonitor.refresh(force: true) { [weak self] snapshot in
             guard let self, self.isPermissionCompletionCurrent(generation) else { return }
@@ -9179,38 +9576,10 @@ final class OnboardingPrimaryButton: NSButton {
         step2.prepareForOnboarding(
             applyDefaults: !UserDefaults.standard.bool(forKey: Self.permissionSetupCompletedKey)
         )
-
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if reduceMotion {
-            step1.isHidden = true
-            resizePermissionSetupWindow(for: 2)
-            step2.isHidden = false
-            step2.alphaValue = 1
-        } else {
-            step1.wantsLayer = true
-            step2.wantsLayer = true
-
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.20
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                step1.animator().alphaValue = 0
-                step1.layer?.transform = CATransform3DMakeTranslation(-20, 0, 0)
-            } completionHandler: { [weak self] in
-                guard let self, self.onboardingCurrentStep == 2 else { return }
-                step1.isHidden = true
-                self.resizePermissionSetupWindow(for: 2)
-
-                step2.isHidden = false
-                step2.alphaValue = 0
-                step2.layer?.transform = CATransform3DMakeTranslation(20, 0, 0)
-
-                NSAnimationContext.runAnimationGroup { ctx2 in
-                    ctx2.duration = 0.24
-                    ctx2.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    step2.animator().alphaValue = 1
-                    step2.layer?.transform = CATransform3DIdentity
-                }
-            }
+        permissionSetupExtrasView?.refresh()
+        slideOnboardingPage(from: step1, to: step2, incomingConstraints: permissionSetupKeyboardPageConstraints,
+                            forward: true) { [weak self] in
+            self?.resizePermissionSetupWindow(for: 2)
         }
     }
 
@@ -9220,39 +9589,32 @@ final class OnboardingPrimaryButton: NSButton {
               let step2 = permissionSetupKeyboardSettingsView else { return }
         onboardingCurrentStep = 1
         permissionSetupContinueButton?.keyEquivalent = "\r"
-
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if reduceMotion {
-            step2.isHidden = true
-            resizePermissionSetupWindow(for: 1)
-            step1.isHidden = false
-            step1.alphaValue = 1
-        } else {
-            step1.wantsLayer = true
-            step2.wantsLayer = true
-
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.20
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                step2.animator().alphaValue = 0
-                step2.layer?.transform = CATransform3DMakeTranslation(20, 0, 0)
-            } completionHandler: { [weak self] in
-                guard let self, self.onboardingCurrentStep == 1 else { return }
-                step2.isHidden = true
-                self.resizePermissionSetupWindow(for: 1)
-
-                step1.isHidden = false
-                step1.alphaValue = 0
-                step1.layer?.transform = CATransform3DMakeTranslation(-20, 0, 0)
-
-                NSAnimationContext.runAnimationGroup { ctx2 in
-                    ctx2.duration = 0.24
-                    ctx2.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    step1.animator().alphaValue = 1
-                    step1.layer?.transform = CATransform3DIdentity
-                }
-            }
+        slideOnboardingPage(from: step2, to: step1, incomingConstraints: permissionSetupFirstPageConstraints,
+                            forward: false) { [weak self] in
+            self?.resizePermissionSetupWindow(for: 1)
         }
+    }
+
+    private func slideOnboardingPage(
+        from outgoing: NSView,
+        to incoming: NSView,
+        incomingConstraints: [NSLayoutConstraint],
+        forward: Bool,
+        completion: @escaping () -> Void
+    ) {
+        onboardingTransitionGeneration &+= 1
+        let generation = onboardingTransitionGeneration
+        // Both pages share the window size, so the incoming page can be laid
+        // out in place before anything moves.
+        NSLayoutConstraint.activate(incomingConstraints)
+        OnboardingPageLayout.slide(
+            from: outgoing,
+            to: incoming,
+            forward: forward,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            isCurrent: { [weak self] in self?.onboardingTransitionGeneration == generation },
+            completion: completion
+        )
     }
 
     private func resizePermissionSetupWindow(for step: Int) {
@@ -9260,7 +9622,7 @@ final class OnboardingPrimaryButton: NSButton {
         NSLayoutConstraint.deactivate(permissionSetupFirstPageConstraints + permissionSetupKeyboardPageConstraints)
         NSLayoutConstraint.activate(step == 1 ? permissionSetupFirstPageConstraints : permissionSetupKeyboardPageConstraints)
         let visibleFrame = (window.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
-        let size = OnboardingPageLayout.windowSize(for: step, visibleFrame: visibleFrame)
+        let size = OnboardingPageLayout.windowSize(visibleFrame: visibleFrame)
         var frame = window.frame
         // Keep the title and close button stationary across page transitions.
         frame.origin.y = frame.maxY - size.height
@@ -9314,6 +9676,7 @@ final class OnboardingPrimaryButton: NSButton {
         permissionContinueGeneration += 1
         let generation = permissionContinueGeneration
         permissionContinuePending = true
+        permissionContinueCheckIsSlow = false
 
         permissionMonitor.refresh(force: true) { [weak self] snapshot in
             guard let self, self.isPermissionCompletionCurrent(generation) else { return }
@@ -9416,6 +9779,7 @@ final class OnboardingPrimaryButton: NSButton {
         permissionSetupSeparateSpacesRowView = nil
         nextSeparateSpacesRefresh = 0
         permissionSetupKeyboardSettingsView = nil
+        permissionSetupExtrasView = nil
         permissionSetupFirstPageView = nil
         permissionSetupFirstPageConstraints.removeAll()
         permissionSetupKeyboardPageConstraints.removeAll()
@@ -10134,7 +10498,7 @@ final class OnboardingPrimaryButton: NSButton {
             inputMonitoringGranted: inputMonitoringAccessGranted,
             inputMonitoringRestartPending: inputMonitoringRestartPending,
             inputMonitoringSettingsOpen: inputMonitoringSettingsVisitInProgress,
-            checkingPermissions: snapshot == nil || permissionContinuePending
+            checkingPermissions: snapshot == nil || (permissionContinuePending && permissionContinueCheckIsSlow)
         )
         permissionSetupContinueButton?.isEnabled = snapshot?.allGranted == true
             && !permissionContinuePending && !permissionRelaunchScheduled
@@ -10301,9 +10665,11 @@ final class OnboardingPrimaryButton: NSButton {
                 let settingsIsFrontmost = frontmost == "com.apple.systempreferences"
                     || frontmost == "com.apple.SystemSettings"
                 // Remain responsive in onboarding and Settings, even if Settings
-                // was opened independently. Quiet background operation polls less.
+                // was opened independently. Each check launches a short-lived
+                // process, so background checks are spaced out; opening the
+                // menu or switching apps still checks right away.
                 self.permissionMonitor.refresh(
-                    minimumInterval: self.permissionSetupInProgress || settingsIsFrontmost ? 0.4 : 3
+                    minimumInterval: self.permissionSetupInProgress || settingsIsFrontmost ? 0.4 : 15
                 )
             }
         }
@@ -10469,6 +10835,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     func applicationWillTerminate(_ notification: Notification) {
         mutedVolumeMenuBarController.stop()
+        fullscreenVideoKeyboardLightController.stop()
         isQuitting = true
         statusItemSpaceRefresh.cancel()
         desktopChangeTooltip.dismiss()
@@ -10573,6 +10940,10 @@ extension AppDelegate: NSMenuDelegate {
             cancelContinuousAdd()
         }
         desktopChangeTooltip.dismiss()
+        if menu === statusItem.menu {
+            // Catches approval or removal in System Settings > Login Items.
+            refreshLaunchAtLoginRows()
+        }
         // Native switches use the system accent while their application is active.
         // Match a native settings panel without replacing or recoloring the control.
         if menu === statusItem.menu,

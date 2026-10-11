@@ -27,6 +27,9 @@ private final class HoverFocusWithoutRaiseBridge {
     private let getProcess: GetProcessFunction?
     private let setFrontProcess: SetFrontProcessFunction?
     private let postEvent: PostEventFunction?
+    /// Bumped by every focus request, so a delayed step from an older request
+    /// never runs after a newer one.
+    private var focusGeneration = 0
 
     private init() {
         let processHandle = dlopen(nil, RTLD_LAZY)
@@ -52,6 +55,7 @@ private final class HoverFocusWithoutRaiseBridge {
     }
 
     func focus(_ window: AXUIElement, processIdentifier: pid_t) -> Bool {
+        focusGeneration &+= 1
         guard let getProcess, let setFrontProcess, let postEvent,
               let windowID = window.windowID else {
             return false
@@ -71,15 +75,45 @@ private final class HoverFocusWithoutRaiseBridge {
                 if focusedWindowID == windowID {
                     return true
                 }
-                postSameApplicationFocusTransition(
-                    from: focusedWindowID,
-                    to: windowID,
+                Self.postWindowFocusChange(
+                    windowID: focusedWindowID,
+                    isActivation: false,
                     process: &process,
                     postEvent: postEvent
                 )
+                // WindowServer needs a moment between deactivating the old
+                // window and activating the new one. Wait off the main thread's
+                // clock so DockAway's event taps keep handling input meanwhile.
+                let generation = focusGeneration
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [self] in
+                    // Skip if a newer request took over, or the user has
+                    // switched to another app in the meantime.
+                    guard generation == focusGeneration,
+                          NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
+                    else { return }
+                    var process = process
+                    Self.postWindowFocusChange(
+                        windowID: windowID,
+                        isActivation: true,
+                        process: &process,
+                        postEvent: postEvent
+                    )
+                    if !makeFront(windowID: windowID, process: &process) {
+                        HoverActivationController.focusWithAccessibility(
+                            window,
+                            processIdentifier: processIdentifier
+                        )
+                    }
+                }
+                return true
             }
         }
 
+        return makeFront(windowID: windowID, process: &process)
+    }
+
+    private func makeFront(windowID: CGWindowID, process: inout ProcessSerialNumberValue) -> Bool {
+        guard let setFrontProcess, let postEvent else { return false }
         // kCPSUserGenerated selects the target for keyboard input without
         // applying a WindowServer ordering operation. The synthesized key
         // events complete AppKit's active/key-window state transition.
@@ -94,23 +128,18 @@ private final class HoverFocusWithoutRaiseBridge {
         return true
     }
 
-    private func postSameApplicationFocusTransition(
-        from previousWindowID: CGWindowID,
-        to windowID: CGWindowID,
+    private static func postWindowFocusChange(
+        windowID: CGWindowID,
+        isActivation: Bool,
         process: inout ProcessSerialNumberValue,
         postEvent: PostEventFunction
     ) {
         var event = [UInt8](repeating: 0, count: 0xf8)
         event[0x04] = 0xf8
         event[0x08] = 0x0d
-        event[0x8a] = 0x02
-        Self.write(previousWindowID, into: &event, at: 0x3c)
-        Self.post(event: &event, process: &process, using: postEvent)
-
-        usleep(40_000)
-        event[0x8a] = 0x01
-        Self.write(windowID, into: &event, at: 0x3c)
-        Self.post(event: &event, process: &process, using: postEvent)
+        event[0x8a] = isActivation ? 0x01 : 0x02
+        write(windowID, into: &event, at: 0x3c)
+        post(event: &event, process: &process, using: postEvent)
     }
 
     private func postMakeKeyEvents(
@@ -204,6 +233,16 @@ struct HoverActivationDecision {
             || subrole == kAXSystemDialogSubrole as String
     }
 
+    /// Whether the app's topmost window shows the hovered window is already
+    /// focused. Only an overlay, such as Chromium's address-bar suggestions,
+    /// sitting over the hovered window counts; another document window of the
+    /// same app in front means the hovered one is still in the background.
+    static func topWindowShowsCandidateFocused(topWindowIsCandidate: Bool,
+                                               topWindowIsDocument: Bool,
+                                               topWindowOverlapsCandidate: Bool) -> Bool {
+        topWindowIsCandidate || (!topWindowIsDocument && topWindowOverlapsCandidate)
+    }
+
     static func isMenuOrMenuBarRole(_ role: String?) -> Bool {
         guard let role else { return false }
         return role == kAXMenuRole as String
@@ -284,6 +323,45 @@ struct HoverActivationDecision {
               !menuIsOpen else { return false }
         return now - candidateStartedAt >= max(0, delay)
     }
+
+    struct StackedWindow {
+        let id: CGWindowID
+        let ownerPID: pid_t
+        let layer: Int
+        let alpha: Double
+        let frame: CGRect
+    }
+
+    /// Apps outside Electron that also bring their own window forward when
+    /// focused, from AutoRaise's list: JetBrains IDEs (including Android
+    /// Studio, which shares their window code), Arc, and Dia.
+    static func raisesItselfWhenFocused(bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier = bundleIdentifier?.lowercased() else { return false }
+        return (bundleIdentifier.hasPrefix("com.jetbrains.") && bundleIdentifier != "com.jetbrains.toolbox")
+            || bundleIdentifier.hasPrefix("com.google.android.studio")
+            || bundleIdentifier.hasPrefix("company.thebrowser.")
+    }
+
+    /// Electron apps bring their own window forward whenever they're focused,
+    /// even when DockAway focuses without raising.
+    static func isElectronApp(bundleURL: URL) -> Bool {
+        FileManager.default.fileExists(
+            atPath: bundleURL.appendingPathComponent("Contents/Frameworks/Electron Framework.framework").path
+        )
+    }
+
+    /// Whether another app's ordinary window sits in front of the window and
+    /// overlaps it, so a window that raises itself would cover that window.
+    /// `windows` is in WindowServer's front-to-back order.
+    static func isCoveredByAnotherApp(windowID: CGWindowID, ownerPID: pid_t, windows: [StackedWindow]) -> Bool {
+        guard let index = windows.firstIndex(where: { $0.id == windowID }) else { return false }
+        let frame = windows[index].frame
+        return windows[..<index].contains { window in
+            let overlap = window.frame.intersection(frame)
+            return window.layer == 0 && window.alpha > 0 && window.ownerPID != ownerPID
+                && !overlap.isNull && overlap.width > 0 && overlap.height > 0
+        }
+    }
 }
 
 @MainActor
@@ -311,6 +389,7 @@ final class HoverActivationController {
     private var candidate: Candidate?
     private var candidateStartedAt: TimeInterval = 0
     private var lastActivatedToken: CandidateToken?
+    private static var electronAppsByBundlePath: [String: Bool] = [:]
     private var previousPointer: CGPoint?
     private var spaceTransitionSuppressUntil: TimeInterval = 0
     private var spaceTransitionPointer: CGPoint?
@@ -613,6 +692,19 @@ final class HoverActivationController {
             return
         }
 
+        // Without Bring Window to Front, leave apps that raise themselves when
+        // focused alone while another app's window overlaps them.
+        if !Self.raisesWindow, Self.raisesItselfWhenFocused(hovered.application),
+           let windowID = hovered.window.windowID,
+           HoverActivationDecision.isCoveredByAnotherApp(
+               windowID: windowID,
+               ownerPID: hovered.application.processIdentifier,
+               windows: Self.stackedWindows(in: snapshot())
+           ) {
+            becomeIdle()
+            return
+        }
+
         activate(hovered)
         lastActivatedToken = hovered.token
         // Require a fresh dwell period if activation failed or another utility
@@ -697,13 +789,18 @@ final class HoverActivationController {
 
         // Preserve the user's stacking order if a future macOS release no
         // longer exposes the focus-only WindowServer symbols.
-        let applicationElement = AXUIElementCreateApplication(
-            candidate.application.processIdentifier
+        Self.focusWithAccessibility(
+            candidate.window,
+            processIdentifier: candidate.application.processIdentifier
         )
+    }
+
+    fileprivate static func focusWithAccessibility(_ window: AXUIElement, processIdentifier: pid_t) {
+        let applicationElement = AXUIElementCreateApplication(processIdentifier)
         _ = AXUIElementSetAttributeValue(
             applicationElement,
             kAXFocusedWindowAttribute as CFString,
-            candidate.window
+            window
         )
     }
 
@@ -880,6 +977,33 @@ final class HoverActivationController {
         return nil
     }
 
+    private static func raisesItselfWhenFocused(_ application: NSRunningApplication) -> Bool {
+        if HoverActivationDecision.raisesItselfWhenFocused(bundleIdentifier: application.bundleIdentifier) {
+            return true
+        }
+        guard let bundleURL = application.bundleURL else { return false }
+        if let cached = electronAppsByBundlePath[bundleURL.path] { return cached }
+        let isElectron = HoverActivationDecision.isElectronApp(bundleURL: bundleURL)
+        electronAppsByBundlePath[bundleURL.path] = isElectron
+        return isElectron
+    }
+
+    private static func stackedWindows(in windowInfo: [[String: Any]]?) -> [HoverActivationDecision.StackedWindow] {
+        (windowInfo ?? []).compactMap { info in
+            guard let number = info[kCGWindowNumber as String] as? NSNumber,
+                  let owner = info[kCGWindowOwnerPID as String] as? NSNumber,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds) else { return nil }
+            return HoverActivationDecision.StackedWindow(
+                id: CGWindowID(number.uint32Value),
+                ownerPID: owner.int32Value,
+                layer: (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0,
+                alpha: (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1,
+                frame: frame
+            )
+        }
+    }
+
     private static func isFocused(_ candidate: Candidate) -> Bool {
         if candidate.application.processIdentifier == getpid() {
             guard let windowID = candidate.window.windowID,
@@ -965,23 +1089,31 @@ final class HoverActivationController {
             }
 
             // An auxiliary dropdown or autocomplete overlay (such as Chromium's
-            // Omnibox popup) sits atop the active window. If the topmost layer-0
-            // window for this process overlaps candidate.window, the candidate is
-            // already the focused host window.
+            // Omnibox popup) can sit atop the active window. Overlapping another
+            // of the app's document windows proves nothing.
+            var overlaps = false
             if let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
                let overlayBounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
                let candPos = candidate.window.point(kAXPositionAttribute),
                let candSize = candidate.window.size(kAXSizeAttribute) {
-                let candRect = CGRect(origin: candPos, size: candSize)
-                if candRect.intersects(overlayBounds) {
-                    return true
-                }
+                overlaps = CGRect(origin: candPos, size: candSize).intersects(overlayBounds)
             }
-
-            // The topmost window for this process is a separate document window.
-            return false
+            return HoverActivationDecision.topWindowShowsCandidateFocused(
+                topWindowIsCandidate: false,
+                topWindowIsDocument: overlaps && isDocumentWindow(windowID: winID, processIdentifier: pid),
+                topWindowOverlapsCandidate: overlaps
+            )
         }
         return false
+    }
+
+    private static func isDocumentWindow(windowID: CGWindowID, processIdentifier: pid_t) -> Bool {
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.12)
+        guard let windows = application.elements(kAXWindowsAttribute) else { return false }
+        return windows.contains {
+            $0.windowID == windowID && $0.string(kAXSubroleAttribute) == kAXStandardWindowSubrole as String
+        }
     }
 
     private static func isRelated(_ first: AXUIElement, to second: AXUIElement) -> Bool {

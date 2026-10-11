@@ -15,6 +15,8 @@ if CommandLine.arguments.contains("--dockaway-permission-probe") {
     exit(access == kIOHIDAccessTypeGranted ? EXIT_SUCCESS : EXIT_FAILURE)
 } else {
     MainActor.assumeIsolated {
+        // Before the app delegate, whose views read these as they're created.
+        MenuBarIndicatorDefaults.prepare()
         let delegate = AppDelegate()
         NSApplication.shared.delegate = delegate
         _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)

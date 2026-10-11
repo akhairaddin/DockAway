@@ -1337,6 +1337,7 @@ final class DesktopDisplaySectionsView: NSView {
     var onAppend: ((UInt64, UInt64) -> Void)?
     private var rows: [(id: CGDirectDisplayID, label: NSTextField, dot: ActiveDisplayDot, tiles: DesktopTilesView)] = []
     private var visibilityAnimation: EasedAnimation?
+    private var menuResizeAnimation: EasedAnimation?
     private(set) var isAnimatingVisibility = false
     private(set) var isCollapsed: Bool = false
 
@@ -1446,6 +1447,14 @@ final class DesktopDisplaySectionsView: NSView {
         }
         arrangeSections()
         if widthChanged, let menu = enclosingMenuItem?.menu {
+            menuResizeAnimation?.invalidate()
+            menuResizeAnimation = nil
+            if targetWidth > previousWidth {
+                // AppKit widens the window to its final size as soon as the menu
+                // updates, and it's set back to the start width below. Keep that
+                // jump off screen so growing slides as smoothly as shrinking.
+                window?.disableScreenUpdatesUntilFlush()
+            }
             // Flexible rows retain their expanded frame after AppKit lays them out.
             // Reset every custom row so none imposes the old width on contraction.
             for item in menu.items where item.view !== self {
@@ -1456,7 +1465,12 @@ final class DesktopDisplaySectionsView: NSView {
             if let window, let previousWindowFrame {
                 var targetFrame = window.frame
                 targetFrame.size.width = previousWindowFrame.width + targetWidth - previousWidth
-                targetFrame.origin.x = previousWindowFrame.maxX - targetFrame.width
+                // Keep the left edge under the menu bar item and grow to the
+                // right, shifting left only as far as the screen edge requires.
+                targetFrame.origin.x = previousWindowFrame.minX
+                if let screen = window.screen ?? NSScreen.main {
+                    targetFrame.origin.x = max(screen.frame.minX, min(targetFrame.origin.x, screen.frame.maxX - targetFrame.width))
+                }
                 // The menu's scroll view does not normally resize with its
                 // tracking window. Keep the native table and its single column
                 // attached to the available width, including custom row hosts.
@@ -1480,10 +1494,24 @@ final class DesktopDisplaySectionsView: NSView {
                     startFrame.origin.x = previousWindowFrame.minX
                     startFrame.size.width = previousWindowFrame.width
                     window.setFrame(startFrame, display: false)
-                    NSAnimationContext.runAnimationGroup { context in
-                        context.duration = 0.22
-                        context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                        window.animator().setFrame(targetFrame, display: true)
+                    // Step the window and the rows together in both directions.
+                    // When growing, AppKit would otherwise lay the rows out at the
+                    // final width before the window catches up, revealing their
+                    // contents instead of carrying them along.
+                    let rows = menu.items.compactMap(\.view).filter { $0 !== self }
+                    func apply(_ progress: CGFloat) {
+                        var frame = targetFrame
+                        frame.origin.x = startFrame.minX + (targetFrame.minX - startFrame.minX) * progress
+                        frame.size.width = startFrame.width + (targetFrame.width - startFrame.width) * progress
+                        for row in rows {
+                            row.setFrameSize(NSSize(width: frame.width, height: row.frame.height))
+                        }
+                        window.setFrame(frame, display: true)
+                    }
+                    apply(0)
+                    menuResizeAnimation = EasedAnimation(view: self, duration: 0.22, curve: easeInEaseOut) { [weak self] progress, finished in
+                        apply(progress)
+                        if finished { self?.menuResizeAnimation = nil }
                     }
                 } else {
                     window.setFrame(targetFrame, display: true)

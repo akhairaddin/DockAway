@@ -19,14 +19,21 @@ final class DesktopMenuKeyboardCapture {
     private(set) var heldCloseKey: UInt16?
     private(set) var heldSelectKey: UInt16?
 
+    /// Whether the keyboard reports a key as physically down. A held key
+    /// counts only while this agrees, so a release macOS never delivered can't
+    /// keep repeated desktop creation or removal going.
+    var physicalKeyIsDown: (CGKeyCode) -> Bool = {
+        CGEventSource.keyState(.combinedSessionState, key: $0)
+    }
+
     var isCloseKeyHeld: Bool {
         guard let key = heldCloseKey else { return false }
-        return pressedKeys.contains(Int64(key))
+        return pressedKeys.contains(Int64(key)) && physicalKeyIsDown(CGKeyCode(key))
     }
 
     var isSelectKeyHeld: Bool {
         guard let key = heldSelectKey else { return false }
-        return pressedKeys.contains(Int64(key))
+        return pressedKeys.contains(Int64(key)) && physicalKeyIsDown(CGKeyCode(key))
     }
 
     func setSubmenu(_ menu: NSMenu, isOpen: Bool) {
@@ -34,8 +41,13 @@ final class DesktopMenuKeyboardCapture {
         if isOpen { openSubmenus.insert(ObjectIdentifier(menu)) }
         else { openSubmenus.remove(ObjectIdentifier(menu)) }
         guard isSuspended != wasSuspended else { return }
-        // Invalidate already queued key actions as well as future events. Never
-        // resume a held create/delete gesture after a submenu has had focus.
+        // Never resume a held create/delete gesture after a submenu has had focus.
+        releaseHeldKeys()
+    }
+
+    /// Invalidates queued key actions and ends any held create/delete gesture,
+    /// so the next action needs a fresh key press.
+    private func releaseHeldKeys() {
         generation += 1
         if let key = heldCloseKey { onCloseKeyUp?(key) }
         if let key = heldSelectKey { onSelectKeyUp?(key) }
@@ -50,7 +62,8 @@ final class DesktopMenuKeyboardCapture {
         onCloseKeyUp: ((UInt16) -> Void)? = nil,
         onSelectKeyUp: ((UInt16) -> Void)? = nil,
         onRepeatCloseKey: ((UInt16) -> Void)? = nil,
-        onRepeatSelectKey: ((UInt16) -> Void)? = nil
+        onRepeatSelectKey: ((UInt16) -> Void)? = nil,
+        installsTap: Bool = true
     ) -> Bool {
         stop()
         self.action = action
@@ -59,6 +72,8 @@ final class DesktopMenuKeyboardCapture {
         self.onSelectKeyUp = onSelectKeyUp
         self.onRepeatCloseKey = onRepeatCloseKey
         self.onRepeatSelectKey = onRepeatSelectKey
+        // Tests drive handle(_:_:) directly instead of installing a real tap.
+        guard installsTap else { return true }
         guard let tap = EventTap(
             events: [.keyDown, .keyUp, .flagsChanged],
             includeEventTracking: true,
@@ -88,8 +103,11 @@ final class DesktopMenuKeyboardCapture {
         tap = nil
     }
 
-    private func handle(_ type: CGEventType, _ event: CGEvent) -> Bool {
+    func handle(_ type: CGEventType, _ event: CGEvent) -> Bool {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // Key releases sent while the tap was off were never seen, so end
+            // any held gesture rather than trust its cached state.
+            releaseHeldKeys()
             return false
         }
         guard !isSuspended, !DockSettingKeyRebindRowView.isRecording else { return false }

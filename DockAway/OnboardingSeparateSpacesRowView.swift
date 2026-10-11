@@ -21,7 +21,7 @@ final class OnboardingSeparateSpacesRowView: NSView {
             "'Displays have separate Spaces' is a native macOS setting, not a DockAway one. "
                 + "It's found in the bottom of 'Desktop and Dock' and both toggles are linked. macOS applies a change to it only after you log out and back in.\n\n"
                 + "Until then, your displays keep their current Spaces. When you're ready, "
-                + "save your work and select the  Apple menu > Log Out then log back in."
+                + "save your work and select the Apple menu > Log Out then log back in."
         }
     )
     private let toggleAction: (Bool) -> Void

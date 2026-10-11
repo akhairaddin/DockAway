@@ -420,28 +420,31 @@ final class GreenButtonFillController {
         guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hitElement) == .success,
               let hitElement else { return nil }
 
-        let hitRole = hitElement.string(kAXRoleAttribute)
+        // This runs inside the click's event tap, so the whole walk shares one
+        // deadline. A slow app gets its click passed through to macOS.
+        let budget = AccessibilityRequestBudget(seconds: 0.08, messageLimit: 0.03)
+        let hitRole = budget.string(kAXRoleAttribute, of: hitElement)
         guard hitRole == kAXButtonRole || hitRole == kAXImageRole else { return nil }
         var candidate: AXUIElement? = hitElement
         var fullScreenButtonFound = false
         var window: AXUIElement?
         for _ in 0..<6 {
-            guard let current = candidate else { break }
-            let role = CFEqual(current, hitElement) ? hitRole : current.string(kAXRoleAttribute)
-            if current.string(kAXSubroleAttribute) == "AXFullScreenButton" {
+            guard let current = candidate, !budget.expired else { break }
+            let role = CFEqual(current, hitElement) ? hitRole : budget.string(kAXRoleAttribute, of: current)
+            if budget.string(kAXSubroleAttribute, of: current) == "AXFullScreenButton" {
                 fullScreenButtonFound = true
             }
             if role == kAXWindowRole {
                 window = current
-                if let button = current.element(kAXFullScreenButtonAttribute),
+                if let button = budget.element(kAXFullScreenButtonAttribute, of: current),
                    (CFEqual(button, hitElement) || fullScreenButtonFound) {
                     fullScreenButtonFound = true
                 }
                 break
             }
-            candidate = current.element(kAXParentAttribute)
+            candidate = budget.element(kAXParentAttribute, of: current)
         }
-        guard fullScreenButtonFound, let window else { return nil }
+        guard fullScreenButtonFound, !budget.expired, let window else { return nil }
         var processIdentifier: pid_t = 0
         let pidError = AXUIElementGetPid(window, &processIdentifier)
         guard pidError == .success, processIdentifier > 0 else {

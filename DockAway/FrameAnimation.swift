@@ -7,6 +7,24 @@ nonisolated func easeInOutCubic(_ progress: Double) -> Double {
     return t < 0.5 ? 4 * t * t * t : 1 - pow(-2 * t + 2, 3) / 2
 }
 
+/// Core Animation's standard ease-in-ease-out curve (control points 0.42, 0,
+/// 0.58, 1), for main-thread animations that must match one Core Animation
+/// or `NSAnimationContext` runs with that timing.
+nonisolated func easeInEaseOut(_ progress: Double) -> Double {
+    let t = min(1, max(0, progress))
+    // Solve x(s) = t on the Bézier curve, then return y(s).
+    func bezier(_ s: Double, _ p1: Double, _ p2: Double) -> Double {
+        let inverse = 1 - s
+        return 3 * inverse * inverse * s * p1 + 3 * inverse * s * s * p2 + s * s * s
+    }
+    var low = 0.0, high = 1.0, s = t
+    for _ in 0..<24 {
+        s = (low + high) / 2
+        if bezier(s, 0.42, 0.58) < t { low = s } else { high = s }
+    }
+    return bezier(s, 0, 1)
+}
+
 extension CAFrameRateRange {
     /// The full refresh rate of the display showing `view` (120 Hz on
     /// ProMotion), so animations are not held to 60 Hz.
@@ -26,13 +44,16 @@ extension CAFrameRateRange {
 final class EasedAnimation: NSObject {
     private let startTime = CACurrentMediaTime()
     private let duration: TimeInterval
+    private let curve: (Double) -> Double
     private let step: (_ progress: CGFloat, _ finished: Bool) -> Void
     private var displayLink: CADisplayLink?
     private var fallbackTimer: Timer?
     private var deadlineTimer: Timer?
 
-    init(view: NSView, duration: TimeInterval, step: @escaping (_ progress: CGFloat, _ finished: Bool) -> Void) {
+    init(view: NSView, duration: TimeInterval, curve: @escaping (Double) -> Double = easeInOutCubic,
+         step: @escaping (_ progress: CGFloat, _ finished: Bool) -> Void) {
         self.duration = duration
+        self.curve = curve
         self.step = step
         super.init()
         guard view.window?.isVisible == true else {
@@ -86,7 +107,7 @@ final class EasedAnimation: NSObject {
             let rawProgress = min(max((time - startTime) / duration, 0), 1)
             let finished = rawProgress >= 1
             if finished { invalidate() }
-            step(CGFloat(easeInOutCubic(rawProgress)), finished)
+            step(CGFloat(curve(rawProgress)), finished)
         }
     }
 }

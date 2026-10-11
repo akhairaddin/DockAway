@@ -33,21 +33,16 @@ struct FinderDeleteKeyDecision {
         focusedWindowRole: String?,
         focusedWindowSubrole: String?
     ) -> Bool {
-        guard frontmostBundleIdentifier == "com.apple.finder",
-              keyCode == deleteKeyCode,
-              !isRepeat else { return false }
+        guard isCandidate(
+            frontmostBundleIdentifier: frontmostBundleIdentifier,
+            keyCode: keyCode,
+            flags: flags,
+            isRepeat: isRepeat
+        ) else { return false }
+        // Moving files to the Trash needs a positively identified focus.
+        guard let focusedRole else { return false }
 
-        let shortcutModifiers: CGEventFlags = [
-            .maskCommand,
-            .maskControl,
-            .maskAlternate,
-            .maskShift,
-            .maskSecondaryFn
-        ]
-        guard flags.intersection(shortcutModifiers).isEmpty else { return false }
-
-        if let focusedRole,
-           editingRoles.contains(focusedRole) || modalRoles.contains(focusedRole) {
+        if editingRoles.contains(focusedRole) || modalRoles.contains(focusedRole) {
             return false
         }
         if let focusedSubrole, editingSubroles.contains(focusedSubrole) {
@@ -61,6 +56,28 @@ struct FinderDeleteKeyDecision {
             return false
         }
         return true
+    }
+
+    /// The checks that need no Accessibility messages. Every other app's
+    /// Delete key is rejected here without querying anything.
+    static func isCandidate(
+        frontmostBundleIdentifier: String?,
+        keyCode: CGKeyCode,
+        flags: CGEventFlags,
+        isRepeat: Bool
+    ) -> Bool {
+        guard frontmostBundleIdentifier == "com.apple.finder",
+              keyCode == deleteKeyCode,
+              !isRepeat else { return false }
+
+        let shortcutModifiers: CGEventFlags = [
+            .maskCommand,
+            .maskControl,
+            .maskAlternate,
+            .maskShift,
+            .maskSecondaryFn
+        ]
+        return flags.intersection(shortcutModifiers).isEmpty
     }
 }
 
@@ -123,18 +140,28 @@ final class FinderDeleteKeyController {
         guard isSuppressed?() != true else { return false }
 
         let frontmostApplication = NSWorkspace.shared.frontmostApplication
-        let context = frontmostApplication.map {
-            Self.focusContext(processIdentifier: $0.processIdentifier)
-        }
+        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        // Ask Finder about focus only when everything else already matches, so
+        // Backspace in other apps never waits on an Accessibility reply.
+        // Without an answer in time, leave the key alone: it may be a rename field.
+        guard let finder = frontmostApplication,
+              FinderDeleteKeyDecision.isCandidate(
+                frontmostBundleIdentifier: finder.bundleIdentifier,
+                keyCode: keyCode,
+                flags: event.flags,
+                isRepeat: isRepeat
+              ),
+              let context = Self.focusContext(processIdentifier: finder.processIdentifier)
+        else { return false }
         let shouldRemap = FinderDeleteKeyDecision.shouldRemap(
-            frontmostBundleIdentifier: frontmostApplication?.bundleIdentifier,
+            frontmostBundleIdentifier: finder.bundleIdentifier,
             keyCode: keyCode,
             flags: event.flags,
-            isRepeat: event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
-            focusedRole: context?.role,
-            focusedSubrole: context?.subrole,
-            focusedWindowRole: context?.windowRole,
-            focusedWindowSubrole: context?.windowSubrole
+            isRepeat: isRepeat,
+            focusedRole: context.role,
+            focusedSubrole: context.subrole,
+            focusedWindowRole: context.windowRole,
+            focusedWindowSubrole: context.windowSubrole
         )
         guard shouldRemap else { return false }
 
@@ -166,16 +193,31 @@ final class FinderDeleteKeyController {
         up.post(tap: .cghidEventTap)
     }
 
-    private static func focusContext(processIdentifier: pid_t) -> FocusContext {
+    /// nil unless Finder answered every read within the budget. The budget
+    /// covers all six messages, so a busy Finder can't hold up keyboard input
+    /// for long, and a failed read is never mistaken for an absent value.
+    private static func focusContext(processIdentifier: pid_t) -> FocusContext? {
+        let budget = AccessibilityRequestBudget(seconds: 0.08, messageLimit: 0.08)
         let application = AXUIElementCreateApplication(processIdentifier)
-        AXUIElementSetMessagingTimeout(application, 0.08)
-        let focusedElement = application.element(kAXFocusedUIElementAttribute)
-        let focusedWindow = application.element(kAXFocusedWindowAttribute)
-        return FocusContext(
-            role: focusedElement?.string(kAXRoleAttribute),
-            subrole: focusedElement?.string(kAXSubroleAttribute),
-            windowRole: focusedWindow?.string(kAXRoleAttribute),
-            windowSubrole: focusedWindow?.string(kAXSubroleAttribute)
+        var unreadable = false
+        func read(_ name: String, of element: AXUIElement?) -> CFTypeRef? {
+            guard let element, !unreadable else { return nil }
+            let result = budget.attribute(name, of: element)
+            if result.failed { unreadable = true }
+            return result.value
+        }
+        func element(_ name: String, of parent: AXUIElement?) -> AXUIElement? {
+            guard let value = read(name, of: parent), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            return (value as! AXUIElement)
+        }
+        let focusedElement = element(kAXFocusedUIElementAttribute, of: application)
+        let focusedWindow = element(kAXFocusedWindowAttribute, of: application)
+        let context = FocusContext(
+            role: read(kAXRoleAttribute, of: focusedElement) as? String,
+            subrole: read(kAXSubroleAttribute, of: focusedElement) as? String,
+            windowRole: read(kAXRoleAttribute, of: focusedWindow) as? String,
+            windowSubrole: read(kAXSubroleAttribute, of: focusedWindow) as? String
         )
+        return unreadable || budget.expired ? nil : context
     }
 }
