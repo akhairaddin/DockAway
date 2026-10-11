@@ -83,8 +83,8 @@ final class FullscreenVideoKeyboardLightController {
     private var timer: Timer?
     private var isRunning = false
 
-    init(backlight: KeyboardBacklight = .shared, fullscreenSpacePIDs: @escaping () -> Set<pid_t>) {
-        self.backlight = backlight
+    init(backlight: KeyboardBacklight? = nil, fullscreenSpacePIDs: @escaping () -> Set<pid_t>) {
+        self.backlight = backlight ?? .shared
         self.fullscreenSpacePIDs = fullscreenSpacePIDs
     }
 
