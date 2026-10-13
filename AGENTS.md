@@ -27,7 +27,7 @@ Use exactly these three categories in this order:
 - **Strict terminology**: Do not describe something as “fixed,” “corrected,” “more reliable,” or “improved” unless the problematic behavior existed in a previously released version.
 - **Internal performance work**: May be listed under *Improvements* only when it meaningfully improves a feature that was already publicly available.
 - **Baseline check**: Compare against the latest public release before classifying an entry.
-- **Empty categories**: If a category has no qualifying entries, write a short `"No entries recorded for this release."` message.
+- **Empty categories**: If a category has no qualifying entries, write `None`.
 - **Historical integrity**: Preserve existing release descriptions, images, and links when reorganizing historical notes.
 - **Consistency**: Apply the exact same policy to both `changelog.html` and GitHub Releases.
 - **Unreleased versions**: When adding a new version section to `changelog.html`, write `(Unreleased)` in place of the date. Replace it with the release date (`M-D-YY`) only when the user explicitly asks to release that version.
