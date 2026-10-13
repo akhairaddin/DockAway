@@ -3776,6 +3776,13 @@ final class OnboardingPrimaryButton: NSButton {
     private func menuBarAppearanceDidChange() {
         guard let button = statusItem?.button,
               Self.isDark(button.effectiveAppearance) != renderedMenuBarIsDark else { return }
+        // While its menu is open, the highlighted button may not report the
+        // menu bar's appearance, and redrawing the status item can close the
+        // menu. Check again once it closes.
+        guard !statusMenuIsOpen, !button.isHighlighted else {
+            dockAwayDebugLog("Menu bar appearance changed while the menu was open; redraw deferred")
+            return
+        }
         updateMenuBarDesktopBadge(refreshMenu: false)
     }
 
@@ -3791,6 +3798,7 @@ final class OnboardingPrimaryButton: NSButton {
         // when an unrelated display-list update is waiting for tracking to end.
         if statusMenuIsOpen && pendingDisplayLayoutRefresh && !liveCustomization { return }
         guard let button = statusItem?.button else { return }
+
         // The indicator's colors are chosen as it's built, so build it in the
         // menu bar's own appearance rather than DockAway's.
         let menuBarAppearance = button.effectiveAppearance
@@ -5172,12 +5180,14 @@ final class OnboardingPrimaryButton: NSButton {
             width: tooltipSubmenuWidth,
             helpHeading: "Display Duration",
             helpTextProvider: {
-                "Controls how long the desktop change pill stays on screen after switching desktops.\n\n• The tooltip appears centered below the menu bar on the active display.\n• Slide left for a shorter duration or right for a longer duration.\n• Default duration in DockAway is 4.0 seconds.\n• Changes apply immediately."
+                "Controls how long the desktop change pill stays on screen after switching desktops.\n\n• The tooltip appears centered below the menu bar on the active display.\n• Slide left for a shorter duration or right for a longer duration.\n• Snaps to 2, 4, 6, 8, and 10 seconds.\n• Default duration in DockAway is 4.0 seconds.\n• Changes apply immediately."
             }
         )
         tooltipDurationView.slider.minValue = DesktopChangeTooltip.minDuration
         tooltipDurationView.slider.maxValue = DesktopChangeTooltip.maxDuration
-        tooltipDurationView.slider.snapMarkerValues = [DesktopChangeTooltip.defaultDuration]
+        // Every 2 seconds, including the 4-second default. 10 seconds is the
+        // slider's end, which already stops and taps there.
+        tooltipDurationView.slider.snapMarkerValues = [2, 4, 6, 8]
         tooltipDurationView.slider.target = self
         tooltipDurationView.slider.action = #selector(previewDesktopChangeTooltipDuration(_:))
         tooltipDurationView.slider.commitHandler = { [weak self] val in
@@ -5626,7 +5636,6 @@ final class OnboardingPrimaryButton: NSButton {
         unlockSoundItem.view = unlockSoundRow
         self.unlockSoundRowView = unlockSoundRow
         extrasMenu.addItem(unlockSoundItem)
-        extrasMenu.addItem(mutedSoundItem)
 
         if fullscreenVideoKeyboardLightController.isAvailable {
             let keyboardLightTitle = "Keyboard Lighting Off Only for FS Video"
@@ -5811,6 +5820,7 @@ final class OnboardingPrimaryButton: NSButton {
         quickLookOrientationItem.view = quickLookOrientationRow
         self.quickLookCopyOrientationRowView = quickLookOrientationRow
         extrasMenu.addItem(quickLookOrientationItem)
+        extrasMenu.addItem(mutedSoundItem)
 
         extrasItem.submenu = extrasMenu
         dockAwaySettingsMenu.addItem(extrasItem)
@@ -6202,12 +6212,6 @@ final class OnboardingPrimaryButton: NSButton {
                 control: .toggle(isOn: { defaults.bool(forKey: LockscreenSoundPlayer.Event.unlock.preferenceKey) },
                                  setOn: { [weak self] in self?.setLockscreenSoundEnabled(.unlock, $0) }),
                 preview: { [weak self] in self?.lockscreenSoundPlayer.play(.unlock) }
-            ),
-            OnboardingExtrasOption(
-                title: "Show Sound Icon When Muted",
-                detail: "Shows the Sound icon in the menu bar while muted",
-                control: .toggle(isOn: { defaults.bool(forKey: MutedVolumeMenuBarController.preferenceKey) },
-                                 setOn: { [weak self] in self?.setMutedSoundIconEnabled($0) })
             )
         ]
         if fullscreenVideoKeyboardLightController.isAvailable {
@@ -6262,6 +6266,12 @@ final class OnboardingPrimaryButton: NSButton {
                 detail: "Keeps images copied from Quick Look upright when pasted",
                 control: .toggle(isOn: { defaults.bool(forKey: QuickLookCopyOrientationManager.preferenceKey) },
                                  setOn: { [weak self] in self?.setQuickLookCopyOrientationEnabled($0) })
+            ),
+            OnboardingExtrasOption(
+                title: "Show Sound Icon When Muted",
+                detail: "Shows the Sound icon in the menu bar while muted",
+                control: .toggle(isOn: { defaults.bool(forKey: MutedVolumeMenuBarController.preferenceKey) },
+                                 setOn: { [weak self] in self?.setMutedSoundIconEnabled($0) })
             )
         ]
         return options
@@ -10946,11 +10956,15 @@ extension AppDelegate: NSMenuDelegate {
         }
         // Native switches use the system accent while their application is active.
         // Match a native settings panel without replacing or recoloring the control.
+        // Before macOS 26, activating while the menu opens closes it again, so
+        // the switches keep their inactive look there.
         if menu === statusItem.menu,
            NSWorkspace.shared.frontmostApplication?.processIdentifier != getpid() {
             settingsMenuPreviousApplication = NSWorkspace.shared.frontmostApplication
-            RunLoop.main.perform(inModes: [.common, .eventTracking]) {
-                NSApp.activate(ignoringOtherApps: true)
+            if #available(macOS 26.0, *) {
+                RunLoop.main.perform(inModes: [.common, .eventTracking]) {
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
         }
         if menu === blacklistMenu {
@@ -11062,6 +11076,7 @@ extension AppDelegate: NSMenuDelegate {
             desktopTilesMenuItem?.isHidden = !isDesktopManagerEnabled
             statusMenuIsOpen = false
             statusItemSpaceRefresh.menuDidClose()
+            DispatchQueue.main.async { [weak self] in self?.menuBarAppearanceDidChange() }
             let previousApplication = settingsMenuPreviousApplication
             settingsMenuPreviousApplication = nil
             DispatchQueue.main.async { [weak self] in
