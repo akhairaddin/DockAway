@@ -1973,7 +1973,10 @@ final class DockWatcher {
         let isFinderOnDesktop = app.bundleIdentifier == "com.apple.finder"
             && !finderHasNormalWindow(on: activeDisplay)
         let label = isFinderOnDesktop ? "Desktop" : (app.localizedName ?? bundleID)
-        let appText = windowState == .empty ? "Desktop" : label
+        // DockAway comes to the front while its own menu or windows are open,
+        // so the menu keeps naming the app that was in use.
+        let appText: String? = windowState == .empty ? "Desktop"
+            : app.processIdentifier == getpid() ? nil : label
 
         if suppressUnsafeDisplayShow,
            let handoffExpectedState,
@@ -3254,7 +3257,12 @@ final class DockWatcher {
         else { return false }
 
         keyDown.flags = shortcut.modifiers
-        keyUp.flags = shortcut.modifiers
+        // End the chord with the modifiers actually held. A key-up still
+        // carrying the shortcut's own leaves macOS treating them as held for
+        // the rest of the session, so later clicks and keys came with them.
+        keyUp.flags = DesktopNavigationInput.hardwareModifiers.union(
+            CGEventSource.flagsState(.hidSystemState).intersection(.maskAlphaShift)
+        )
 
         keyDown.post(tap: .cgSessionEventTap)
         keyUp.post(tap: .cgSessionEventTap)
@@ -3389,6 +3397,22 @@ final class DockWatcher {
         spaceAPI.currentFullscreenApplicationPIDs()
     }
 
+    /// The desktops either side of a display's current one, for looking ahead
+    /// during a swipe. A full screen app's Space is marked as such.
+    func adjacentDesktops(on displayID: CGDirectDisplayID)
+        -> (previous: (id: UInt64, isFullscreen: Bool)?, next: (id: UInt64, isFullscreen: Bool)?) {
+        guard let neighbors = spaceAPI.neighbors(on: displayID) else { return (nil, nil) }
+        func desktop(_ space: DockWatcherSpaceAPI.Space?) -> (id: UInt64, isFullscreen: Bool)? {
+            space.map { ($0.identifier, $0.type == 4) }
+        }
+        return (desktop(neighbors.previous), desktop(neighbors.next))
+    }
+
+    /// The ordinary windows on a desktop, including one that isn't showing.
+    func windowIDs(onDesktop spaceID: UInt64) -> [CGWindowID]? {
+        spaceAPI.windowIDs(on: spaceID)
+    }
+
     func desktopSelection(on displayID: CGDirectDisplayID) -> DesktopSelectionSnapshot? {
         // Do not navigate using cached topology or a disconnected display.
         guard NSScreen.screen(withDisplayID: displayID) != nil else { return nil }
@@ -3405,7 +3429,7 @@ final class DockWatcher {
         return "Desktop: \(info.currentDesktopIndex) of \(info.totalDesktops)"
     }
 
-    private func postStatus(_ text: String, displayID: CGDirectDisplayID) {
+    private func postStatus(_ text: String?, displayID: CGDirectDisplayID) {
         let desktopText = desktopStatusLabel(on: displayID)
         (NSApp.delegate as? AppDelegate)?.updateStatus(text, desktopText: desktopText)
     }

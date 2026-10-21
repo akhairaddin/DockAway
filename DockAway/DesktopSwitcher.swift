@@ -224,6 +224,14 @@ enum DesktopNavigationInput {
     }
 }
 
+/// How a desktop switch ended.
+enum DesktopSwitchOutcome: Equatable {
+    case arrived
+    /// Stopped by the person's own click, key press, or scroll.
+    case cancelled
+    case failed(String)
+}
+
 // Neighbors use the native swipe; distant targets use one direct Space change.
 // Never change
 // Mission Control preferences or use screen capture, Dock injection, or AX clicks.
@@ -231,16 +239,21 @@ enum DesktopNavigationInput {
 final class DesktopSwitcher {
     private var task: Task<Void, Never>?
     private var switchID: UInt64 = 0
+    /// The last switch that reported how it ended. Any other that ends was
+    /// cancelled, and reports that instead.
+    private var reportedSwitchID: UInt64?
     private static let eventTag: Int64 = 0x4441575350414345
     var isSwitching: Bool { task != nil }
 
     func cancel() { task?.cancel() }
 
-    private func finishSwitching(id: UInt64, with message: String?, completion: (String?) -> Void) {
+    private func finishSwitching(id: UInt64, with message: String?,
+                                 completion: (DesktopSwitchOutcome) -> Void) {
         if switchID == id {
             task = nil
         }
-        completion(message)
+        reportedSwitchID = id
+        completion(message.map { .failed($0) } ?? .arrived)
     }
 
     func switchTo(
@@ -249,7 +262,7 @@ final class DesktopSwitcher {
         forceDirectJump: Bool = false,
         snapshot: @escaping () -> DesktopSelectionSnapshot?,
         teleport: @escaping (UInt64, UInt64) async -> Bool = { _, _ in false },
-        completion: @escaping (String?) -> Void
+        completion: @escaping (DesktopSwitchOutcome) -> Void
     ) {
         guard task == nil, initial.managerSpaceIDs.contains(target) else { return }
         switchID &+= 1
@@ -259,6 +272,10 @@ final class DesktopSwitcher {
             defer {
                 if self.switchID == currentSwitchID {
                     self.task = nil
+                }
+                if self.reportedSwitchID != currentSwitchID {
+                    self.reportedSwitchID = currentSwitchID
+                    completion(.cancelled)
                 }
             }
             // The native menu must finish tracking before posting a shortcut.
@@ -401,6 +418,7 @@ struct DesktopApplicationIcon {
     let name: String
     let image: NSImage
     var bundleIdentifier: String? = nil
+    var processIdentifier: pid_t? = nil
 }
 
 private final class DesktopNumberLabel: NSTextField {

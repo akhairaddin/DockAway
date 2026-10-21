@@ -905,17 +905,23 @@ BOOL DockAwayRemoveDesktop(uint64_t spaceID) {
                 if (targetFound && destinationFound) topologyValid = YES;
             }
             if (!topologyValid) return NO;
-            id allocated = [NSClassFromString(@"SLSBridgedSpaceDestroyOperation") alloc];
+            Class destroyClass = NSClassFromString(@"SLSBridgedSpaceDestroyOperation");
             SEL initialize = NSSelectorFromString(@"initWithSpaceID:");
+            NSMethodSignature *signature = [destroyClass instanceMethodSignatureForSelector:initialize];
+            if (!signature) return NO;
             // The asynchronous destroy executor returns void, unlike creation.
             // NSInvocation preserves each verified ABI without conflicting declarations.
-            NSInvocation *init = [NSInvocation invocationWithMethodSignature:[allocated methodSignatureForSelector:initialize]];
+            // It can't tell ARC that init consumes the allocated object and
+            // returns its own reference, so that ownership is passed by hand:
+            // init may release the object and return nil, or return another.
+            void *allocated = (__bridge_retained void *)[destroyClass alloc];
+            NSInvocation *init = [NSInvocation invocationWithMethodSignature:signature];
             init.selector = initialize;
             [init setArgument:&spaceID atIndex:2];
-            [init invokeWithTarget:allocated];
-            __unsafe_unretained id raw = nil;
+            [init invokeWithTarget:(__bridge id)allocated];
+            void *raw = NULL;
             [init getReturnValue:&raw];
-            id operation = raw;
+            id operation = (__bridge_transfer id)raw;
             if (!operation) return NO;
             DockAwayPerformBridgeOperation(operation);
             return YES; // Dispatch only; the caller must confirm disappearance.

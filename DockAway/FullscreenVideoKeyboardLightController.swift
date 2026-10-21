@@ -56,8 +56,8 @@ final class FullscreenVideoKeyboardLightController {
     /// The choices System Settings offers for "Turn keyboard backlight off
     /// after inactivity". Never is stored as 0.
     static let inactivityChoices: [(seconds: TimeInterval, title: String)] = [
-        (5, "After 5 Seconds"), (10, "After 10 Seconds"), (30, "After 30 Seconds"),
-        (60, "After 1 Minute"), (300, "After 5 Minutes"), (0, "Never")
+        (0, "Never"), (5, "After 5 Seconds"), (10, "After 10 Seconds"), (30, "After 30 Seconds"),
+        (60, "After 1 Minute"), (300, "After 5 Minutes")
     ]
 
     /// A short label for the current value, including values set outside
@@ -82,6 +82,7 @@ final class FullscreenVideoKeyboardLightController {
     private var observers: [NSObjectProtocol] = []
     private var timer: Timer?
     private var isRunning = false
+    private var pendingWindowCheck = false
 
     init(backlight: KeyboardBacklight? = nil, fullscreenSpacePIDs: @escaping () -> Set<pid_t>) {
         self.backlight = backlight ?? .shared
@@ -177,6 +178,20 @@ final class FullscreenVideoKeyboardLightController {
             })
         }
         evaluate()
+    }
+
+    /// The frontmost app's window was resized or a new one opened. A player
+    /// going fullscreen without a Space of its own does that and nothing
+    /// else, so it's checked once the resizing settles. Once fullscreen, the
+    /// regular check takes over.
+    func frontmostWindowChanged() {
+        guard isRunning, timer == nil, !pendingWindowCheck else { return }
+        pendingWindowCheck = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self else { return }
+            self.pendingWindowCheck = false
+            self.evaluate()
+        }
     }
 
     /// Checks now and again once a Space transition has settled, since its

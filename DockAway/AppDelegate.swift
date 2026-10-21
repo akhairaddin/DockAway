@@ -32,6 +32,16 @@ private final class PulsingStatusDotView: NSView {
     private let pulseLayers = (0..<3).map { _ in CALayer() }
     private let animationDurationScale: CFTimeInterval = 1.25
     private var indicatorState: IndicatorState = .active
+    /// Pausing lets the dot keep pulsing this long while it turns red, so the
+    /// change reads as winding down rather than switching off.
+    private static let pausePulseLinger: TimeInterval = 1
+    /// Green fading to red, slower than the other color changes.
+    private static let pauseColorDuration: CFTimeInterval = 0.8
+    /// Resuming turns the dot green first, and its pulse follows this much
+    /// later, once the color has settled.
+    private static let resumePulseDelay: TimeInterval = 0.6
+    /// A pulse waiting to stop after pausing, or to start after resuming.
+    private var pendingPulseChange: DispatchWorkItem?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -91,11 +101,13 @@ private final class PulsingStatusDotView: NSView {
     private func setIndicatorState(_ state: IndicatorState) {
         guard indicatorState != state else { return }
 
+        let pausing = indicatorState == .active && state == .inactive
+        let resuming = indicatorState != .active && state == .active
         indicatorState = state
-        updateAppearance(animated: window != nil)
+        updateAppearance(animated: window != nil, pausing: pausing, resuming: resuming)
     }
 
-    private func updateAppearance(animated: Bool = false) {
+    private func updateAppearance(animated: Bool = false, pausing: Bool = false, resuming: Bool = false) {
         let color: NSColor
         switch indicatorState {
         case .active:
@@ -107,7 +119,9 @@ private final class PulsingStatusDotView: NSView {
         }
         let isActive = indicatorState == .active
         let pulseColor = color.withAlphaComponent(0.65)
-        let animationDuration: CFTimeInterval = 0.32 * animationDurationScale
+        let animationDuration: CFTimeInterval = pausing
+            ? Self.pauseColorDuration
+            : 0.32 * animationDurationScale
 
         let previousBackgroundColor = coreLayer.presentation()?.backgroundColor ?? coreLayer.backgroundColor
         let previousShadowColor = coreLayer.presentation()?.shadowColor ?? coreLayer.shadowColor
@@ -169,11 +183,25 @@ private final class PulsingStatusDotView: NSView {
             }
         }
 
-        updatePulseAnimation(animated: animated)
+        updatePulseAnimation(animated: animated, lingering: pausing, delayed: resuming)
     }
 
-    private func updatePulseAnimation(animated: Bool = false) {
+    private func updatePulseAnimation(animated: Bool = false, lingering: Bool = false, delayed: Bool = false) {
+        pendingPulseChange?.cancel()
+        pendingPulseChange = nil
         if indicatorState != .active {
+            if lingering, animated, window != nil,
+               !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+               pulseLayers.contains(where: { $0.animation(forKey: "outwardPulse") != nil }) {
+                let stop = DispatchWorkItem { [weak self] in
+                    guard let self, self.indicatorState != .active else { return }
+                    self.pendingPulseChange = nil
+                    self.stopPulseAnimation(animated: self.window != nil, slowly: true)
+                }
+                pendingPulseChange = stop
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.pausePulseLinger, execute: stop)
+                return
+            }
             stopPulseAnimation(animated: animated)
             return
         }
@@ -203,6 +231,17 @@ private final class PulsingStatusDotView: NSView {
             pulseLayer.opacity = 0
         }
 
+        if delayed && animated {
+            let start = DispatchWorkItem { [weak self] in
+                guard let self, self.indicatorState == .active else { return }
+                self.pendingPulseChange = nil
+                self.updatePulseAnimation()
+            }
+            pendingPulseChange = start
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.resumePulseDelay, execute: start)
+            return
+        }
+
         let pulseDuration = 2.1 * animationDurationScale
         let waveInterval = pulseDuration / Double(pulseLayers.count)
         let timelineStart = CACurrentMediaTime()
@@ -226,7 +265,9 @@ private final class PulsingStatusDotView: NSView {
         }
     }
 
-    private func stopPulseAnimation(animated: Bool) {
+    /// Fades out the pulse. Slowly, after pausing, the rings drift on
+    /// outward as they fade, easing almost to a halt, like slow motion.
+    private func stopPulseAnimation(animated: Bool, slowly: Bool = false) {
         let shouldAnimate = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
         for pulseLayer in pulseLayers {
@@ -250,12 +291,15 @@ private final class PulsingStatusDotView: NSView {
 
             let finishExpanding = CABasicAnimation(keyPath: "transform")
             finishExpanding.fromValue = visibleTransform
-            finishExpanding.toValue = CATransform3DScale(visibleTransform, 1.12, 1.12, 1)
+            let growth: CGFloat = slowly ? 1.3 : 1.12
+            finishExpanding.toValue = CATransform3DScale(visibleTransform, growth, growth, 1)
 
             let stop = CAAnimationGroup()
             stop.animations = [fade, finishExpanding]
-            stop.duration = 0.24 * animationDurationScale
-            stop.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            stop.duration = slowly ? 1.4 : 0.24 * animationDurationScale
+            stop.timingFunction = slowly
+                ? CAMediaTimingFunction(controlPoints: 0.15, 0.7, 0.2, 1)
+                : CAMediaTimingFunction(name: .easeOut)
             pulseLayer.add(stop, forKey: "pulseStop")
         }
     }
@@ -478,15 +522,28 @@ private final class DockAwayStatusView: NSView {
     private let titleRow = NSStackView()
     private let detailStack = NSStackView()
     private let labelStack = NSStackView()
-    /// Inset for detail & desktop labels to align under the pulsing status dot.
-    /// statusDot is 18 pt wide with its 5 pt dot centered at midX (9 pt), so the circle's
-    /// leading edge begins at 6.5 pt. Setting an inset of 6.5 pt aligns the text flush under the dot.
-    private static let detailLeadingInset: CGFloat = 6.5
+    /// The title, app, and desktop lines share one leading edge, with the
+    /// status dot in the margin before them. The dot's pulse grows to about
+    /// 22 pt across, so the text starts clear of it.
+    private static let dotCenterInset: CGFloat = 9
+    private static let textLeadingInset: CGFloat = 19
     private let permissionAttentionView = PermissionAttentionRingView(frame: .zero)
     private let pauseResumeImageView = NonHitTestingImageView()
     private var displayedActiveState: Bool?
     private var displayedWarning = false
     let pauseResumeButton = HoverHighlightButton()
+
+    /// Cross-fades a label to the text set right after, rather than
+    /// switching it all at once.
+    private func fadeText(of label: NSTextField, if animated: Bool) {
+        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let layer = label.layer else { return }
+        let fade = CATransition()
+        fade.type = .fade
+        fade.duration = 0.25
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(fade, forKey: "textChange")
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -544,19 +601,18 @@ private final class DockAwayStatusView: NSView {
         desktopLabel.font = .systemFont(ofSize: 9.5, weight: .regular)
         desktopLabel.textColor = .secondaryLabelColor
         desktopLabel.lineBreakMode = .byTruncatingTail
+        // Layers of their own, so their text can fade when it changes.
+        [titleLabel, detailLabel, desktopLabel].forEach { $0.wantsLayer = true }
 
         titleRow.translatesAutoresizingMaskIntoConstraints = false
         titleRow.orientation = .horizontal
         titleRow.alignment = .centerY
-        titleRow.spacing = 2
-        titleRow.addArrangedSubview(statusDot)
         titleRow.addArrangedSubview(titleLabel)
 
         detailStack.translatesAutoresizingMaskIntoConstraints = false
         detailStack.orientation = .vertical
         detailStack.alignment = .leading
         detailStack.spacing = 1
-        detailStack.edgeInsets = NSEdgeInsets(top: 0, left: Self.detailLeadingInset, bottom: 0, right: 0)
         detailStack.addArrangedSubview(detailLabel)
         detailStack.addArrangedSubview(desktopLabel)
 
@@ -582,6 +638,7 @@ private final class DockAwayStatusView: NSView {
         permissionAttentionView.translatesAutoresizingMaskIntoConstraints = false
 
         contentView.addSubview(labelStack)
+        contentView.addSubview(statusDot)
         contentView.addSubview(permissionAttentionView)
         contentView.addSubview(pauseResumeButton)
         contentView.addSubview(pauseResumeImageView)
@@ -589,8 +646,12 @@ private final class DockAwayStatusView: NSView {
         NSLayoutConstraint.activate([
             statusDot.widthAnchor.constraint(equalToConstant: 18),
             statusDot.heightAnchor.constraint(equalToConstant: 18),
+            statusDot.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Self.dotCenterInset),
+            statusDot.centerYAnchor.constraint(equalTo: titleRow.centerYAnchor),
+            // As tall as the dot, so the lines keep their spacing.
+            titleRow.heightAnchor.constraint(equalToConstant: 18),
 
-            labelStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 11),
+            labelStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Self.textLeadingInset),
             labelStack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             labelStack.trailingAnchor.constraint(lessThanOrEqualTo: pauseResumeButton.leadingAnchor, constant: -6),
 
@@ -623,7 +684,7 @@ private final class DockAwayStatusView: NSView {
         status: String,
         desktopStatus: String? = nil,
         inactiveTitle: String = "DockAway: Paused",
-        inactiveDetail: String = "App detection paused",
+        inactiveDetail: String = "App: ?",
         inactiveActionTitle: String = "Resume DockAway",
         warning: Bool = false,
         warningTitle: String = "No Multitouch Support:",
@@ -633,8 +694,9 @@ private final class DockAwayStatusView: NSView {
         let title = warning
             ? warningTitle
             : active ? "DockAway: Active" : inactiveTitle
-        let desktop = (active && !warning) ? (desktopStatus ?? "") : ""
         let isOnDesktop = status == "Desktop"
+        // Without DockAway watching, which desktop is showing isn't known.
+        let unknownDesktop = "Desktop: ? of ?"
 
         let detail: String
         if warning {
@@ -642,13 +704,22 @@ private final class DockAwayStatusView: NSView {
         } else if !active {
             detail = inactiveDetail
         } else if isOnDesktop {
-            detail = !desktop.isEmpty ? desktop : "Desktop:"
+            detail = desktopStatus ?? unknownDesktop
         } else {
             detail = "App: \(status)"
         }
 
-        let showDesktop = !isOnDesktop && !desktop.isEmpty
-        let desktopText = showDesktop ? desktop : ""
+        // Every state keeps three lines, so the title stays in one place.
+        let desktopText: String
+        if !active {
+            desktopText = unknownDesktop
+        } else if isOnDesktop && !warning {
+            desktopText = "" // The line above names the desktop already.
+        } else {
+            desktopText = desktopStatus ?? (warning ? "" : unknownDesktop)
+        }
+        // A space keeps an empty line's height.
+        let desktopLine = desktopText.isEmpty ? " " : desktopText
 
         let permissionRequired = !active
             && !warning
@@ -656,23 +727,33 @@ private final class DockAwayStatusView: NSView {
 
         permissionAttentionView.setEmitting(permissionRequired)
 
-        desktopLabel.stringValue = desktopText
-        desktopLabel.isHidden = !showDesktop
-
         guard displayedActiveState != active
             || titleLabel.stringValue != title
             || detailLabel.stringValue != detail
-            || desktopLabel.stringValue != desktopText
-            || desktopLabel.isHidden != !showDesktop
+            || desktopLabel.stringValue != desktopLine
         else { return }
 
+        let previousActiveState = displayedActiveState
         displayedActiveState = active
         statusDot.setWarning(warning, active: active)
-        titleLabel.stringValue = title
-        titleLabel.textColor = active || warning || inactiveTitle == "Permission Required"
+        // The first text appears as is; after that, each line fades over.
+        let fades = previousActiveState != nil && window != nil
+        let titleColor: NSColor = active || warning || inactiveTitle == "Permission Required"
             ? .labelColor
             : .secondaryLabelColor
-        detailLabel.stringValue = detail
+        if titleLabel.stringValue != title || titleLabel.textColor != titleColor {
+            fadeText(of: titleLabel, if: fades)
+            titleLabel.stringValue = title
+            titleLabel.textColor = titleColor
+        }
+        if detailLabel.stringValue != detail {
+            fadeText(of: detailLabel, if: fades)
+            detailLabel.stringValue = detail
+        }
+        if desktopLabel.stringValue != desktopLine {
+            fadeText(of: desktopLabel, if: fades)
+            desktopLabel.stringValue = desktopLine
+        }
 
         let actionTitle = warning
             ? warningActionTitle
@@ -685,7 +766,7 @@ private final class DockAwayStatusView: NSView {
         )?.withSymbolConfiguration(symbolConfiguration)
 
         if let symbolImage {
-            let shouldAnimate = displayedActiveState.map { $0 != active } ?? false
+            let shouldAnimate = previousActiveState.map { $0 != active } ?? false
             if shouldAnimate && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 pauseResumeImageView.setSymbolImage(symbolImage, contentTransition: .replace)
             } else {
@@ -1798,12 +1879,12 @@ private typealias MenuActionItemView = BlacklistActionMenuItemView
 
 private final class BlacklistHelpMenuItemView: NSView {
     private static let helpText = "A blacklisted app keeps the Dock shown while it is the frontmost app on the active display. When another app moves in front, DockAway hides the Dock normally."
-    private var heading = "How 'Blacklist' Works"
+    private var heading = "How 'Auto-Hide Blacklist' Works"
     private var textProvider: () -> String = { BlacklistHelpMenuItemView.helpText }
 
     private let highlightView = NSView()
     private let iconView = NSImageView()
-    private let titleLabel = NSTextField(labelWithString: "About Blacklist")
+    private let titleLabel = NSTextField(labelWithString: "About Auto-Hide Blacklist")
     private var hoverWorkItem: DispatchWorkItem?
     private var trackingAreaReference: NSTrackingArea?
     private lazy var helpPopover = makeHelpPopover()
@@ -1818,7 +1899,7 @@ private final class BlacklistHelpMenuItemView: NSView {
 
         iconView.image = NSImage(
             systemSymbolName: "questionmark.circle",
-            accessibilityDescription: "Blacklist Help"
+            accessibilityDescription: "Auto-Hide Blacklist Help"
         )
         iconView.contentTintColor = .labelColor
         iconView.translatesAutoresizingMaskIntoConstraints = false
@@ -1846,8 +1927,10 @@ private final class BlacklistHelpMenuItemView: NSView {
 
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityLabel("About Blacklist")
+        setAccessibilityLabel("About Auto-Hide Blacklist")
         setAccessibilityHelp(Self.helpText)
+        // Wide enough for the whole title, beside its help icon.
+        frame.size.width = max(190, ceil(titleLabel.intrinsicContentSize.width) + 64)
     }
 
     required init?(coder: NSCoder) {
@@ -2049,7 +2132,7 @@ private final class PermissionSetupRowView: NSView {
         wantsLayer = true
         layer?.cornerRadius = 12
         layer?.borderWidth = 0.5
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
         layer?.backgroundColor = rowBackgroundColor(granted: false).cgColor
 
         for imageView in [
@@ -2337,6 +2420,14 @@ private final class PermissionSetupRowView: NSView {
         granted
             ? NSColor.systemGreen.withAlphaComponent(0.08)
             : NSColor.controlBackgroundColor.withAlphaComponent(0.38)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
+            layer?.backgroundColor = rowBackgroundColor(granted: grantedState ?? false).cgColor
+        }
     }
 
     @objc private func requestPermission() {
@@ -2651,6 +2742,14 @@ final class OnboardingPrimaryButton: NSButton {
     private static let desktopIndicatorPillKey = "DesktopIndicatorTextPill"
     private static let desktopIndicatorEncapsulateKey = "DesktopIndicatorEncapsulate"
     private static let desktopIndicatorRoundPillKey = "DesktopIndicatorRoundPill"
+    /// The All Displays pill corner radius, 0...1. Absent keeps the round or rounded-rectangle choice.
+    private static let desktopIndicatorPillCornerRadiusKey = "DesktopIndicatorPillCornerRadius"
+    /// Extra room on each side of the indicator in the menu bar, in points.
+    private static let menuBarPaddingKey = "menuBarIndicatorPadding"
+    private static let menuBarPaddingRange: ClosedRange<Double> = 0...12
+    /// macOS adds 2 pt each side of a variable-length item's content; a fixed
+    /// length has to include them to keep the same spacing.
+    private static let statusItemVariableInset: CGFloat = 4
     private static let desktopManagerEnabledKey = "desktopManagerEnabled"
     static let openDockAwayShortcutEnabledKey = DockAwayHotKey.preferenceKey
     private static let keepDockSettingsAfterQuitKey = "KeepDockSettingsAfterQuit"
@@ -2697,7 +2796,7 @@ final class OnboardingPrimaryButton: NSButton {
         var title: String {
             switch self {
             case .none: "None"
-            case .systemText: "Menubar Desktop Indicator"
+            case .systemText: "Desktop Number"
             case .compactSlash: "Compact Slash"
             case .pillBadge: "Pill Badge"
             case .activeBadge: "Active Desktop Badge"
@@ -2817,6 +2916,10 @@ final class OnboardingPrimaryButton: NSButton {
                         windowElement: element
                     )
                 }
+                if notification == kAXWindowResizedNotification || notification == kAXWindowCreatedNotification,
+                   pid == NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                    self?.fullscreenVideoKeyboardLightController.frontmostWindowChanged()
+                }
             }
         }
     }
@@ -2897,6 +3000,7 @@ final class OnboardingPrimaryButton: NSButton {
     private weak var desktopChangeTooltipMenu: NSMenu?
     private var desktopChangeTooltipRowView: DockSettingToggleRowView?
     private var desktopChangeTooltipDurationSliderView: DockSettingSliderView?
+    private weak var menuBarPaddingSliderView: DockSettingSliderView?
     private var desktopChangeTooltipAppIconsRowView: DockSettingToggleRowView?
     /// Desktop app icons drawn once per app, shared by Desktop Manager and the pill.
     private var desktopTileIconCache: [String: NSImage] = [:]
@@ -2908,11 +3012,15 @@ final class OnboardingPrimaryButton: NSButton {
     private var screenshotClipboardRowView: DockSettingPersistenceRowView?
     private var screenshotInstantCopyRowView: DockSettingPersistenceRowView?
     private var greenButtonFillRowView: DockSettingPersistenceRowView?
+    private var menuBarBlackoutRowView: DockSettingPersistenceRowView?
+    private var menuBarBlackoutAccessItem: NSMenuItem?
+    private let wallpaperAccessPrompt = WallpaperAccessPrompt()
     private var finderDeleteKeyRowView: DockSettingPersistenceRowView?
+    private var forceClickMiddleClickRowView: DockSettingPersistenceRowView?
     private var quickLookCopyOrientationRowView: DockSettingPersistenceRowView?
     private var hoverActivationEnabledRowView: DockSettingToggleRowView?
     private var hoverActivationPointerStopRowView: DockSettingToggleRowView?
-    private var hoverActivationRaiseRowView: DockSettingPersistenceRowView?
+    private var hoverActivationRaiseRowView: DockSettingToggleRowView?
     private var hoverActivationDelaySliderView: DockSettingSliderView?
     private var keyboardNavigationRowViews: [DockSettingKeyRebindRowView] = []
     private var keyboardNavigationEnabledRowView: DockSettingToggleRowView?
@@ -2934,7 +3042,11 @@ final class OnboardingPrimaryButton: NSButton {
     private var keyboardLightTimeoutChoiceRows: [(seconds: TimeInterval, row: DockSettingPersistenceRowView)] = []
     private let screenshotClipboardManager = ScreenshotClipboardManager.shared
     private let greenButtonFillController = GreenButtonFillController()
+    private let menuBarBlackoutController = MenuBarBlackoutController()
     private let finderDeleteKeyController = FinderDeleteKeyController()
+    private let forceClickMiddleClickController = ForceClickMiddleClickController()
+    /// Fingers on the trackpad, as MultitouchSupport last reported them.
+    private var trackpadFingerCount = 0
     private let quickLookCopyOrientationManager = QuickLookCopyOrientationManager()
     private let hoverActivationController = HoverActivationController()
     private let dockIconClickMinimizeController = DockIconClickMinimizeController()
@@ -3023,6 +3135,9 @@ final class OnboardingPrimaryButton: NSButton {
     private var menuBarAppearanceObservation: NSKeyValueObservation?
     /// Whether the menu bar indicator was last drawn for a dark menu bar.
     private var renderedMenuBarIsDark: Bool?
+    /// The indicator is a template image macOS tints itself, so it needs no
+    /// redraw when the menu bar turns light or dark.
+    private var statusIndicatorIsTemplate = false
     /// Lets a newer page transition supersede one still animating.
     private var onboardingTransitionGeneration = 0
     private weak var permissionSetupFirstPageView: OnboardingPermissionsPageView?
@@ -3045,6 +3160,11 @@ final class OnboardingPrimaryButton: NSButton {
     // DockWatcher publishes its existing live state reads here. This keeps the
     // menu-bar glyph current without a permanent cosmetic polling timer.
     private var glyphShowsDockVisible: Bool?
+    /// Three or more fingers rest on the trackpad.
+    private var desktopSwipeContactsActive = false
+    /// The Dock arrows, kept apart from the status item's image, which holds
+    /// the whole indicator once it's drawn as one template.
+    private var statusGlyph: NSImage?
 
     // Four-finger pre-hide via private MultitouchSupport.
     // Set to false to keep the finger-count logging without acting on it.
@@ -3113,6 +3233,36 @@ final class OnboardingPrimaryButton: NSButton {
         fullscreenVideoKeyboardLightController.setEnabled(
             UserDefaults.standard.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey)
         )
+        menuBarBlackoutController.isSuspended = { [weak self] in
+            self?.dockWatcher?.isMissionControlActive == true
+        }
+        menuBarBlackoutController.currentSpaceID = { [weak self] display in
+            self?.dockWatcher?.desktopSelection(on: display)?.currentID
+        }
+        menuBarBlackoutController.isSwitchingDesktops = { [weak self] in
+            self?.desktopSwitcher.isSwitching == true
+        }
+        menuBarBlackoutController.adjacentDesktops = { [weak self] display in
+            self?.dockWatcher?.adjacentDesktops(on: display) ?? (previous: nil, next: nil)
+        }
+        menuBarBlackoutController.windowIDsOnDesktop = { [weak self] desktop in
+            self?.dockWatcher?.windowIDs(onDesktop: desktop)
+        }
+        // DockAway's own menu bar item shows which text color its menu bar has.
+        menuBarBlackoutController.menuBarTextIsWhite = { [weak self] display in
+            // While its menu is open, the highlighted button may not report the
+            // menu bar's appearance.
+            guard let self, let button = self.statusItem?.button, button.window?.screen?.displayID == display,
+                  !self.statusMenuIsOpen, !button.isHighlighted else { return nil }
+            return Self.isDark(button.effectiveAppearance)
+        }
+        menuBarBlackoutController.wallpaperAccessNeeded = { [weak self] blocked in
+            self?.offerWallpaperAccess(blocked)
+        }
+        menuBarBlackoutController.recoverPreviousSession()
+        menuBarBlackoutController.setEnabled(
+            UserDefaults.standard.bool(forKey: MenuBarBlackoutController.preferenceKey)
+        )
         NSApp.setActivationPolicy(.accessory)
 
         // These are first-run defaults only. UserDefaults preserves any later
@@ -3127,7 +3277,9 @@ final class OnboardingPrimaryButton: NSButton {
             FullscreenVideoKeyboardLightController.preferenceKey: false,
             ScreenshotClipboardManager.preferenceKey: false,
             GreenButtonFillController.preferenceKey: false,
+            MenuBarBlackoutController.preferenceKey: false,
             FinderDeleteKeyController.preferenceKey: false,
+            ForceClickMiddleClickController.preferenceKey: false,
             QuickLookCopyOrientationManager.preferenceKey: false,
             HoverActivationController.enabledPreferenceKey: false,
             HoverActivationController.delayPreferenceKey: HoverActivationController.defaultDelay,
@@ -3153,6 +3305,15 @@ final class OnboardingPrimaryButton: NSButton {
         desktopChangeTooltip.appIconProvider = { [weak self] spaceID, completion in
             self?.fetchDesktopApplicationIcons(for: spaceID, completion: completion)
         }
+        desktopChangeTooltip.onAppIconClick = { [weak self] processIdentifier in
+            self?.focusApplicationFromPill(processIdentifier)
+        }
+        desktopChangeTooltip.mustStepAside = { [weak self] in
+            self?.dockWatcher?.isMissionControlActive == true
+        }
+        #if DEBUG
+        observeDebugDesktopSwipes()
+        #endif
 
         if screenshotClipboardManager.isEnabled {
             screenshotClipboardManager.startMonitoring()
@@ -3182,6 +3343,15 @@ final class OnboardingPrimaryButton: NSButton {
         finderDeleteKeyController.isSuppressed = { [weak self] in
             self?.statusMenuIsOpen == true
         }
+        forceClickMiddleClickController.isSuppressed = { [weak self] in
+            self?.statusMenuIsOpen == true
+        }
+        // Tells a trackpad click from a mouse's. Unknown while the watcher
+        // isn't running, as when DockAway is paused.
+        forceClickMiddleClickController.fingersOnTrackpad = { [weak self] in
+            guard let self, self.multitouch.isRunning else { return nil }
+            return self.trackpadFingerCount
+        }
         let teleportManager = CursorTeleportManager()
         teleportManager.isMissionControlActive = { [weak self] in
             self?.dockWatcher?.isMissionControlActive == true
@@ -3200,6 +3370,7 @@ final class OnboardingPrimaryButton: NSButton {
         }
         refreshChromiumWebAppPlacementController()
         refreshFinderDeleteKeyController()
+        refreshForceClickMiddleClickController()
         refreshQuickLookCopyOrientationManager()
         hoverActivationController.isSuppressed = { [weak self] in
             guard let self else { return true }
@@ -3302,7 +3473,7 @@ final class OnboardingPrimaryButton: NSButton {
         if automaticSuspensionReasons.contains(.displayAsleep) {
             return "Display asleep"
         }
-        return "App detection paused"
+        return "App: ?"
     }
 
     private var inactiveStatusTitle: String {
@@ -3519,7 +3690,10 @@ final class OnboardingPrimaryButton: NSButton {
         // The menu bar turns light or dark with the wallpaper behind it, not
         // just with dark mode, so redraw the indicator whenever it flips.
         menuBarAppearanceObservation = statusItem.button?.observe(\.effectiveAppearance) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.menuBarAppearanceDidChange() }
+            DispatchQueue.main.async {
+                self?.menuBarAppearanceDidChange()
+                self?.menuBarBlackoutController.menuBarAppearanceDidChange()
+            }
         }
         applyStatusIcon(dockVisible: isDockCurrentlyVisible())
         updateMenuBarDesktopBadge()
@@ -3645,7 +3819,8 @@ final class OnboardingPrimaryButton: NSButton {
         let opacity = defaults.object(forKey: "desktopIndicatorPillOpacity") as? Double ?? 0.08
         let paddingH = defaults.object(forKey: "desktopIndicatorPillPaddingH") as? Double ?? 8.0
         let paddingV = defaults.object(forKey: "desktopIndicatorPillPaddingV") as? Double ?? 3.0
-        return DesktopIndicatorTextStyle(badge: badge, hierarchical: hierarchical, usesAccentColor: accent, separator: separator, usesPill: pill, pillOpacity: opacity, encapsulatesDockIndicator: encapsulate, usesRoundPill: round,
+        let cornerRadius = defaults.object(forKey: Self.desktopIndicatorPillCornerRadiusKey) as? Double
+        return DesktopIndicatorTextStyle(badge: badge, hierarchical: hierarchical, usesAccentColor: accent, separator: separator, usesPill: pill, pillOpacity: opacity, encapsulatesDockIndicator: encapsulate, pillCornerRadius: cornerRadius, usesRoundPill: round,
             accentOnlyWhenActive: defaults.bool(forKey: "accentActiveDisplayCount"),
             fillOnlyWhenActive: defaults.bool(forKey: "fillActiveDisplayCount"),
             pillOnlyWhenActive: defaults.bool(forKey: "pillActiveDisplayOnly"),
@@ -3693,6 +3868,7 @@ final class OnboardingPrimaryButton: NSButton {
         UserDefaults.standard.set(style.pillOpacity, forKey: "desktopIndicatorPillOpacity")
         UserDefaults.standard.set(style.encapsulatesDockIndicator, forKey: Self.desktopIndicatorEncapsulateKey)
         UserDefaults.standard.set(style.usesRoundPill, forKey: Self.desktopIndicatorRoundPillKey)
+        UserDefaults.standard.set(style.pillCornerRadius, forKey: Self.desktopIndicatorPillCornerRadiusKey)
         UserDefaults.standard.set(style.pillOnlyWhenActive ?? false, forKey: "pillActiveDisplayOnly")
         UserDefaults.standard.set(style.pillPaddingHorizontal ?? 8.0, forKey: "desktopIndicatorPillPaddingH")
         UserDefaults.standard.set(style.pillPaddingVertical ?? 3.0, forKey: "desktopIndicatorPillPaddingV")
@@ -3774,7 +3950,7 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     private func menuBarAppearanceDidChange() {
-        guard let button = statusItem?.button,
+        guard !statusIndicatorIsTemplate, let button = statusItem?.button,
               Self.isDark(button.effectiveAppearance) != renderedMenuBarIsDark else { return }
         // While its menu is open, the highlighted button may not report the
         // menu bar's appearance, and redrawing the status item can close the
@@ -3790,6 +3966,41 @@ final class OnboardingPrimaryButton: NSButton {
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
+    private var menuBarPadding: Double {
+        min(Self.menuBarPaddingRange.upperBound,
+            max(Self.menuBarPaddingRange.lowerBound, UserDefaults.standard.double(forKey: Self.menuBarPaddingKey)))
+    }
+
+    /// Widens the indicator's place in the menu bar by the padding on each
+    /// side, its content centered. None leaves macOS to size it as usual.
+    private func applyMenuBarPadding(_ padding: Double? = nil) {
+        guard let statusItem, let button = statusItem.button else { return }
+        let padding = padding ?? menuBarPadding
+        guard padding > 0 else {
+            if statusItem.length != NSStatusItem.variableLength { statusItem.length = NSStatusItem.variableLength }
+            return
+        }
+        let length = button.intrinsicContentSize.width + Self.statusItemVariableInset + 2 * CGFloat(padding)
+        if statusItem.length != length { statusItem.length = length }
+    }
+
+    private static func menuBarPaddingText(_ padding: Double) -> String {
+        padding == 0 ? "None" : "\(Int(padding)) pt"
+    }
+
+    @objc private func previewMenuBarPadding(_ sender: NSSlider) {
+        let padding = sender.doubleValue.rounded()
+        menuBarPaddingSliderView?.setValue(padding, displayText: Self.menuBarPaddingText(padding))
+        applyMenuBarPadding(padding)
+    }
+
+    private func setMenuBarPadding(_ value: Double) {
+        let padding = min(Self.menuBarPaddingRange.upperBound, max(Self.menuBarPaddingRange.lowerBound, value.rounded()))
+        UserDefaults.standard.set(padding, forKey: Self.menuBarPaddingKey)
+        menuBarPaddingSliderView?.setValue(padding, displayText: Self.menuBarPaddingText(padding))
+        applyMenuBarPadding()
+    }
+
     private func updateMenuBarDesktopBadge(liveCustomization: Bool = false, refreshMenu: Bool = true) {
         // Keep the status item's anchor stable while a desktop drop settles.
         // menuDidClose applies the deferred appearance and number update.
@@ -3798,20 +4009,71 @@ final class OnboardingPrimaryButton: NSButton {
         // when an unrelated display-list update is waiting for tracking to end.
         if statusMenuIsOpen && pendingDisplayLayoutRefresh && !liveCustomization { return }
         guard let button = statusItem?.button else { return }
+        defer { applyMenuBarPadding() }
 
-        // The indicator's colors are chosen as it's built, so build it in the
-        // menu bar's own appearance rather than DockAway's.
+        // Built in white ink, the indicator becomes a template image that
+        // macOS tints along with the other menu bar icons, the moment the menu
+        // bar turns light or dark. One with color can't be a template, so its
+        // colors are chosen for the menu bar's own appearance instead.
         let menuBarAppearance = button.effectiveAppearance
         renderedMenuBarIsDark = Self.isDark(menuBarAppearance)
+        if let ink = NSAppearance(named: .darkAqua) {
+            var isTemplate = false
+            ink.performAsCurrentDrawingAppearance {
+                renderMenuBarDesktopBadge(on: button)
+                isTemplate = drawIndicatorAsTemplate(on: button)
+            }
+            statusIndicatorIsTemplate = isTemplate
+            if isTemplate { return }
+        }
         menuBarAppearance.performAsCurrentDrawingAppearance {
             renderMenuBarDesktopBadge(on: button)
         }
+    }
+
+    /// Replaces the button's Dock arrows and text with one template image of
+    /// both, laid out as the button would draw them. False, leaving them as
+    /// they are, if the indicator has color.
+    private func drawIndicatorAsTemplate(on button: NSStatusBarButton) -> Bool {
+        let title = button.attributedTitle
+        let glyph = button.imagePosition == .noImage ? nil : button.image
+        // The arrows alone are a template already.
+        guard title.length > 0 else { return glyph?.isTemplate ?? true }
+        guard let cell = button.cell as? NSButtonCell else { return false }
+        // Text without a color of its own draws in the menu bar's text color.
+        let ink = NSMutableAttributedString(attributedString: title)
+        ink.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: ink.length)) { color, range, _ in
+            if color == nil { ink.addAttribute(.foregroundColor, value: NSColor.white, range: range) }
+        }
+        let height = button.bounds.height > 0 ? button.bounds.height : NSStatusBar.system.thickness
+        let bounds = NSRect(x: 0, y: 0, width: ceil(cell.cellSize.width), height: height)
+        let imageRect = cell.imageRect(forBounds: bounds)
+        let titleRect = cell.titleRect(forBounds: bounds)
+        let scales = Set(NSScreen.screens.map(\.backingScaleFactor) + [2])
+        guard let image = StatusItemTemplate.image(width: bounds.width, height: height, scales: Array(scales), draw: {
+            if let glyph {
+                glyph.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1)
+                NSColor.white.setFill()
+                imageRect.fill(using: .sourceIn)
+            }
+            _ = cell.drawTitle(ink, withFrame: titleRect, in: button)
+        }) else { return false }
+        image.accessibilityDescription = [glyph?.accessibilityDescription,
+            title.string.replacingOccurrences(of: "\u{FFFC}", with: "").trimmingCharacters(in: .whitespaces)]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+        button.attributedTitle = NSAttributedString()
+        button.imagePosition = .imageOnly
+        // Already the menu bar's height, so it sits exactly where it was drawn.
+        button.imageScaling = .scaleNone
+        button.image = image
+        return true
     }
 
     private func renderMenuBarDesktopBadge(on button: NSStatusBarButton) {
         let appearance = currentDesktopIndicatorAppearance
         let style = singleDisplayTextStyle
         let showsDockIndicator = showsMenuBarDockIndicator
+        button.image = statusGlyph
         button.imagePosition = !showsDockIndicator
             || (appearance != .none && style.usesPill && style.encapsulatesDockIndicator) ? .noImage : .imageLeading
         guard appearance != .none else {
@@ -3836,7 +4098,7 @@ final class OnboardingPrimaryButton: NSButton {
 
         case .systemText:
             button.attributedTitle = style.text(current: currentNum, total: totalNum, isFullscreen: isFS,
-                                                dockIndicator: showsDockIndicator ? button.image : nil)
+                                                dockIndicator: showsDockIndicator ? statusGlyph : nil)
 
         case .compactSlash:
             let text = isFS ? "FS" : "\(desktopCountText(currentNum))/\(desktopCountText(totalNum))"
@@ -3961,13 +4223,8 @@ final class OnboardingPrimaryButton: NSButton {
         if statusMenuIsOpen {
             pendingDisplayLayoutRefresh = true
             refreshDesktopIndicatorAppearanceMenu()
-        } else if currentDesktopIndicatorAppearance != .none, let button = statusItem.button {
-            // Colors are chosen as the text is built, so use the menu bar's appearance.
-            var text: NSAttributedString?
-            button.effectiveAppearance.performAsCurrentDrawingAppearance {
-                text = groupedDisplayIndicatorText()
-            }
-            if let text { button.attributedTitle = text }
+        } else if currentDesktopIndicatorAppearance != .none, desktopDisplaySections.count > 1 {
+            updateMenuBarDesktopBadge(refreshMenu: false)
         }
     }
 
@@ -3980,9 +4237,14 @@ final class OnboardingPrimaryButton: NSButton {
 
         multitouch.start(
             onFingerCountChange: { [weak self] fingers in
-                guard let self, self.monitoringShouldRun else { return }
+                guard let self else { return }
+                self.trackpadFingerCount = fingers
+                guard self.monitoringShouldRun else { return }
                 self.dockWatcher?.missionControlTrackpadContactsChanged(fingers)
+                if fingers >= 3, !self.desktopSwipeContactsActive { self.prefetchDesktopSwipeIcons() }
+                self.desktopSwipeContactsActive = fingers >= 3
                 self.desktopChangeTooltip.desktopGestureContactsChanged(fingers)
+                self.menuBarBlackoutController.desktopGestureContactsChanged(fingers)
                 if fingers < 3 {
                     // Refresh even when the gesture was cancelled and macOS
                     // didn't post a changed-Space notification.
@@ -4096,6 +4358,11 @@ final class OnboardingPrimaryButton: NSButton {
                         ? "  ⚡ Motion confirmed → hidden hold armed"
                         : "  ⚡ Motion confirmed → pre-hide suppressed"
                 )
+            },
+            onHorizontalSwipe: { [weak self] motion in
+                guard let self, self.monitoringShouldRun else { return }
+                // Fingers moving left bring in the next desktop.
+                self.menuBarBlackoutController.desktopSwipeMoved(towardNext: motion == .horizontalLeft)
             }
         )
 
@@ -4160,8 +4427,8 @@ final class OnboardingPrimaryButton: NSButton {
         glyphShowsDockVisible = dockVisible
         image.isTemplate = true
         image.accessibilityDescription = dockVisible ? "Dock visible" : "Dock hidden"
+        statusGlyph = image
         statusItem.button?.imagePosition = .imageLeading
-        statusItem.button?.image = image
         updateMenuBarDesktopBadge()
     }
 
@@ -4182,7 +4449,7 @@ final class OnboardingPrimaryButton: NSButton {
             inactiveTitle: inactiveStatusTitle,
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
-                : "App detection paused",
+                : "App: ?",
             inactiveActionTitle: permissionRecoveryRequired
                 && dockAwayEnabled
                 ? permissionActionTitle
@@ -4219,28 +4486,18 @@ final class OnboardingPrimaryButton: NSButton {
         desktopTilesView = tiles
         desktopTilesMenuItem = tilesItem
 
-        let launchAtLogin = NSMenuItem()
-        launchAtLogin.tag = 200
-        let launchAtLoginRowView = DockSettingPersistenceRowView(
-            title: "Launch at Login",
-            isOn: isLaunchAtLoginEnabled(),
-            width: 190,
-            leadingInset: 12,
-            titleLeadingAdjustment: 2
-        ) { [weak self] _ in
-            self?.toggleLaunchAtLogin()
-        }
-        launchAtLogin.view = launchAtLoginRowView
-        self.launchAtLoginRowView = launchAtLoginRowView
-
-        let blacklistItem = NSMenuItem(title: "Blacklist", action: nil, keyEquivalent: "")
+        let blacklistItem = NSMenuItem(title: "Auto-Hide Blacklist", action: nil, keyEquivalent: "")
         blacklistItem.view = DockAwayMenuRowView(
-            title: "Blacklist",
+            title: "Auto-Hide Blacklist",
+            icon: NSImage(
+                systemSymbolName: "hand.raised",
+                accessibilityDescription: "Auto-Hide Blacklist"
+            ),
             hasSubmenu: true,
             leadingInset: 12,
             titleLeadingAdjustment: 2
         )
-        let blacklistMenu = NSMenu(title: "Blacklist")
+        let blacklistMenu = NSMenu(title: "Auto-Hide Blacklist")
         blacklistMenu.autoenablesItems = false
         blacklistMenu.delegate = self
         blacklistItem.submenu = blacklistMenu
@@ -4248,15 +4505,15 @@ final class OnboardingPrimaryButton: NSButton {
         rebuildBlacklistMenu()
 
         let dockSettingsItem = NSMenuItem(
-            title: "Dock Preferences",
+            title: "Dock Settings",
             action: nil,
             keyEquivalent: ""
         )
         dockSettingsItem.view = DockAwayMenuRowView(
-            title: "Dock Preferences",
+            title: "Dock Settings",
             icon: NSImage(
                 systemSymbolName: "slider.horizontal.3",
-                accessibilityDescription: "Dock Preferences"
+                accessibilityDescription: "Dock Settings"
             ),
             hasSubmenu: true,
             leadingInset: 12,
@@ -4265,10 +4522,10 @@ final class OnboardingPrimaryButton: NSButton {
         dockSettingsItem.state = .on
         dockSettingsItem.onStateImage = menuIcon(from: NSImage(
             systemSymbolName: "slider.horizontal.3",
-            accessibilityDescription: "Dock Preferences"
+            accessibilityDescription: "Dock Settings"
         ))
 
-        let dockSettingsMenu = NSMenu(title: "Dock Preferences")
+        let dockSettingsMenu = NSMenu(title: "Dock Settings")
         dockSettingsMenu.autoenablesItems = false
         dockSettingsMenu.delegate = self
 
@@ -4327,7 +4584,7 @@ final class OnboardingPrimaryButton: NSButton {
 
         let keepDockSettingsAfterQuitItem = NSMenuItem()
         keepDockSettingsAfterQuitItem.view = DockSettingSectionHeaderView(
-            title: "Keep Dock Settings After Quit:"
+            title: "Keep Dock Settings After Quit"
         )
         var dockSettingsPersistenceItems = [NSMenuItem]()
         for option in DockSettingPersistenceOption.allCases {
@@ -4363,9 +4620,9 @@ final class OnboardingPrimaryButton: NSButton {
         let restoreDockDefaultsItem = NSMenuItem()
         restoreDockDefaultsItem.view = restoreDockDefaultsRowView
 
-        let dockIconClickMinimizeTitle = "Minimize/Expands App When Dock Icon Clicked"
-        let dockIconClickHideTitle = "Hides/Unhides App When Dock Icon Clicked"
-        let dockIconClickCycleTitle = "Cycle App Windows When Dock Icon Clicked"
+        let dockIconClickMinimizeTitle = "Minimize & Restore"
+        let dockIconClickHideTitle = "Hide & Show"
+        let dockIconClickCycleTitle = "Cycle Through Windows"
         let dockIconActionsWidth = max(CGFloat(360), [
             dockIconClickMinimizeTitle, dockIconClickHideTitle, dockIconClickCycleTitle
         ].map {
@@ -4375,7 +4632,7 @@ final class OnboardingPrimaryButton: NSButton {
         }.max() ?? 360)
         let dockIconActionsHeaderItem = NSMenuItem()
         dockIconActionsHeaderItem.view = DockSettingSectionHeaderView(
-            title: "Dock Icon Actions:",
+            title: "When You Click a Dock Icon",
             width: dockIconActionsWidth
         )
         let dockIconClickMinimizeItem = NSMenuItem(
@@ -4393,7 +4650,7 @@ final class OnboardingPrimaryButton: NSButton {
             trailingInset: 12,
             helpHeading: dockIconClickMinimizeTitle,
             helpTextProvider: {
-                "Click the Dock icon of the app you are using to minimize its open windows. Click it again to restore only the windows DockAway minimized.\n\n• With Cycle App Windows on, this happens only when the app has one window to show.\n• Turning this on turns off Hides/Unhides App When Dock Icon Clicked.\n• Windows minimized another way stay minimized.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
+                "Click the Dock icon of the app you are using to minimize its open windows. Click it again to restore only the windows DockAway minimized.\n\n• With Cycle Through Windows on, this happens only when the app has one window to show.\n• Turning this on turns off Hides/Unhides App When Dock Icon Clicked.\n• Windows minimized another way stay minimized.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
             self?.setDockIconClickOption(DockIconClickMinimizeController.preferenceKey, enabled: enabled)
@@ -4416,7 +4673,7 @@ final class OnboardingPrimaryButton: NSButton {
             trailingInset: 12,
             helpHeading: dockIconClickHideTitle,
             helpTextProvider: {
-                "Click the Dock icon of the app you are using to hide the entire app. Click its Dock icon again to unhide and reactivate it.\n\n• With Cycle App Windows on, this happens only when the app has one window to show.\n• Turning this on turns off Minimize/Expands App When Dock Icon Clicked.\n• Clicking an app that is not currently active keeps the normal macOS activation behavior.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
+                "Click the Dock icon of the app you are using to hide the entire app. Click its Dock icon again to unhide and reactivate it.\n\n• With Cycle Through Windows on, this happens only when the app has one window to show.\n• Turning this on turns off Minimize/Expands App When Dock Icon Clicked.\n• Clicking an app that is not currently active keeps the normal macOS activation behavior.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
             self?.setDockIconClickOption(DockIconClickMinimizeController.hidePreferenceKey, enabled: enabled)
@@ -4477,9 +4734,9 @@ final class OnboardingPrimaryButton: NSButton {
         dockSettingsMenu.addItem(animationSliderItem)
         dockSettingsMenu.addItem(revealDelaySliderItem)
         let moreSettingsItem = NSMenuItem()
-        moreSettingsItem.title = "More Dock Settings..."
+        moreSettingsItem.title = "More Dock Settings…"
         let moreSettingsView = MenuActionItemView(
-            title: "More Dock Settings...",
+            title: "More Dock Settings…",
             titleLeadingInset: 20
         ) { [weak self, weak dockSettingsMenu] in
             dockSettingsMenu?.cancelTracking()
@@ -4491,8 +4748,8 @@ final class OnboardingPrimaryButton: NSButton {
         dockSettingsMenu.addItem(moreSettingsItem)
         dockSettingsMenu.addItem(wideMenuSeparator(width: dockIconActionsWidth, leadingInset: 18, trailingInset: 14))
         dockSettingsMenu.addItem(dockIconActionsHeaderItem)
-        dockSettingsMenu.addItem(dockIconClickMinimizeItem)
         dockSettingsMenu.addItem(dockIconClickHideItem)
+        dockSettingsMenu.addItem(dockIconClickMinimizeItem)
         dockSettingsMenu.addItem(dockIconClickCycleItem)
         dockSettingsMenu.addItem(wideMenuSeparator(width: dockIconActionsWidth, leadingInset: 18, trailingInset: 14))
         dockSettingsMenu.addItem(keepDockSettingsAfterQuitItem)
@@ -4502,19 +4759,18 @@ final class OnboardingPrimaryButton: NSButton {
         dockSettingsMenu.addItem(restoreDockDefaultsItem)
         dockSettingsMenu.addItem(restartItem)
         menu.addItem(wideMenuSeparator(width: 190, leadingInset: 14, trailingInset: 14))
-        menu.addItem(blacklistItem)
         menu.addItem(dockSettingsItem)
+        menu.addItem(blacklistItem)
         menu.addItem(wideMenuSeparator(width: 190, leadingInset: 14, trailingInset: 14))
-        menu.addItem(launchAtLogin)
 
         // --- SPARKLE UPDATE MENU ITEM  ---
         let updateMenuItem = NSMenuItem(
-            title: "Check for Updates...",
+            title: "Check for Updates…",
             action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
             keyEquivalent: ""
         )
         let updateRowView = DockAwayMenuRowView(
-            title: "Check for Updates...",
+            title: "Check for Updates…",
             icon: NSImage(
                 systemSymbolName: "arrow.triangle.2.circlepath",
                 accessibilityDescription: "Check for Updates"
@@ -4550,16 +4806,6 @@ final class OnboardingPrimaryButton: NSButton {
             title: "Update Frequency",
             action: nil,
             keyEquivalent: ""
-        )
-        updateFrequencyItem.view = DockAwayMenuRowView(
-            title: "Update Frequency",
-            icon: NSImage(
-                systemSymbolName: "clock.arrow.circlepath",
-                accessibilityDescription: "Update Frequency"
-            ),
-            hasSubmenu: true,
-            leadingInset: 12,
-            titleLeadingAdjustment: 2
         )
         updateFrequencyItem.state = .on
         updateFrequencyItem.onStateImage = menuIcon(from: NSImage(
@@ -4604,7 +4850,6 @@ final class OnboardingPrimaryButton: NSButton {
         updateFrequencyItem.submenu = updateFrequencyMenu
         self.updateFrequencyMenu = updateFrequencyMenu
         refreshUpdateFrequencyMenu()
-        menu.addItem(updateFrequencyItem)
 
         // DockAway Settings
         menu.addItem(wideMenuSeparator(width: 190, leadingInset: 14, trailingInset: 14))
@@ -4630,25 +4875,25 @@ final class OnboardingPrimaryButton: NSButton {
         self.dockAwaySettingsMenu = dockAwaySettingsMenu
 
         let settingsRowTitles = [
-            "DockAway Desktop Manager",
+            "Desktop Manager",
             "Teleport Pointer in Desktop Manager",
             "Teleport Pointer to Dock Icon's Window",
             "Teleport Pointer on “Move to Display”",
-            "DockAway Keyboard Navigation"
+            "Keyboard Navigation"
         ]
         let maxSettingTitleWidth = settingsRowTitles.map {
             ceil(($0 as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 13)]).width)
         }.max() ?? 200
         // Keep the settings rows compact so help buttons and submenu chevrons
         // share the same right edge without crowding the longest title.
-        let desktopManagerTitleWidth = ceil(("DockAway Desktop Manager" as NSString).size(
+        let desktopManagerTitleWidth = ceil(("Desktop Manager" as NSString).size(
             withAttributes: [.font: NSFont.menuFont(ofSize: 13)]
         ).width)
         let settingsRowWidth = max(240, maxSettingTitleWidth + 76, desktopManagerTitleWidth + 90)
 
-        let desktopManagerItem = NSMenuItem(title: "DockAway Desktop Manager", action: nil, keyEquivalent: "")
+        let desktopManagerItem = NSMenuItem(title: "Desktop Manager", action: nil, keyEquivalent: "")
         let desktopManagerRow = DockSettingToggleRowView(
-            title: "DockAway Desktop Manager",
+            title: "Desktop Manager",
             isOn: isDesktopManagerEnabled,
             width: settingsRowWidth,
             leadingInset: 34,
@@ -4659,6 +4904,38 @@ final class OnboardingPrimaryButton: NSButton {
         desktopManagerRow.autoresizingMask = [.width]
         desktopManagerItem.view = desktopManagerRow
         self.desktopManagerRowView = desktopManagerRow
+
+        // DockAway's own settings lead: whether it opens at login, and how
+        // often it checks for updates.
+        let launchAtLogin = NSMenuItem(title: "Launch at Login", action: nil, keyEquivalent: "")
+        launchAtLogin.tag = 200
+        // A checkbox, like the Teleport Pointer rows below it.
+        let launchAtLoginRowView = DockSettingPersistenceRowView(
+            title: "Launch at Login",
+            isOn: isLaunchAtLoginEnabled(),
+            width: settingsRowWidth,
+            leadingInset: 12, trailingInset: 7, titleLeadingAdjustment: 2,
+            indicatorSize: 14
+        ) { [weak self] _ in
+            self?.toggleLaunchAtLogin()
+        }
+        launchAtLoginRowView.autoresizingMask = [.width]
+        launchAtLogin.view = launchAtLoginRowView
+        self.launchAtLoginRowView = launchAtLoginRowView
+        dockAwaySettingsMenu.addItem(launchAtLogin)
+        updateFrequencyItem.view = DockAwayMenuRowView(
+            title: "Update Frequency",
+            icon: NSImage(
+                systemSymbolName: "clock.arrow.circlepath",
+                accessibilityDescription: "Update Frequency"
+            ),
+            hasSubmenu: true,
+            leadingInset: 12,
+            titleLeadingAdjustment: 0,
+            width: settingsRowWidth
+        )
+        dockAwaySettingsMenu.addItem(updateFrequencyItem)
+        dockAwaySettingsMenu.addItem(wideMenuSeparator(width: settingsRowWidth, leadingInset: 14, trailingInset: 14))
         dockAwaySettingsMenu.addItem(desktopManagerItem)
 
         let managerPointerTitle = "Teleport Pointer in Desktop Manager"
@@ -4679,22 +4956,22 @@ final class OnboardingPrimaryButton: NSButton {
         managerPointerRow.autoresizingMask = [.width]
         managerPointerItem.view = managerPointerRow
 
-        let keyboardNavItem = NSMenuItem(title: "DockAway Keyboard Navigation", action: nil, keyEquivalent: "")
+        let keyboardNavItem = NSMenuItem(title: "Keyboard Navigation", action: nil, keyEquivalent: "")
         keyboardNavItem.view = SubmenuLabelView.keyboardNavigation()
         keyboardNavItem.state = .on
         keyboardNavItem.onStateImage = menuIcon(from: NSImage(
             systemSymbolName: "keyboard",
-            accessibilityDescription: "DockAway Keyboard Navigation"
+            accessibilityDescription: "Keyboard Navigation"
         ))
 
-        let keyboardNavMenu = NSMenu(title: "DockAway Keyboard Navigation")
+        let keyboardNavMenu = NSMenu(title: "Keyboard Navigation")
         keyboardNavMenu.autoenablesItems = false
         keyboardNavMenu.delegate = self
         self.keyboardNavigationMenu = keyboardNavMenu
 
         let navSubmenuWidth: CGFloat = 380
 
-        let enableNavTitle = "Enable Keyboard Navigation"
+        let enableNavTitle = "Keyboard Navigation"
         let enableNavItem = NSMenuItem(title: enableNavTitle, action: nil, keyEquivalent: "")
         let enableNavRow = DockSettingToggleRowView(
             title: enableNavTitle,
@@ -4715,7 +4992,7 @@ final class OnboardingPrimaryButton: NSButton {
         // Each hand can be disabled independently without changing its bindings.
         let rightHandHeaderItem = NSMenuItem(title: "Right Hand", action: nil, keyEquivalent: "")
         let rightHandToggleRow = DockSettingHandToggleHeaderView(
-            title: "Right Hand:",
+            title: "Right Hand",
             isOn: KeyboardNavigationPreferences.isRightHandEnabled,
             width: navSubmenuWidth,
         ) { [weak self] enabled in
@@ -4760,7 +5037,7 @@ final class OnboardingPrimaryButton: NSButton {
         // Left Hand Section (Below)
         let leftHandHeaderItem = NSMenuItem(title: "Left Hand", action: nil, keyEquivalent: "")
         let leftHandToggleRow = DockSettingHandToggleHeaderView(
-            title: "Left Hand:",
+            title: "Left Hand",
             isOn: KeyboardNavigationPreferences.isLeftHandEnabled,
             width: navSubmenuWidth,
         ) { [weak self] enabled in
@@ -4797,7 +5074,7 @@ final class OnboardingPrimaryButton: NSButton {
         keyboardNavMenu.addItem(wideMenuSeparator(width: navSubmenuWidth, leadingInset: 18, trailingInset: 14))
 
         // Reset Keyboard Binds to Default
-        let resetControlsItem = NSMenuItem(title: "Reset Keyboard Binds to Default", action: nil, keyEquivalent: "")
+        let resetControlsItem = NSMenuItem(title: "Reset Shortcuts to Defaults", action: nil, keyEquivalent: "")
         let resetControlsRow = DockSettingResetControlsRowView(
             leadingInset: 18,
             titleLeadingAdjustment: 1.5,
@@ -4904,7 +5181,7 @@ final class OnboardingPrimaryButton: NSButton {
             icon: hoverActivationIcon,
             hasSubmenu: true,
             leadingInset: 12,
-            titleLeadingAdjustment: 2,
+            titleLeadingAdjustment: 0,
             width: settingsRowWidth
         )
         hoverActivationItem.state = .on
@@ -4915,7 +5192,7 @@ final class OnboardingPrimaryButton: NSButton {
         hoverActivationMenu.delegate = self
         let hoverActivationRowWidth = max(settingsRowWidth, 330)
 
-        let hoverEnabledTitle = "Activate Windows on Hover"
+        let hoverEnabledTitle = "Activate on Hover"
         let hoverEnabledItem = NSMenuItem(
             title: hoverEnabledTitle,
             action: nil,
@@ -4926,7 +5203,11 @@ final class OnboardingPrimaryButton: NSButton {
             isOn: HoverActivationController.isEnabled,
             width: hoverActivationRowWidth,
             leadingInset: 18,
-            trailingInset: 12
+            trailingInset: 12,
+            helpHeading: hoverEnabledTitle,
+            helpTextProvider: {
+                "Makes the window under your pointer the active one after the delay below, without a click, so what you type goes where you're pointing.\n\n• Bring Window to Front decides whether it also comes above the windows overlapping it.\n• Wait for Pointer to Stop holds off until the pointer settles.\n• Nothing changes while a menu is open, a mouse button is held, or a desktop is switching.\n• Apps in the Focus Prevention Blacklist aren't activated this way, and keep focus while they're in front."
+            }
         ) { [weak self] enabled in
             UserDefaults.standard.set(
                 enabled,
@@ -4984,7 +5265,11 @@ final class OnboardingPrimaryButton: NSButton {
             isOn: HoverActivationController.waitsForPointerToStop,
             width: hoverActivationRowWidth,
             leadingInset: 18,
-            trailingInset: 12
+            trailingInset: 12,
+            helpHeading: pointerStopTitle,
+            helpTextProvider: {
+                "Waits until the pointer stops moving before focusing or bringing a window forward.\n\n• The Hover Activation Delay starts over whenever the pointer moves.\n• Windows you pass over on the way somewhere else are left alone."
+            }
         ) { [weak self] enabled in
             UserDefaults.standard.set(
                 enabled,
@@ -5001,14 +5286,12 @@ final class OnboardingPrimaryButton: NSButton {
 
         let raiseTitle = "Bring Window to Front"
         let raiseItem = NSMenuItem(title: raiseTitle, action: nil, keyEquivalent: "")
-        let raiseRow = DockSettingPersistenceRowView(
+        let raiseRow = DockSettingToggleRowView(
             title: raiseTitle,
             isOn: HoverActivationController.raisesWindow,
             width: hoverActivationRowWidth,
             leadingInset: 18,
             trailingInset: 12,
-            titleLeadingAdjustment: 1,
-            indicatorSize: 16,
             helpHeading: raiseTitle,
             helpTextProvider: {
                 "Raises the exact hovered window above overlapping windows when it becomes active.\n\nTurn this off when you want keyboard focus to follow the pointer with the least possible change to window order."
@@ -5152,19 +5435,19 @@ final class OnboardingPrimaryButton: NSButton {
         dockAwaySettingsMenu.addItem(displayOrderItem)
         refreshDisplayOrderMenu()
 
-        let desktopIndicatorAppearanceItem = NSMenuItem(title: "Menubar Dock/Desktop Indicator", action: nil, keyEquivalent: "")
+        let desktopIndicatorAppearanceItem = NSMenuItem(title: "Menu Bar Indicator", action: nil, keyEquivalent: "")
         desktopIndicatorAppearanceItem.view = SubmenuLabelView.desktopIndicatorAppearance()
         desktopIndicatorAppearanceItem.state = .on
         desktopIndicatorAppearanceItem.onStateImage = menuIcon(from: NSImage(
             systemSymbolName: "menubar.rectangle",
-            accessibilityDescription: "Menubar Dock/Desktop Indicator"
+            accessibilityDescription: "Menu Bar Indicator"
         ))
-        let desktopIndicatorAppearanceMenu = NSMenu(title: "Menubar Dock/Desktop Indicator")
+        let desktopIndicatorAppearanceMenu = NSMenu(title: "Menu Bar Indicator")
         desktopIndicatorAppearanceMenu.autoenablesItems = false
         desktopIndicatorAppearanceMenu.delegate = self
 
         let tooltipSubmenuWidth: CGFloat = 280
-        let desktopTooltipTitle = "Desktop Change Pill"
+        let desktopTooltipTitle = "Desktop Change Popup"
         let desktopChangeTooltipMenu = NSMenu(title: desktopTooltipTitle)
         desktopChangeTooltipMenu.autoenablesItems = false
         desktopChangeTooltipMenu.delegate = self
@@ -5175,19 +5458,19 @@ final class OnboardingPrimaryButton: NSButton {
             title: "Display Duration",
             leadingTitle: "1 sec",
             trailingTitle: "10 sec",
-            accessibilityLabel: "Tooltip display duration",
-            accessibilityHelp: "Set how long the desktop change pill remains visible on screen.",
+            accessibilityLabel: "Popup display duration",
+            accessibilityHelp: "Set how long the desktop change popup remains visible on screen.",
             width: tooltipSubmenuWidth,
             helpHeading: "Display Duration",
             helpTextProvider: {
-                "Controls how long the desktop change pill stays on screen after switching desktops.\n\n• The tooltip appears centered below the menu bar on the active display.\n• Slide left for a shorter duration or right for a longer duration.\n• Snaps to 2, 4, 6, 8, and 10 seconds.\n• Default duration in DockAway is 4.0 seconds.\n• Changes apply immediately."
+                "Controls how long the desktop change popup stays on screen after switching desktops.\n\n• The popup appears centered below the menu bar on the active display.\n• Slide left for a shorter duration or right for a longer duration.\n• Snaps to every second.\n• Default duration in DockAway is 4.0 seconds.\n• Changes apply immediately."
             }
         )
         tooltipDurationView.slider.minValue = DesktopChangeTooltip.minDuration
         tooltipDurationView.slider.maxValue = DesktopChangeTooltip.maxDuration
-        // Every 2 seconds, including the 4-second default. 10 seconds is the
-        // slider's end, which already stops and taps there.
-        tooltipDurationView.slider.snapMarkerValues = [2, 4, 6, 8]
+        // Every second. 1 and 10 seconds are the slider's ends, which already
+        // stop and tap there.
+        tooltipDurationView.slider.snapMarkerValues = [2, 3, 4, 5, 6, 7, 8, 9]
         tooltipDurationView.slider.target = self
         tooltipDurationView.slider.action = #selector(previewDesktopChangeTooltipDuration(_:))
         tooltipDurationView.slider.commitHandler = { [weak self] val in
@@ -5226,7 +5509,7 @@ final class OnboardingPrimaryButton: NSButton {
         for appearance in [DesktopIndicatorAppearance.systemText] {
             let item = NSMenuItem()
             item.tag = -105
-            let indicatorRow = DesktopIndicatorPreviewRow(title: "Menubar Desktop Indicator")
+            let indicatorRow = DesktopIndicatorPreviewRow(title: "Desktop Number")
             indicatorRow.onPreviewClick = { [weak self] point in
                 // One display has a single look of its own, nothing to pick.
                 guard let self, self.desktopDisplaySections.count > 1 else { return }
@@ -5454,7 +5737,35 @@ final class OnboardingPrimaryButton: NSButton {
                 paddingItem.isHidden = !cleanDesktopTextStyle.usesPill
                 desktopIndicatorAppearanceMenu.addItem(paddingItem)
                 desktopIndicatorAppearanceMenu.addItem(.separator())
-                let separatorItem = NSMenuItem(title: "Desktop Indicator Separator", action: nil, keyEquivalent: "")
+
+                // For the whole indicator on every display, so it sits with
+                // the shared rows rather than one display's style.
+                let menuBarPaddingItem = NSMenuItem()
+                menuBarPaddingItem.tag = -110
+                let menuBarPaddingView = DockSettingSliderView(
+                    title: "Menu Bar Padding", leadingTitle: "None", trailingTitle: "Wide",
+                    accessibilityLabel: "Menu bar padding",
+                    accessibilityHelp: "Add space on each side of DockAway's indicator in the menu bar.",
+                    width: appearanceControlWidth,
+                    helpHeading: "Menu Bar Padding",
+                    helpTextProvider: {
+                        "Adds space on each side of DockAway's indicator, setting it apart from the menu bar items beside it.\n\n• Up to 12 points on each side, on top of the spacing macOS gives every item.\n• Applies to the whole indicator, on every display.\n• None keeps the spacing macOS uses."
+                    }
+                )
+                menuBarPaddingView.slider.minValue = Self.menuBarPaddingRange.lowerBound
+                menuBarPaddingView.slider.maxValue = Self.menuBarPaddingRange.upperBound
+                menuBarPaddingView.slider.snapMarkerValues = [2, 4, 6, 8, 10]
+                menuBarPaddingView.slider.target = self
+                menuBarPaddingView.slider.action = #selector(previewMenuBarPadding(_:))
+                menuBarPaddingView.slider.commitHandler = { [weak self] value in
+                    self?.setMenuBarPadding(value)
+                }
+                menuBarPaddingView.setValue(menuBarPadding, displayText: Self.menuBarPaddingText(menuBarPadding))
+                menuBarPaddingItem.view = menuBarPaddingView
+                self.menuBarPaddingSliderView = menuBarPaddingView
+                desktopIndicatorAppearanceMenu.addItem(menuBarPaddingItem)
+
+                let separatorItem = NSMenuItem(title: "Desktop Number Separator", action: nil, keyEquivalent: "")
                 separatorItem.tag = -101
                 separatorItem.view = SubmenuLabelView.indicatorSeparator()
                 separatorItem.submenu = separatorMenu
@@ -5475,20 +5786,20 @@ final class OnboardingPrimaryButton: NSButton {
         }
         desktopIndicatorAppearanceItem.submenu = desktopIndicatorAppearanceMenu
 
-        let missionControlItem = NSMenuItem(title: "macOS Mission Control Enhancements", action: nil, keyEquivalent: "")
+        let missionControlItem = NSMenuItem(title: "Mission Control", action: nil, keyEquivalent: "")
         missionControlItem.view = SubmenuLabelView.missionControl()
         missionControlItem.state = .on
         missionControlItem.onStateImage = menuIcon(from: NSImage(
             systemSymbolName: "rectangle.3.group",
-            accessibilityDescription: "macOS Mission Control Enhancements"
+            accessibilityDescription: "Mission Control"
         ))
-        let missionControlMenu = NSMenu(title: "macOS Mission Control Enhancements")
+        let missionControlMenu = NSMenu(title: "Mission Control")
         missionControlMenu.delegate = self
         missionControlMenu.autoenablesItems = false
 
-        let expandTitle = "Auto-expand Desktop Strip"
+        let expandTitle = "Auto-Expand Desktop Strip"
         let closeWindowsTitle = "Close Windows in Mission Control"
-        let keyboardTitle = "Use Keyboard Shortcuts in MC"
+        let keyboardTitle = "Keyboard Shortcuts in Mission Control"
         let expandItem = NSMenuItem(title: expandTitle, action: nil, keyEquivalent: "")
         let missionControlRowWidth = ceil([expandTitle, closeWindowsTitle, keyboardTitle].map {
             ($0 as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 13)]).width
@@ -5498,7 +5809,7 @@ final class OnboardingPrimaryButton: NSButton {
             isOn: UserDefaults.standard.bool(forKey: MissionControlAutoExpand.preferenceKey),
             width: missionControlRowWidth, leadingInset: 18, titleLeadingAdjustment: 1,
             font: .menuFont(ofSize: 13), indicatorSize: 16, multiline: false,
-            helpHeading: "Auto-expand Desktop Strip",
+            helpHeading: "Auto-Expand Desktop Strip",
             helpTextProvider: {
                 "Automatically expands the desktop thumbnail strip immediately upon entering Mission Control.\n\n• No need to move your pointer to the top edge to see spaces.\n• Smoothly centers your mouse pointer on the active display so you can click any desktop instantly.\n• Respects trackpad gesture direction and cancels cleanly when dismissed."
             }
@@ -5529,7 +5840,7 @@ final class OnboardingPrimaryButton: NSButton {
             isOn: UserDefaults.standard.bool(forKey: MissionControlWindowClose.keyboardPreferenceKey),
             width: missionControlRowWidth, leadingInset: 18, titleLeadingAdjustment: 1,
             font: .menuFont(ofSize: 13), indicatorSize: 16,
-            helpHeading: "Use Keyboard Shortcuts in MC",
+            helpHeading: "Keyboard Shortcuts in Mission Control",
             helpTextProvider: { [weak self] in
                 self?.dockWatcher?.missionControlKeyboardCommandsToolTip
                     ?? MissionControlWindowClose.shortcutHelp(appName: nil, shortcuts: [])
@@ -5553,7 +5864,7 @@ final class OnboardingPrimaryButton: NSButton {
             ),
             hasSubmenu: true,
             leadingInset: 12,
-            titleLeadingAdjustment: 2,
+            titleLeadingAdjustment: 0,
             width: settingsRowWidth
         )
         extrasItem.state = .on
@@ -5585,7 +5896,7 @@ final class OnboardingPrimaryButton: NSButton {
         mutedSoundItem.view = mutedSoundRow
         mutedVolumeMenuBarRow = mutedSoundRow
 
-        let lockSoundTitle = "Lockscreen Lock Sound"
+        let lockSoundTitle = "Lock Sound"
         let lockSoundItem = NSMenuItem(title: lockSoundTitle, action: nil, keyEquivalent: "")
         let lockSoundRow = DockSettingPersistenceRowView(
             title: lockSoundTitle,
@@ -5599,7 +5910,7 @@ final class OnboardingPrimaryButton: NSButton {
             helpTextProvider: {
                 "Plays a sound whenever you lock your Mac.\n\n• Press ▶︎ to hear it.\n• Uses your current sound output and volume.\n• Works while DockAway is running."
             },
-            previewAccessibilityLabel: "Play Lockscreen Lock Sound",
+            previewAccessibilityLabel: "Play Lock Sound",
             previewHandler: { [weak self] in
                 self?.lockscreenSoundPlayer.play(.lock)
             }
@@ -5611,7 +5922,7 @@ final class OnboardingPrimaryButton: NSButton {
         self.lockSoundRowView = lockSoundRow
         extrasMenu.addItem(lockSoundItem)
 
-        let unlockSoundTitle = "Lockscreen Unlock Sound"
+        let unlockSoundTitle = "Unlock Sound"
         let unlockSoundItem = NSMenuItem(title: unlockSoundTitle, action: nil, keyEquivalent: "")
         let unlockSoundRow = DockSettingPersistenceRowView(
             title: unlockSoundTitle,
@@ -5625,7 +5936,7 @@ final class OnboardingPrimaryButton: NSButton {
             helpTextProvider: {
                 "Plays a sound whenever you unlock your Mac.\n\n• Press ▶︎ to hear it.\n• Uses your current sound output and volume.\n• Works while DockAway is running."
             },
-            previewAccessibilityLabel: "Play Lockscreen Unlock Sound",
+            previewAccessibilityLabel: "Play Unlock Sound",
             previewHandler: { [weak self] in
                 self?.lockscreenSoundPlayer.play(.unlock)
             }
@@ -5638,7 +5949,7 @@ final class OnboardingPrimaryButton: NSButton {
         extrasMenu.addItem(unlockSoundItem)
 
         if fullscreenVideoKeyboardLightController.isAvailable {
-            let keyboardLightTitle = "Keyboard Lighting Off Only for FS Video"
+            let keyboardLightTitle = "Keyboard Light Off for Full-Screen Video"
             let keyboardLightItem = NSMenuItem(title: keyboardLightTitle, action: nil, keyEquivalent: "")
             let keyboardLightRow = DockSettingPersistenceRowView(
                 title: keyboardLightTitle,
@@ -5668,6 +5979,7 @@ final class OnboardingPrimaryButton: NSButton {
                 title: timeoutTitle,
                 icon: NSImage(systemSymbolName: "timer", accessibilityDescription: timeoutTitle),
                 hasSubmenu: true,
+                alignsChevronWithHelpButtons: true,
                 leadingInset: 46,
                 hierarchyParentLeadingInset: 18,
                 titleLeadingAdjustment: 1,
@@ -5745,7 +6057,7 @@ final class OnboardingPrimaryButton: NSButton {
         extrasMenu.addItem(screenshotInstantCopyItem)
         screenshotInstantCopyRow.setControlEnabled(screenshotClipboardManager.isEnabled)
 
-        let greenButtonFillTitle = "Green Button Fills Window"
+        let greenButtonFillTitle = "Fill Window with Green Button"
         let greenButtonFillItem = NSMenuItem(title: greenButtonFillTitle, action: nil, keyEquivalent: "")
         let greenButtonFillRow = DockSettingPersistenceRowView(
             title: greenButtonFillTitle,
@@ -5764,6 +6076,28 @@ final class OnboardingPrimaryButton: NSButton {
         greenButtonFillItem.view = greenButtonFillRow
         self.greenButtonFillRowView = greenButtonFillRow
         extrasMenu.addItem(greenButtonFillItem)
+
+        let forceClickTitle = "Middle Click with Force Click"
+        let forceClickItem = NSMenuItem(title: forceClickTitle, action: nil, keyEquivalent: "")
+        let forceClickRow = DockSettingPersistenceRowView(
+            title: forceClickTitle,
+            isOn: UserDefaults.standard.bool(forKey: ForceClickMiddleClickController.preferenceKey),
+            width: settingsRowWidth,
+            leadingInset: 18,
+            trailingInset: 12,
+            titleLeadingAdjustment: 1,
+            indicatorSize: 16,
+            helpHeading: forceClickTitle,
+            helpTextProvider: {
+                "Press harder on the trackpad, past an ordinary click, to middle click: open a link in a new tab, close a tab, and more.\n\n• Takes the place of Look Up on a force click while it's on.\n• Uses the force click pressure from System Settings > Trackpad, with Force Click and haptic feedback turned on.\n• To tell the two apart, a trackpad click reaches the app as you let go or start dragging. Clicks with a mouse go through as usual."
+            }
+        ) { [weak self] enabled in
+            self?.setForceClickMiddleClickEnabled(enabled)
+        }
+        forceClickRow.autoresizingMask = [.width]
+        forceClickItem.view = forceClickRow
+        self.forceClickMiddleClickRowView = forceClickRow
+        extrasMenu.addItem(forceClickItem)
 
         let finderDeleteKeyTitle = "Delete Finder Items with Delete Key"
         let finderDeleteKeyItem = NSMenuItem(
@@ -5820,8 +6154,63 @@ final class OnboardingPrimaryButton: NSButton {
         quickLookOrientationItem.view = quickLookOrientationRow
         self.quickLookCopyOrientationRowView = quickLookOrientationRow
         extrasMenu.addItem(quickLookOrientationItem)
+
+        let menuBarBlackoutTitle = "Black Out Menu Bar for Filled Screens"
+        let menuBarBlackoutItem = NSMenuItem(title: menuBarBlackoutTitle, action: nil, keyEquivalent: "")
+        let menuBarBlackoutRow = DockSettingPersistenceRowView(
+            title: menuBarBlackoutTitle,
+            isOn: UserDefaults.standard.bool(forKey: MenuBarBlackoutController.preferenceKey),
+            width: settingsRowWidth,
+            leadingInset: 18,
+            trailingInset: 12,
+            titleLeadingAdjustment: 1,
+            indicatorSize: 16,
+            helpHeading: menuBarBlackoutTitle,
+            helpTextProvider: {
+                "Turns the menu bar black while a window fills the screen, so it blends into the window instead of showing your wallpaper.\n\n• Works on each display with its own menu bar.\n• To keep the menu bar text white on lighter wallpapers, DockAway uses a copy of your wallpaper with a black band at the top while the window fills the screen, then puts your wallpaper back.\n• Dynamic and aerial wallpapers can't be copied, so their menu bar text keeps the color macOS picks.\n• Some wallpaper apps keep their wallpapers in their own private folder, which DockAway can only read with Full Disk Access. The first time that keeps the menu bar from turning black, DockAway explains why, and Allow Wallpaper Access appears below this option.\n• Full screen apps are unaffected, since macOS hides the menu bar there."
+            }
+        ) { [weak self] enabled in
+            self?.setMenuBarBlackoutEnabled(enabled)
+        }
+        menuBarBlackoutRow.autoresizingMask = [.width]
+        menuBarBlackoutItem.view = menuBarBlackoutRow
+        self.menuBarBlackoutRowView = menuBarBlackoutRow
+        extrasMenu.addItem(menuBarBlackoutItem)
+
+        // Beneath Black Menu Bar, only while macOS keeps DockAway from
+        // reading the wallpaper, as with a wallpaper app's private folder.
+        let wallpaperAccessTitle = WallpaperAccessExplanation.menuTitle + "…"
+        let wallpaperAccessItem = NSMenuItem(title: wallpaperAccessTitle, action: nil, keyEquivalent: "")
+        wallpaperAccessItem.view = DockAwayMenuRowView(
+            title: wallpaperAccessTitle,
+            icon: NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: wallpaperAccessTitle),
+            leadingInset: 46,
+            hierarchyParentLeadingInset: 18,
+            titleLeadingAdjustment: 1,
+            width: settingsRowWidth,
+            helpHeading: WallpaperAccessExplanation.menuTitle,
+            helpTextProvider: { [weak self] in
+                WallpaperAccessExplanation.menuHelp(for: self?.menuBarBlackoutController.blockedWallpaper)
+            }
+        ) { [weak self] in
+            self?.explainWallpaperAccess()
+        }
+        self.menuBarBlackoutAccessItem = wallpaperAccessItem
+        extrasMenu.addItem(wallpaperAccessItem)
+        refreshMenuBarBlackoutAccessRow()
         extrasMenu.addItem(mutedSoundItem)
 
+        // Wide enough for the longest title, so every row's help button
+        // lines up at the same edge instead of a long title pushing its own
+        // out of line. Title, checkbox, gap, and help take 78 pt between them.
+        let extrasTitleWidth = extrasMenu.items.map {
+            ceil(($0.title as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 13)]).width)
+        }.max() ?? 0
+        let extrasRowWidth = max(settingsRowWidth, extrasTitleWidth + 78)
+        for item in extrasMenu.items {
+            guard let view = item.view, view.frame.width < extrasRowWidth else { continue }
+            view.setFrameSize(NSSize(width: extrasRowWidth, height: view.frame.height))
+        }
         extrasItem.submenu = extrasMenu
         dockAwaySettingsMenu.addItem(extrasItem)
 
@@ -5834,7 +6223,7 @@ final class OnboardingPrimaryButton: NSButton {
             ),
             hasSubmenu: true,
             leadingInset: 12,
-            titleLeadingAdjustment: 2,
+            titleLeadingAdjustment: 0,
             width: settingsRowWidth
         )
         advancedItem.state = .on
@@ -5883,14 +6272,20 @@ final class OnboardingPrimaryButton: NSButton {
 
         let aboutMenuItem = NSMenuItem(title: "About DockAway", action: #selector(showAbout), keyEquivalent: "")
         aboutMenuItem.target = self
-        aboutMenuItem.view = DockAwayMenuRowView(
-            title: "About DockAway",
+        let aboutRowView = DockAwayMenuRowView(
+            title: "About",
             leadingInset: 12,
             titleLeadingAdjustment: 2,
             actionHandler: { [weak self] in
                 self?.showAbout()
             }
         )
+        // The version you have, in gray at the trailing edge.
+        if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+            aboutRowView.detail = "v\(version)"
+            aboutRowView.setAccessibilityLabel("About DockAway, version \(version)")
+        }
+        aboutMenuItem.view = aboutRowView
         menu.addItem(aboutMenuItem)
 
         let quitMenuItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
@@ -6177,11 +6572,84 @@ final class OnboardingPrimaryButton: NSButton {
         extrasDidChange()
     }
 
+    private func setForceClickMiddleClickEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: ForceClickMiddleClickController.preferenceKey)
+        forceClickMiddleClickRowView?.setOn(enabled)
+        refreshForceClickMiddleClickController()
+        extrasDidChange()
+    }
+
+    private func refreshForceClickMiddleClickController() {
+        forceClickMiddleClickController.setEnabled(
+            UserDefaults.standard.bool(forKey: ForceClickMiddleClickController.preferenceKey)
+                && accessibilityAccessGranted
+                && inputMonitoringAccessGranted
+        )
+    }
+
     private func setFinderDeleteKeyEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: FinderDeleteKeyController.preferenceKey)
         finderDeleteKeyRowView?.setOn(enabled)
         refreshFinderDeleteKeyController()
         extrasDidChange()
+    }
+
+    private func setMenuBarBlackoutEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: MenuBarBlackoutController.preferenceKey)
+        menuBarBlackoutRowView?.setOn(enabled)
+        menuBarBlackoutController.setEnabled(enabled)
+        refreshMenuBarBlackoutAccessRow()
+        extrasDidChange()
+    }
+
+    private func refreshMenuBarBlackoutAccessRow() {
+        menuBarBlackoutAccessItem?.isHidden = menuBarBlackoutController.blockedWallpaper == nil
+    }
+
+    private func explainWallpaperAccess() {
+        guard let blocked = menuBarBlackoutController.blockedWallpaper else { return }
+        // Not Now goes back to the app the menu was opened over, rather than
+        // the menu closing reactivating it from under the explanation.
+        let previous = settingsMenuPreviousApplication ?? NSWorkspace.shared.frontmostApplication
+        settingsMenuPreviousApplication = nil
+        markWallpaperAccessExplained(blocked)
+        // Once the menu has closed, outside its event handling.
+        DispatchQueue.main.async { [weak self] in
+            self?.presentWallpaperAccess(blocked, returningTo: previous)
+        }
+    }
+
+    /// The first time a wallpaper app's private folder keeps the menu bar
+    /// from turning black, DockAway explains why by itself, once for each app.
+    /// After that it's in the menu, under Black Menu Bar.
+    private func offerWallpaperAccess(_ blocked: MenuBarBlackoutBlockedWallpaper) {
+        let explained = UserDefaults.standard.stringArray(forKey: Self.wallpaperAccessExplainedKey) ?? []
+        guard !explained.contains(Self.wallpaperAccessExplanationKey(for: blocked)), !statusMenuIsOpen,
+              !wallpaperAccessPrompt.isShowing else { return }
+        markWallpaperAccessExplained(blocked)
+        presentWallpaperAccess(blocked, returningTo: NSWorkspace.shared.frontmostApplication)
+    }
+
+    private static let wallpaperAccessExplainedKey = "menuBarBlackoutWallpaperAccessExplained"
+
+    private static func wallpaperAccessExplanationKey(for blocked: MenuBarBlackoutBlockedWallpaper) -> String {
+        blocked.appFolder ?? "elsewhere"
+    }
+
+    private func markWallpaperAccessExplained(_ blocked: MenuBarBlackoutBlockedWallpaper) {
+        var explained = UserDefaults.standard.stringArray(forKey: Self.wallpaperAccessExplainedKey) ?? []
+        let key = Self.wallpaperAccessExplanationKey(for: blocked)
+        guard !explained.contains(key) else { return }
+        explained.append(key)
+        UserDefaults.standard.set(explained, forKey: Self.wallpaperAccessExplainedKey)
+    }
+
+    private func presentWallpaperAccess(_ blocked: MenuBarBlackoutBlockedWallpaper,
+                                        returningTo previous: NSRunningApplication?) {
+        dockAwayDebugLog("Menu bar blackout: explaining Full Disk Access for the wallpaper")
+        wallpaperAccessPrompt.show(for: blocked, returningTo: previous) { [weak self] in
+            self?.openSystemSettingsPane("com.apple.preference.security?Privacy_AllFiles")
+        }
     }
 
     private func setQuickLookCopyOrientationEnabled(_ enabled: Bool) {
@@ -6200,14 +6668,14 @@ final class OnboardingPrimaryButton: NSButton {
         let defaults = UserDefaults.standard
         var options: [OnboardingExtrasOption] = [
             OnboardingExtrasOption(
-                title: "Lockscreen Lock Sound",
+                title: "Lock Sound",
                 detail: "Plays a sound when you lock your Mac",
                 control: .toggle(isOn: { defaults.bool(forKey: LockscreenSoundPlayer.Event.lock.preferenceKey) },
                                  setOn: { [weak self] in self?.setLockscreenSoundEnabled(.lock, $0) }),
                 preview: { [weak self] in self?.lockscreenSoundPlayer.play(.lock) }
             ),
             OnboardingExtrasOption(
-                title: "Lockscreen Unlock Sound",
+                title: "Unlock Sound",
                 detail: "Plays a sound when you unlock your Mac",
                 control: .toggle(isOn: { defaults.bool(forKey: LockscreenSoundPlayer.Event.unlock.preferenceKey) },
                                  setOn: { [weak self] in self?.setLockscreenSoundEnabled(.unlock, $0) }),
@@ -6217,7 +6685,7 @@ final class OnboardingPrimaryButton: NSButton {
         if fullscreenVideoKeyboardLightController.isAvailable {
             options += [
                 OnboardingExtrasOption(
-                    title: "Keyboard Light Off Only for Fullscreen Video",
+                    title: "Keyboard Light Off for Full-Screen Video",
                     detail: "Turns the keyboard light off only while a video plays fullscreen",
                     control: .toggle(isOn: { defaults.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey) },
                                      setOn: { [weak self] in self?.setKeyboardLightOffForVideo($0) })
@@ -6250,10 +6718,16 @@ final class OnboardingPrimaryButton: NSButton {
                                  setOn: { [weak self] in self?.setScreenshotCopiesInstantly($0) })
             ),
             OnboardingExtrasOption(
-                title: "Green Button Fills Window",
+                title: "Fill Window with Green Button",
                 detail: "Fills the window; hold Option to enter full screen",
                 control: .toggle(isOn: { defaults.bool(forKey: GreenButtonFillController.preferenceKey) },
                                  setOn: { [weak self] in self?.setGreenButtonFillEnabled($0) })
+            ),
+            OnboardingExtrasOption(
+                title: "Middle Click with Force Click",
+                detail: "Press harder on the trackpad to middle click",
+                control: .toggle(isOn: { defaults.bool(forKey: ForceClickMiddleClickController.preferenceKey) },
+                                 setOn: { [weak self] in self?.setForceClickMiddleClickEnabled($0) })
             ),
             OnboardingExtrasOption(
                 title: "Delete Finder Items with Delete Key",
@@ -6266,6 +6740,12 @@ final class OnboardingPrimaryButton: NSButton {
                 detail: "Keeps images copied from Quick Look upright when pasted",
                 control: .toggle(isOn: { defaults.bool(forKey: QuickLookCopyOrientationManager.preferenceKey) },
                                  setOn: { [weak self] in self?.setQuickLookCopyOrientationEnabled($0) })
+            ),
+            OnboardingExtrasOption(
+                title: "Black Out Menu Bar for Filled Screens",
+                detail: "Blacks out the menu bar while a window fills the screen",
+                control: .toggle(isOn: { defaults.bool(forKey: MenuBarBlackoutController.preferenceKey) },
+                                 setOn: { [weak self] in self?.setMenuBarBlackoutEnabled($0) })
             ),
             OnboardingExtrasOption(
                 title: "Show Sound Icon When Muted",
@@ -6308,9 +6788,16 @@ final class OnboardingPrimaryButton: NSButton {
         finderDeleteKeyRowView?.setOn(
             UserDefaults.standard.bool(forKey: FinderDeleteKeyController.preferenceKey)
         )
+        forceClickMiddleClickRowView?.setOn(
+            UserDefaults.standard.bool(forKey: ForceClickMiddleClickController.preferenceKey)
+        )
         quickLookCopyOrientationRowView?.setOn(
             UserDefaults.standard.bool(forKey: QuickLookCopyOrientationManager.preferenceKey)
         )
+        menuBarBlackoutRowView?.setOn(
+            UserDefaults.standard.bool(forKey: MenuBarBlackoutController.preferenceKey)
+        )
+        refreshMenuBarBlackoutAccessRow()
         refreshHoverActivationMenu()
         chromiumWebAppPlacementRowView?.setOn(
             ChromiumWebAppPlacementController.isEnabled
@@ -6367,7 +6854,7 @@ final class OnboardingPrimaryButton: NSButton {
         hoverActivationPointerStopRowView?.setOn(
             HoverActivationController.waitsForPointerToStop
         )
-        hoverActivationPointerStopRowView?.setControlEnabled(enabled)
+        hoverActivationPointerStopRowView?.setControlEnabled(enabled, updateMenuItem: false)
         hoverActivationRaiseRowView?.setOn(HoverActivationController.raisesWindow)
         hoverActivationRaiseRowView?.setControlEnabled(enabled, updateMenuItem: false)
         hoverActivationDelaySliderView?.slider.isEnabled = enabled
@@ -6407,6 +6894,7 @@ final class OnboardingPrimaryButton: NSButton {
             defaults.set(false, forKey: DockIconClickMinimizeController.preferenceKey)
         }
         refreshDockIconClickMinimizeController()
+        refreshDockSettingsMenu()
     }
 
     private func refreshDockIconClickMinimizeController() {
@@ -6664,6 +7152,10 @@ final class OnboardingPrimaryButton: NSButton {
                 radiusView.setPercentage(normalizedRadius * 100, usesSystemDefault: false)
                 continue
             }
+            if item.tag == -110, let menuBarPaddingView = item.view as? DockSettingSliderView {
+                menuBarPaddingView.setValue(menuBarPadding, displayText: Self.menuBarPaddingText(menuBarPadding))
+                continue
+            }
             if item.tag == -103, let paddingView = item.view as? PillPaddingSlidersView {
                 if item.isHidden != !style.usesPill {
                     item.isHidden = !style.usesPill
@@ -6720,7 +7212,7 @@ final class OnboardingPrimaryButton: NSButton {
             targetAppearance.performAsCurrentDrawingAppearance {
                 grouped = self.groupedDisplayIndicatorText()
                 text = grouped ?? style.text(current: current, total: total, isFullscreen: isFS,
-                    dockIndicator: self.showsMenuBarDockIndicator ? self.statusItem.button?.image : nil)
+                    dockIndicator: self.showsMenuBarDockIndicator ? self.statusGlyph : nil)
             }
             // The preview shows both parts and greys out whichever is turned off.
             let desktopIndicatorAlpha: CGFloat = currentDesktopIndicatorAppearance == .none ? 0.35 : 1
@@ -6728,7 +7220,7 @@ final class OnboardingPrimaryButton: NSButton {
             // A single display's pill can hold the Dock arrows; a group of
             // displays shows them in front, like the menu bar does.
             let showsLogo = grouped != nil || !(style.usesPill && style.encapsulatesDockIndicator)
-            let rawLogo = showsLogo ? (statusItem.button?.image ?? NSImage(named: isDockCurrentlyVisible() ? "DockAwayStatus-Up" : "DockAwayStatus-Down")) : nil
+            let rawLogo = showsLogo ? (statusGlyph ?? NSImage(named: isDockCurrentlyVisible() ? "DockAwayStatus-Up" : "DockAwayStatus-Down")) : nil
             let logoSize = rawLogo?.size ?? .zero
             let logoColor: NSColor = isDark ? .white : .black
             let logo: NSImage? = rawLogo.map { img in
@@ -6769,9 +7261,9 @@ final class OnboardingPrimaryButton: NSButton {
         let encapsulated = appearance == .systemText && style.usesPill && style.encapsulatesDockIndicator
         var cleanText: NSAttributedString!
         targetAppearance.performAsCurrentDrawingAppearance {
-            cleanText = style.text(current: current, total: total, isFullscreen: isFS, dockIndicator: self.statusItem.button?.image)
+            cleanText = style.text(current: current, total: total, isFullscreen: isFS, dockIndicator: self.statusGlyph)
         }
-        let sourceLogo = statusItem.button?.image ?? NSImage(named: isDockCurrentlyVisible() ? "DockAwayStatus-Up" : "DockAwayStatus-Down")
+        let sourceLogo = statusGlyph ?? NSImage(named: isDockCurrentlyVisible() ? "DockAwayStatus-Up" : "DockAwayStatus-Down")
         let logoColor: NSColor = isDark ? .white : .black
         let logoSize = sourceLogo?.size ?? NSSize(width: 22, height: 16)
         let logo = NSImage(size: logoSize, flipped: false) { rect in
@@ -7027,19 +7519,19 @@ final class OnboardingPrimaryButton: NSButton {
         )
         dockRevealDelaySliderView.slider.isEnabled = canRestartDock && !revealDelayIsForced
         refreshDockSettingsPersistenceRows()
-        dockIconClickMinimizeRowView?.setOn(
-            UserDefaults.standard.bool(
-                forKey: DockIconClickMinimizeController.preferenceKey
-            )
+        let minimizeEnabled = UserDefaults.standard.bool(
+            forKey: DockIconClickMinimizeController.preferenceKey
         )
-        dockIconClickHideRowView?.setOn(
-            UserDefaults.standard.bool(
-                forKey: DockIconClickMinimizeController.hidePreferenceKey
-            )
+        let hideEnabled = UserDefaults.standard.bool(
+            forKey: DockIconClickMinimizeController.hidePreferenceKey
         )
-        dockIconClickCycleRowView?.setOn(
-            UserDefaults.standard.bool(forKey: DockIconClickMinimizeController.cyclePreferenceKey)
+        let cycleEnabled = UserDefaults.standard.bool(
+            forKey: DockIconClickMinimizeController.cyclePreferenceKey
         )
+        let hasCustomDockIconActions = minimizeEnabled || hideEnabled || cycleEnabled
+        dockIconClickMinimizeRowView?.setOn(minimizeEnabled)
+        dockIconClickHideRowView?.setOn(hideEnabled)
+        dockIconClickCycleRowView?.setOn(cycleEnabled)
 
         let resettableKeys = [
             Self.dockOrientationKey,
@@ -7052,6 +7544,7 @@ final class OnboardingPrimaryButton: NSButton {
         let allDockSettingsUseDefaults = orientation == DockPosition.bottom.preferenceValue
             && animationUsesSystemDefault
             && revealDelayUsesSystemDefault
+            && !hasCustomDockIconActions
         if allDockSettingsUseDefaults {
             restoreDockDefaultsRowView?.setTitle("Restore Default macOS Dock Settings")
             restoreDockDefaultsRowView?.setControlEnabled(false)
@@ -7059,7 +7552,7 @@ final class OnboardingPrimaryButton: NSButton {
         } else {
             restoreDockDefaultsRowView?.setTitle("Restore Default macOS Dock Settings")
             restoreDockDefaultsRowView?.setControlEnabled(
-                canRestartDock && !resettableKeys.isEmpty
+                (canRestartDock && !resettableKeys.isEmpty) || hasCustomDockIconActions
             )
             restoreDockDefaultsRowView?.setOn(false)
         }
@@ -7160,8 +7653,25 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     @objc private func restoreDefaultDockSettings() {
+        let defaults = UserDefaults.standard
+        let hadDockIconActions = defaults.bool(
+            forKey: DockIconClickMinimizeController.preferenceKey
+        ) || defaults.bool(
+            forKey: DockIconClickMinimizeController.hidePreferenceKey
+        ) || defaults.bool(
+            forKey: DockIconClickMinimizeController.cyclePreferenceKey
+        )
+        if hadDockIconActions {
+            defaults.set(false, forKey: DockIconClickMinimizeController.preferenceKey)
+            defaults.set(false, forKey: DockIconClickMinimizeController.hidePreferenceKey)
+            defaults.set(false, forKey: DockIconClickMinimizeController.cyclePreferenceKey)
+            refreshDockIconClickMinimizeController()
+        }
+
         guard dockSettingsCanRestartDock else {
-            NSSound.beep()
+            if !hadDockIconActions {
+                NSSound.beep()
+            }
             refreshDockSettingsMenu()
             return
         }
@@ -7298,7 +7808,7 @@ final class OnboardingPrimaryButton: NSButton {
             dockAwayDebugLog("Native Dock restart failed; reason=\(reason.rawValue): \(errorMessage)")
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = reason == .preferences ? "Dock Preferences" : "Restart Dock"
+            alert.messageText = reason == .preferences ? "Dock Settings" : "Restart Dock"
             alert.informativeText = errorMessage
             alert.addButton(withTitle: "OK")
             NSApp.activate(ignoringOtherApps: true)
@@ -7312,10 +7822,21 @@ final class OnboardingPrimaryButton: NSButton {
         guard let updateMenuItem else { return }
         let updateIsAvailable = availableUpdateVersion != nil
         let title: String
+        // The version being replaced, grayed, then the new one.
+        var dimmedRange: NSRange?
+        var accessibilityTitle: String?
         if let version = availableUpdateVersion {
-            title = "Update Available v\(version)"
+            let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            if let current, current != version {
+                let replaced = "v\(current) →"
+                title = "Update Available: \(replaced) v\(version)"
+                dimmedRange = (title as NSString).range(of: replaced)
+                accessibilityTitle = "Update Available: version \(version), replacing version \(current)"
+            } else {
+                title = "Update Available: v\(version)"
+            }
         } else {
-            title = "Check for Updates..."
+            title = "Check for Updates…"
         }
         updateMenuItem.title = title
 
@@ -7330,10 +7851,14 @@ final class OnboardingPrimaryButton: NSButton {
         )
         updateMenuItem.state = .on
         updateMenuItem.onStateImage = menuIcon(from: icon)
-        (updateMenuItem.view as? DockAwayMenuRowView)?.update(
-            title: title,
-            icon: icon
-        )
+        if let row = updateMenuItem.view as? DockAwayMenuRowView {
+            row.update(title: title, icon: icon)
+            row.dimmedTitleRange = dimmedRange
+            if let accessibilityTitle { row.setAccessibilityLabel(accessibilityTitle) }
+            // The menu widens to show the whole title while an update waits,
+            // and returns to its usual width once there's none.
+            row.setFrameSize(NSSize(width: max(190, row.titleFittingWidth), height: row.frame.height))
+        }
     }
 
     private func refreshUpdateFrequencyMenu() {
@@ -7874,7 +8399,7 @@ final class OnboardingPrimaryButton: NSButton {
         blacklistMenu.addItem(.separator())
 
         let helpItem = NSMenuItem()
-        helpItem.title = "About Blacklist"
+        helpItem.title = "About Auto-Hide Blacklist"
         helpItem.view = BlacklistHelpMenuItemView()
         helpItem.target = helpItem.view
         helpItem.action = #selector(BlacklistHelpMenuItemView.performMenuAction(_:))
@@ -8011,7 +8536,7 @@ final class OnboardingPrimaryButton: NSButton {
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = "Remove All Blacklisted Apps?"
-            alert.informativeText = "Are you sure you want to:\nRemove \(applicationCount) apps from the blacklist?"
+            alert.informativeText = "Are you sure you want to:\nRemove \(applicationCount) apps from the Auto-Hide Blacklist?"
             alert.addButton(withTitle: "Remove All")
             alert.addButton(withTitle: "Cancel")
             alert.buttons.first?.hasDestructiveAction = true
@@ -8048,9 +8573,11 @@ final class OnboardingPrimaryButton: NSButton {
         }
     }
 
-    func updateStatus(_ text: String, desktopText: String? = nil) {
+    /// A nil `text` keeps the app last named.
+    func updateStatus(_ text: String?, desktopText: String? = nil) {
         let applyUpdate = { [weak self] in
             guard let self, self.monitoringShouldRun else { return }
+            let text = text ?? self.activeStatusText
             guard self.activeStatusText != text || self.activeDesktopStatusText != desktopText else { return }
             self.activeStatusText = text
             self.activeDesktopStatusText = desktopText
@@ -8128,7 +8655,7 @@ final class OnboardingPrimaryButton: NSButton {
             inactiveTitle: inactiveStatusTitle,
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
-                : "App detection paused",
+                : "App: ?",
             inactiveActionTitle: permissionRecoveryRequired
                 && dockAwayEnabled
                 ? permissionActionTitle
@@ -8182,20 +8709,54 @@ final class OnboardingPrimaryButton: NSButton {
                   let image = desktopTileIcon(for: app) else { return nil }
             let identity = app.bundleIdentifier ?? app.bundleURL?.path ?? "pid:\(pid)"
             guard seen.insert(identity).inserted else { return nil }
-            return DesktopApplicationIcon(name: app.localizedName ?? "App", image: image, bundleIdentifier: app.bundleIdentifier)
+            return DesktopApplicationIcon(name: app.localizedName ?? "App", image: image,
+                                          bundleIdentifier: app.bundleIdentifier, processIdentifier: pid)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     /// Looks up one desktop's apps off the main thread, for the desktop-change pill.
-    private func fetchDesktopApplicationIcons(for spaceID: UInt64, completion: @escaping @MainActor ([NSImage]) -> Void) {
+    private func fetchDesktopApplicationIcons(for spaceID: UInt64,
+                                              completion: @escaping @MainActor ([DesktopChangeAppIcon]) -> Void) {
         Task { [weak self] in
             let pids: [Int32] = await Task.detached(priority: .userInitiated) {
                 DockAwayCopyDesktopApplicationPIDs([NSNumber(value: spaceID)])?[NSNumber(value: spaceID)]?
                     .map(\.int32Value) ?? []
             }.value
             guard let self else { return }
-            completion(self.desktopApplicationIcons(for: pids).map(\.image))
+            let icons = self.desktopApplicationIcons(for: pids).compactMap { icon in
+                icon.processIdentifier.map {
+                    DesktopChangeAppIcon(image: icon.image, processIdentifier: $0, name: icon.name)
+                }
+            }
+            // The desktop's apps come front to back, so the first with an icon
+            // owns its frontmost window: the app in front when you're there.
+            let current = pids.first { pid in icons.contains { $0.processIdentifier == pid } }
+            completion(DesktopChangeTooltip.leadingWithCurrentApp(icons, current: current))
         }
+    }
+
+    /// Brings forward an app picked in the desktop-change pill, with its
+    /// window on the desktop showing in front, rather than letting macOS
+    /// switch to another desktop where it also has one.
+    private func focusApplicationFromPill(_ processIdentifier: pid_t) {
+        guard let app = NSRunningApplication(processIdentifier: processIdentifier), !app.isTerminated else { return }
+        let onScreen = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []).filter {
+                ($0[kCGWindowOwnerPID as String] as? pid_t) == processIdentifier
+                    && ($0[kCGWindowLayer as String] as? Int) == 0
+            }.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
+        let element = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(element, 0.2)
+        let windows = element.elements(kAXWindowsAttribute) ?? []
+        // Front to back, so it's the window last used on this desktop.
+        let window = onScreen.lazy.compactMap { id in windows.first { $0.windowID == id } }.first
+        if let window {
+            _ = AXUIElementSetAttributeValue(element, kAXFocusedWindowAttribute as CFString, window)
+            _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        }
+        _ = app.activate(options: [])
+        if let window { _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString) }
     }
 
     private func desktopApplicationSpaceIDs() -> [UInt64] {
@@ -8276,28 +8837,20 @@ final class OnboardingPrimaryButton: NSButton {
         let activeDisplayID = desktopDisplaySections.first { section in
             pointer.map { CGDisplayBounds(section.snapshot.displayID).contains($0) } ?? false
         }?.snapshot.displayID ?? displayID
-        let destinations = desktopDisplaySections.compactMap { section -> DesktopChangeDestination? in
-            let snapshot = section.snapshot
-            if let index = snapshot.desktopIDs.firstIndex(of: snapshot.currentID) {
-                return DesktopChangeDestination(displayID: snapshot.displayID, spaceID: snapshot.currentID,
-                    title: "Desktop \(index + 1) of \(snapshot.desktopIDs.count)",
-                    displayName: section.name, isFullscreen: false)
-            }
-            guard snapshot.fullscreenSpaceIDs.contains(snapshot.currentID) else { return nil }
-            return DesktopChangeDestination(displayID: snapshot.displayID, spaceID: snapshot.currentID,
-                title: snapshot.fullscreenApplicationNames[snapshot.currentID] ?? "Fullscreen",
-                displayName: section.name, isFullscreen: true)
+        let destinations = desktopDisplaySections.compactMap { section in
+            Self.desktopChangeDestination(section.snapshot, spaceID: section.snapshot.currentID,
+                                          displayName: section.name)
         }
         desktopChangeTooltip.update(
             destinations,
             preferredDisplayID: activeDisplayID
         ) { [weak self] in
-            guard let self else { return false }
-            return !self.isQuitting && self.monitoringShouldRun && !self.statusMenuIsOpen
-                && !self.permissionSetupInProgress && self.startedPopover == nil
-                && self.dockWatcher?.isMissionControlActive != true
-                && !self.desktopSwitcher.isSwitching
+            self?.desktopChangePillCanPresent() ?? false
         }
+        if let current = destinations.first(where: { $0.displayID == activeDisplayID }) ?? destinations.first {
+            desktopChangeTooltip.prepare(for: current)
+        }
+        prefetchDesktopSwipeIcons()
         recordDisplayUsage(activeDisplayID)
         let keys = desktopDisplaySections.map { indicatorDisplayKey($0.snapshot.displayID) }
         let order = DisplayListOrder.current.indices(keys: keys, active: indicatorDisplayKey(activeDisplayID),
@@ -8319,6 +8872,70 @@ final class OnboardingPrimaryButton: NSButton {
         }
         updateMenuBarDesktopBadge()
     }
+
+    private static func desktopChangeDestination(_ snapshot: DesktopSelectionSnapshot, spaceID: UInt64,
+                                                 displayName: String) -> DesktopChangeDestination? {
+        if let index = snapshot.desktopIDs.firstIndex(of: spaceID) {
+            return DesktopChangeDestination(displayID: snapshot.displayID, spaceID: spaceID,
+                title: "Desktop \(index + 1) of \(snapshot.desktopIDs.count)",
+                displayName: displayName, isFullscreen: false)
+        }
+        guard snapshot.fullscreenSpaceIDs.contains(spaceID) else { return nil }
+        return DesktopChangeDestination(displayID: snapshot.displayID, spaceID: spaceID,
+            title: snapshot.fullscreenApplicationNames[spaceID] ?? "Fullscreen",
+            displayName: displayName, isFullscreen: true)
+    }
+
+    private func desktopChangePillCanPresent() -> Bool {
+        !isQuitting && monitoringShouldRun && !statusMenuIsOpen
+            && !permissionSetupInProgress && startedPopover == nil
+            && dockWatcher?.isMissionControlActive != true
+            && !desktopSwitcher.isSwitching
+    }
+
+    /// The desktops of the display a swipe moves.
+    private func desktopSwipeDesktops() -> DesktopSelectionSnapshot? {
+        let pointer = CGEvent(source: nil)?.location
+        guard let section = desktopDisplaySections.first(where: { section in
+                  pointer.map { CGDisplayBounds(section.snapshot.displayID).contains($0) } ?? false
+              }) ?? (desktopDisplaySections.count == 1 ? desktopDisplaySections.first : nil) else { return nil }
+        return dockWatcher?.desktopSelection(on: section.snapshot.displayID)
+    }
+
+    /// Looks up the app icons of the desktops either side, after each change
+    /// and as a swipe starts, so the pill shows them the moment it arrives.
+    private func prefetchDesktopSwipeIcons() {
+        guard UserDefaults.standard.bool(forKey: DesktopChangeTooltip.preferenceKey),
+              DesktopChangeTooltip.showsAppIcons, let desktops = desktopSwipeDesktops() else { return }
+        desktopChangeTooltip.prefetchAppIcons(for: [true, false].compactMap {
+            DesktopSwipePreview.adjacentSpace(in: desktops.orderedSpaceIDs, from: desktops.currentID, forward: $0)
+        })
+    }
+
+    #if DEBUG
+    /// Debug builds only: replays a trackpad swipe's sequence on request, to
+    /// watch the pill without a trackpad. Fingers touch down, and a moment
+    /// later the desktop slides with the system's own shortcut.
+    /// Post the distributed notification "AK.DockAway.debug.desktopSwipe"
+    /// with "next" or "previous" as its object.
+    private func observeDebugDesktopSwipes() {
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("AK.DockAway.debug.desktopSwipe"), object: nil, queue: .main
+        ) { [weak self] notification in
+            let towardNext = (notification.object as? String) != "previous"
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.prefetchDesktopSwipeIcons()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    guard let shortcut = DesktopNavigationShortcut.current(right: towardNext),
+                          let (down, up) = DesktopNavigationInput.events(for: shortcut, releaseFlags: []) else { return }
+                    down.post(tap: .cghidEventTap)
+                    up.post(tap: .cghidEventTap)
+                }
+            }
+        }
+    }
+    #endif
 
     private func reorderDesktop(_ source: UInt64, onto target: UInt64, after: Bool = false) {
         desktopInteractionTrace("reorder requested")
@@ -8399,9 +9016,9 @@ final class OnboardingPrimaryButton: NSButton {
             await Task.detached(priority: .userInitiated) {
                 DockAwayJumpToDesktop(target, current)
             }.value
-        }, completion: { [weak self] message in
+        }, completion: { [weak self] outcome in
             guard let self else { return }
-            if message == nil {
+            if outcome == .arrived {
                 if shouldMoveCursor,
                    CGDisplayIsActive(initial.displayID) != 0,
                    NSEvent.pressedMouseButtons == 0 {
@@ -8415,7 +9032,7 @@ final class OnboardingPrimaryButton: NSButton {
             }
             self.dockWatcher?.refreshStatus()
             self.refreshDesktopTiles()
-            if let message {
+            if case .failed(let message) = outcome {
                 let alert = NSAlert()
                 alert.messageText = "Desktop switching stopped"
                 alert.informativeText = message
@@ -8521,18 +9138,23 @@ final class OnboardingPrimaryButton: NSButton {
                 await Task.detached(priority: .userInitiated) {
                     DockAwayJumpToDesktop(target, current)
                 }.value
-            }, completion: { [weak self] message in
+            }, completion: { [weak self] outcome in
                 guard let self, !self.isQuitting else { return }
                 self.refreshDesktopTiles()
-                if message == nil {
+                switch outcome {
+                case .arrived:
                     DockAwayActivateSpace(neighbor)
                     self.closeDesktop(identifier, restoreMenu: shouldRestoreMenu, didSwitchAway: true)
-                } else {
+                case .failed(let message):
                     let alert = NSAlert()
                     alert.messageText = "Desktop wasn't closed"
-                    alert.informativeText = message ?? "Unable to switch away from the current desktop."
+                    alert.informativeText = message
                     alert.runModal()
                     self.restoreMenuAfterDesktopRemoval(shouldRestoreMenu)
+                case .cancelled:
+                    // A click or key press of the person's own stopped it, so
+                    // the menu stays closed and nothing waits to refocus.
+                    self.pendingRestoredKeyboardSpaceID = nil
                 }
             })
             return true
@@ -9136,7 +9758,7 @@ final class OnboardingPrimaryButton: NSButton {
         permissionHeading.textColor = .labelColor
 
         let launchAtLoginContainer = DockSettingPersistenceRowView(
-            title: "Launch DockAway at Login",
+            title: "Launch at Login",
             isOn: isLaunchAtLoginEnabled(),
             width: 460,
             leadingInset: 20,
@@ -10546,6 +11168,7 @@ final class OnboardingPrimaryButton: NSButton {
         refreshDockIconClickMinimizeController()
         refreshChromiumWebAppPlacementController()
         refreshFinderDeleteKeyController()
+        refreshForceClickMiddleClickController()
         refreshHoverActivationController()
         if !accessibilityAccessGranted || !inputMonitoringAccessGranted {
             fourFingersDown = false
@@ -10846,6 +11469,7 @@ final class OnboardingPrimaryButton: NSButton {
     func applicationWillTerminate(_ notification: Notification) {
         mutedVolumeMenuBarController.stop()
         fullscreenVideoKeyboardLightController.stop()
+        menuBarBlackoutController.stop()
         isQuitting = true
         statusItemSpaceRefresh.cancel()
         desktopChangeTooltip.dismiss()
@@ -10854,6 +11478,7 @@ final class OnboardingPrimaryButton: NSButton {
         screenshotClipboardManager.restoreThumbnail()
         greenButtonFillController.stop()
         finderDeleteKeyController.stop()
+        forceClickMiddleClickController.stop()
         quickLookCopyOrientationManager.stop()
         hoverActivationController.stop()
         dockIconClickMinimizeController.stop()
@@ -10888,6 +11513,14 @@ extension AppDelegate: SPUUpdaterDelegate {
     // has enabled automatic downloads and installation.
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         showAvailableUpdate(item)
+    }
+
+    // A later check with nothing to install, such as after a version is
+    // withdrawn from the feed, turns the row back into Check for Updates.
+    // A check that fails, such as offline, doesn't come here, so it leaves
+    // an update already found in place.
+    func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+        clearAvailableUpdateIndicator()
     }
 
     func updater(

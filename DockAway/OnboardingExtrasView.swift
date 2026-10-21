@@ -88,10 +88,13 @@ final class OnboardingExtrasView: NSView {
     }
 
     private func updateColors() {
-        // Matches the keyboard page's cards.
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
-        separators.forEach { $0.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor }
+        // Matches the keyboard page's cards. The lines take the text color,
+        // so they show in Light Mode as well as Dark.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
+            layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
+            separators.forEach { $0.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor }
+        }
     }
 
     private func addFullWidth(_ view: NSView) {
