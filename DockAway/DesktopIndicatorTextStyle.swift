@@ -423,7 +423,7 @@ final class DesktopIndicatorSeparatorOptionsView: NSView {
         // Custom Separator Row
         let customRowWidth = totalWidth - padX * 2 - 32.0
         let row = DockSettingPersistenceRowView(
-            title: "Custom...",
+            title: "Custom…",
             isOn: false,
             width: customRowWidth,
             leadingInset: 0,
@@ -486,7 +486,7 @@ final class DesktopIndicatorSeparatorOptionsView: NSView {
 
     private func presentCustomSeparatorPrompt(currentValue: String?) {
         let alert = NSAlert()
-        alert.messageText = "Custom Desktop Indicator Separator"
+        alert.messageText = "Custom Desktop Number Separator"
         alert.informativeText = "Enter a custom symbol, text, or emoji to use between desktop numbers (e.g., “|”, “~”, “to”):"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
@@ -555,7 +555,7 @@ final class DesktopIndicatorSeparatorOptionsView: NSView {
             customRow?.toolTip = tip
             customRow?.checkboxControl.toolTip = tip
         } else {
-            customRow?.setTitle("Custom...")
+            customRow?.setTitle("Custom…")
             customEditButton?.isHidden = true
             let tip = "Type a custom separator symbol, text, or emoji."
             customRow?.toolTip = tip
@@ -569,7 +569,7 @@ final class DesktopIndicatorSeparatorMenu: NSMenu {
     private let optionsView = DesktopIndicatorSeparatorOptionsView(frame: .zero)
 
     init() {
-        super.init(title: "Desktop Indicator Separator")
+        super.init(title: "Desktop Number Separator")
         autoenablesItems = false
         let item = NSMenuItem()
         item.view = optionsView

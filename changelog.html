@@ -9,6 +9,41 @@
     </style>
 </head>
 <body>
+    <h3>Version 2.1.4 <span style="font-weight: normal;">(10-21-26)</span></h3>
+    <h4>New Features</h4>
+    <ul>
+        <li><b>Black Out Menu Bar for Filled Screens:</b> A new option in "Extras" turns the menu bar black while a window fills the screen, so it blends into the window instead of showing your wallpaper. A thin black frame runs down the sides of the window too, with the window showing through an opening rounded like its corners and traced by a thin gray border, and the black fades in and out smoothly. Swiping between desktops that each have a window filling the screen keeps the menu bar black the whole way. The menu bar text stays white on any still-image wallpaper: DockAway uses a copy of your wallpaper with a black band at the top while the window fills the screen, and puts yours back as soon as it doesn't, or the moment you lock the screen or it sleeps, so the lock screen always shows your own wallpaper. Dynamic and aerial wallpapers can't be copied, so with those the menu bar only turns black when its text is already white. Some wallpaper apps keep their wallpapers in their own private folder, which macOS keeps DockAway out of. The first time that keeps the menu bar from turning black, DockAway explains why it needs "Full Disk Access" to read your wallpaper and what it does with it, and opens the setting for you. "Allow Wallpaper Access" stays under the option until DockAway can read it.</li>
+        <li><b>Middle Click with Force Click:</b> A new option in "Extras" turns a force click on the trackpad, pressing on past an ordinary click, into a middle click, so you can open a link in a new tab or close a tab without a mouse. It uses the force click pressure set in System Settings and takes the place of Look Up while it's on. Clicks with a mouse are unchanged.</li>
+    </ul>
+    <h4>Improvements</h4>
+    <ul>
+        <li><b>Smoother Desktop Change Popup:</b> The popup now fades in gently the moment you arrive on a desktop, with that desktop's app icons already in place instead of filling in afterward, including when you swipe on while it's still showing. The first popup after DockAway starts now appears as quickly as the rest.</li>
+        <li><b>Click an App in the Desktop Change Popup:</b> With "Show App Icons" on, clicking an app's icon in the popup brings that app forward, with its window on the desktop you're on in front. Icons grow slightly as you point at them, and the popup stays while your pointer is over it, going away at its usual time once you move off it.</li>
+        <li><b>App in Front Leads the Desktop Change Popup:</b> With "Show App Icons" on, the row of app icons now starts with the app in front on that desktop, set apart from the rest by a thin line, and the others follow by name. Switch to another of the desktop's apps while the popup shows, and it moves to the front.</li>
+        <li><b>Menu Bar Padding:</b> A new slider in "Menu Bar Indicator" adds up to 12 points of space on each side of DockAway's indicator, setting it apart from the menu bar items beside it.</li>
+        <li><b>Clearer Setting Names:</b> Settings now use shorter, more consistent names, the same in the menu and in setup. "Menubar Dock/Desktop Indicator" is now "Menu Bar Indicator", with "Dock Arrows", "Desktop Number", and "Desktop Number Separator" inside it. "macOS Mission Control Enhancements" is now "Mission Control", with "Keyboard Shortcuts in Mission Control" inside it, and "Dock Preferences" is now "Dock Settings". Under "When You Click a Dock Icon", the options are now "Minimize &amp; Restore", "Hide &amp; Show", and "Cycle Through Windows". "DockAway Desktop Manager" and "DockAway Keyboard Navigation" are now "Desktop Manager" and "Keyboard Navigation", as is the "Enable Keyboard Navigation" switch, "Activate Windows on Hover" is now "Activate on Hover", and "Keyboard Lighting Off Only for FS Video" is now "Keyboard Light Off for Full-Screen Video". "Desktop Change Pill" is now "Desktop Change Popup", "Green Button Fills Window" is now "Fill Window with Green Button", "Reset Keyboard Binds to Default" is now "Reset Shortcuts to Defaults", and "Lockscreen Lock Sound" and "Lockscreen Unlock Sound" are now "Lock Sound" and "Unlock Sound". "Blacklist" is now "Auto-Hide Blacklist", setting it apart from "Focus Prevention Blacklist".</li>
+        <li><b>A Shorter Main Menu:</b> "Launch at Login" and "Update Frequency" have moved to the top of "DockAway Settings".</li>
+        <li><b>Update Shows Both Versions:</b> When an update is ready, the menu shows the version you have, grayed out, and the one you'll get, such as "Update Available: v2.1.3 → v2.1.4".</li>
+        <li><b>About Shows Your Version:</b> "About DockAway" in the menu is now "About", with the version you have shown in gray beside it.</li>
+        <li><b>Auto-Hide Blacklist Gets an Icon:</b> "Auto-Hide Blacklist" in the menu now shows a raised hand, like "Focus Prevention Blacklist", lining up with "Dock Settings" above it.</li>
+    </ul>
+    <h4>Bug Fixes</h4>
+    <ul>
+        <li><b>Clicks Just Above the Dock Reach the App:</b> With "Minimize &amp; Restore", "Hide &amp; Show", or "Cycle Through Windows" turned on and the Dock showing, a click in an app's window just above the Dock could count as a click on the Dock icon below it, minimizing, hiding, or cycling that app instead. Only clicks on the Dock's icons count now.</li>
+        <li><b>Menu Shows the App You're Using:</b> On macOS 26, DockAway's menu said "App: DockAway" while it was open. It now names the app you were using.</li>
+        <li><b>Command and Option No Longer Stay Held:</b> After DockAway showed or hid the Dock, or turned Delete into Move to Trash in Finder, macOS could go on treating Command, and Option, as held down even though you'd let go, which apps checking for held keys could pick up. DockAway now releases them.</li>
+        <li><b>Desktop Change Popup Stays Out of Mission Control:</b> If the popup was still showing when you opened Mission Control, it stayed on screen over it and kept changing as you moved between desktops there. It now goes away as soon as Mission Control opens.</li>
+        <li><b>Finder Comes to Your Desktop From the Dock:</b> With "Open Web Apps &amp; Finder on Active Desktop" turned on, clicking Finder in the Dock while it had a window on another desktop of the same display took you to that desktop. The window now comes to the desktop you're on.</li>
+        <li><b>Menu Bar Indicator Changes Color With the Other Icons:</b> When the menu bar switches between black and white text, such as when you swipe to a desktop with a lighter or darker wallpaper, DockAway's indicator now changes color at the same moment as the rest of the menu bar instead of a second later.</li>
+        <li><b>Keyboard Light Turns Off for More Full-Screen Players:</b> "Keyboard Light Off for Full-Screen Video" now also notices players that fill the screen without a fullscreen desktop of their own, the moment they do, instead of only after you switch apps or desktops.</li>
+        <li><b>Pill Corner Radius Keeps Its Value for All Displays:</b> With two or more displays and "All Displays" chosen, a corner radius between the presets snapped back to 30% or 100%. It now stays where you set it.</li>
+        <li><b>Onboarding Reads Clearly in Light Mode:</b> The borders and dividers of the setup cards now show in Light Mode, and "Shortcuts Reset" is no longer white on a light button.</li>
+        <li><b>Onboarding Hand Switches Stay On:</b> With "Keyboard Navigation" off, turning on the left- or right-hand switch during setup no longer snaps it back to off.</li>
+        <li><b>Click Sounds Play Once When Dragging From the Dock:</b> With "Minimize &amp; Restore", "Hide &amp; Show", or "Cycle Through Windows" turned on, dragging an icon out of the Dock made click-sound apps such as Klack play the press twice. They now play it once.</li>
+        <li><b>Settings Titles Line Up:</b> In "DockAway Settings", the titles of "Activate on Hover", "Extras", and "Advanced" sat slightly to the right of the others. All the titles now line up.</li>
+    </ul>
+    <hr>
+
     <h3>Version 2.1.3 <span style="font-weight: normal;">(10-13-26)</span></h3>
     <h4>New Features</h4>
     <ul>

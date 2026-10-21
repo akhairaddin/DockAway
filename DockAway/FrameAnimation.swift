@@ -7,6 +7,15 @@ nonisolated func easeInOutCubic(_ progress: Double) -> Double {
     return t < 0.5 ? 4 * t * t * t : 1 - pow(-2 * t + 2, 3) / 2
 }
 
+/// Cubic ease-out over 0...1: quick to start, settling gently. Core
+/// Animation's matching timing is `easeOutCubicTiming`.
+nonisolated func easeOutCubic(_ progress: Double) -> Double {
+    let t = min(1, max(0, progress))
+    return 1 - pow(1 - t, 3)
+}
+
+let easeOutCubicTiming = CAMediaTimingFunction(controlPoints: 0.33, 1, 0.68, 1)
+
 /// Core Animation's standard ease-in-ease-out curve (control points 0.42, 0,
 /// 0.58, 1), for main-thread animations that must match one Core Animation
 /// or `NSAnimationContext` runs with that timing.

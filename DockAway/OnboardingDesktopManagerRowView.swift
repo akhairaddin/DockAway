@@ -70,7 +70,7 @@ final class OnboardingDesktopManagerRowView: NSView, NSPopoverDelegate {
         wantsLayer = true
         layer?.cornerRadius = 12
         layer?.borderWidth = 0.5
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
         layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
 
         // Preview thumbnail container
@@ -94,7 +94,7 @@ final class OnboardingDesktopManagerRowView: NSView, NSPopoverDelegate {
         previewClipView.layer?.cornerCurve = .continuous
         previewClipView.layer?.masksToBounds = true
         previewClipView.layer?.borderWidth = 1.0
-        previewClipView.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        previewClipView.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.18).cgColor
         previewContainerView.addSubview(previewClipView)
         NSLayoutConstraint.activate([
             previewClipView.leadingAnchor.constraint(equalTo: previewContainerView.leadingAnchor),
@@ -296,10 +296,12 @@ final class OnboardingDesktopManagerRowView: NSView, NSPopoverDelegate {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
-        previewClipView.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
-        previewContainerView.layer?.shadowColor = NSColor.black.withAlphaComponent(0.22).cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
+            layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
+            previewClipView.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.18).cgColor
+            previewContainerView.layer?.shadowColor = NSColor.black.withAlphaComponent(0.22).cgColor
+        }
         updateVisualAppearance(isOn: toggle.state == .on, animated: false)
     }
 
@@ -374,7 +376,7 @@ final class OnboardingDesktopManagerRowView: NSView, NSPopoverDelegate {
         clipView.layer?.cornerCurve = .continuous
         clipView.layer?.masksToBounds = true
         clipView.layer?.borderWidth = 1.0
-        clipView.layer?.borderColor = NSColor.white.withAlphaComponent(0.20).cgColor
+        clipView.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.20).cgColor
         var imageViews: [NSImageView] = []
         for name in [Self.separatePreviewName, Self.sharedPreviewName] {
             let imageView = NSImageView()

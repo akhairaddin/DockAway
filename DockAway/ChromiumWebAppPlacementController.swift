@@ -541,8 +541,12 @@ final class ChromiumWebAppPlacementController {
         return ids
     }
 
+    /// Windows on the display's current desktop. One on another desktop, or
+    /// minimized, doesn't count, or the Dock click would leave macOS to pull
+    /// you away to it.
     static func regularWindowCount(for pid: pid_t, on displayID: CGDirectDisplayID) -> Int {
-        guard let windowInfo = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else {
+        guard let windowInfo = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                          kCGNullWindowID) as? [[String: Any]] else {
             return 0
         }
         let activeDisplays = CursorTeleportManager.activeDisplays()

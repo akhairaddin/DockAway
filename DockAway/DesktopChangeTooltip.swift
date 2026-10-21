@@ -82,6 +82,85 @@ private final class DesktopTooltipAnchorPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// An app with a window on the desktop the pill shows.
+struct DesktopChangeAppIcon {
+    let image: NSImage
+    let processIdentifier: pid_t
+    let name: String
+    /// The app in front on that desktop, which leads the row.
+    var isCurrent = false
+}
+
+/// The thin line between the app in front and the rest of the pill's icons.
+private final class DesktopChangeAppIconSeparator: NSView {
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: DesktopChangeTooltip.currentAppSeparatorWidth, height: 14)
+    }
+    override var allowsVibrancy: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.tertiaryLabelColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: bounds.width / 2, yRadius: bounds.width / 2).fill()
+    }
+}
+
+/// One of the pill's app icons, which brings that app forward when clicked.
+private final class DesktopChangeAppIconButton: NSButton {
+    let processIdentifier: pid_t
+    /// How much a hovered icon grows, about its center.
+    private static let hoverScale: CGFloat = 1.18
+    var isHovered = false {
+        didSet {
+            guard isHovered != oldValue else { return }
+            applyScale(animated: true)
+        }
+    }
+
+    init(icon: DesktopChangeAppIcon) {
+        processIdentifier = icon.processIdentifier
+        super.init(frame: .zero)
+        image = icon.image
+        imageScaling = .scaleProportionallyUpOrDown
+        isBordered = false
+        title = ""
+        wantsLayer = true
+        setButtonType(.momentaryChange)
+        setAccessibilityLabel(icon.name)
+        toolTip = icon.name
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    // The pill never becomes active, so the first click counts.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func layout() {
+        super.layout()
+        applyScale(animated: false)
+    }
+
+    private func applyScale(animated: Bool) {
+        guard let layer, bounds.width > 0 else { return }
+        let scale = isHovered ? Self.hoverScale : 1
+        // A layer scales about its anchor point; this keeps the icon centered.
+        let offsetX = bounds.midX - layer.anchorPoint.x * bounds.width
+        let offsetY = bounds.midY - layer.anchorPoint.y * bounds.height
+        let target = CATransform3DConcat(
+            CATransform3DConcat(CATransform3DMakeTranslation(-offsetX, -offsetY, 0),
+                                CATransform3DMakeScale(scale, scale, 1)),
+            CATransform3DMakeTranslation(offsetX, offsetY, 0))
+        let current = layer.presentation()?.transform ?? layer.transform
+        layer.transform = target
+        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let grow = CABasicAnimation(keyPath: "transform")
+        grow.fromValue = NSValue(caTransform3D: current)
+        grow.toValue = NSValue(caTransform3D: target)
+        grow.duration = 0.14
+        grow.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(grow, forKey: "hoverScale")
+    }
+}
+
 @MainActor
 final class DesktopChangeTooltip: NSObject {
     // Native glass draws its rim and optical effects beyond its layout bounds.
@@ -106,6 +185,21 @@ final class DesktopChangeTooltip: NSObject {
     /// The most icons in one row.
     static let maximumAppIcons = 6
     static let appIconSpacing: CGFloat = 4
+    /// The line after the app in front, and the space on each side of it.
+    static let currentAppSeparatorWidth: CGFloat = 1
+    static let currentAppSeparatorGap: CGFloat = 5
+    /// How much wider the separator makes its row than an ordinary gap would.
+    static var currentAppSeparatorExtraWidth: CGFloat {
+        currentAppSeparatorWidth + 2 * currentAppSeparatorGap - appIconSpacing
+    }
+    /// The least space kept between a row of icons and the pill's edge.
+    private static let iconRowMinimumMargin: CGFloat = 12
+    /// The room the separator takes from its row's icons. It reaches into the
+    /// pill's padding instead, so a row holds as many apps as without it.
+    static var currentAppSeparatorRowCost: CGFloat {
+        max(0, currentAppSeparatorExtraWidth
+            - (pillLeadingPadding + pillTrailingPadding - 2 * iconRowMinimumMargin))
+    }
     /// Gap between the text and the app icons beneath it.
     static let appIconRowSpacing: CGFloat = 6
     /// The pill's height without app icons.
@@ -160,20 +254,51 @@ final class DesktopChangeTooltip: NSObject {
     /// How many icons go in each row. Icons that fit in one row stay in one;
     /// beyond that they split evenly over two rows, the top one taking any
     /// extra (7 is 4 and 3). When even two full rows can't hold them all, the
-    /// second row ends with "+N".
+    /// second row ends with "+N". `firstRowExtraWidth` is room the top row
+    /// needs besides its icons, such as for the separator after the app in front.
     static func appIconRowCounts(total: Int, rowWidth: CGFloat, iconSize: CGFloat,
-                                 overflowLabelWidth: CGFloat) -> [Int] {
-        let perRow = min(maximumAppIcons, Int((rowWidth + appIconSpacing) / (iconSize + appIconSpacing)))
-        guard total > 0, perRow > 0 else { return [] }
-        guard total > perRow else { return [total] }
-        guard total > 2 * perRow else { return [(total + 1) / 2, total / 2] }
-        return [perRow, visibleAppIconCount(total: total - perRow, rowWidth: rowWidth, iconSize: iconSize,
-                                            overflowLabelWidth: overflowLabelWidth)]
+                                 overflowLabelWidth: CGFloat, firstRowExtraWidth: CGFloat = 0) -> [Int] {
+        func fitting(_ width: CGFloat) -> Int {
+            max(0, min(maximumAppIcons, Int((width + appIconSpacing) / (iconSize + appIconSpacing))))
+        }
+        let perRow = fitting(rowWidth)
+        let perFirstRow = fitting(rowWidth - firstRowExtraWidth)
+        guard total > 0, perFirstRow > 0 else { return [] }
+        guard total > perFirstRow else { return [total] }
+        guard total > perFirstRow + perRow else {
+            let top = min(perFirstRow, (total + 1) / 2)
+            return [top, total - top]
+        }
+        return [perFirstRow, visibleAppIconCount(total: total - perFirstRow, rowWidth: rowWidth,
+                                                 iconSize: iconSize, overflowLabelWidth: overflowLabelWidth)]
+    }
+
+    /// The app in front leads, marked as current, then the rest by name. With
+    /// no app in front among them, they're all by name.
+    static func leadingWithCurrentApp(_ icons: [DesktopChangeAppIcon], current: pid_t?) -> [DesktopChangeAppIcon] {
+        var lead: DesktopChangeAppIcon?
+        var rest: [DesktopChangeAppIcon] = []
+        for var icon in icons {
+            icon.isCurrent = icon.processIdentifier == current && lead == nil
+            if icon.isCurrent { lead = icon } else { rest.append(icon) }
+        }
+        rest.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        return (lead.map { [$0] } ?? []) + rest
     }
 
 
     /// Looks up a desktop's app icons, calling back on the main thread.
-    var appIconProvider: ((UInt64, @escaping @MainActor ([NSImage]) -> Void) -> Void)?
+    var appIconProvider: ((UInt64, @escaping @MainActor ([DesktopChangeAppIcon]) -> Void) -> Void)?
+    /// Brings forward the app whose icon was clicked.
+    var onAppIconClick: ((pid_t) -> Void)?
+    /// Follows the pointer while the pill shows, so the pill takes clicks
+    /// only while the pointer is over it.
+    private var pointerMonitors: [Any] = []
+    /// Moves the app you switch to to the front of the row while the pill shows.
+    private var activationObserver: NSObjectProtocol?
+    /// Whether the pill steps aside, even while showing, such as in Mission
+    /// Control, which shows the desktops itself.
+    var mustStepAside: @MainActor () -> Bool = { false }
 
     private var tracker = DesktopChangeTracker()
     private var presentation: DispatchWorkItem?
@@ -214,11 +339,21 @@ final class DesktopChangeTooltip: NSObject {
     /// The current column of icon rows.
     private weak var appIconStrip: NSStackView?
     private weak var pillSurface: NSView?
-    private var displayedAppIcons: [NSImage] = []
+    private var displayedAppIcons: [DesktopChangeAppIcon] = []
     private let appIconSize: CGFloat = 18
     private var canRemainVisible: (@MainActor () -> Bool)?
     private var dismissalDeadline: TimeInterval = 0
-
+    /// A window being built ahead of the first desktop change.
+    private var preparing = false
+    /// App icons of the desktops beside the current one, looked up as a swipe
+    /// starts, so the pill has them the moment the swipe arrives.
+    private var prefetchedAppIcons: [UInt64: (icons: [DesktopChangeAppIcon], time: TimeInterval)] = [:]
+    /// Lookups still under way, with whatever is waiting for each.
+    private var prefetchWaiters: [UInt64: [@MainActor ([DesktopChangeAppIcon]) -> Void]] = [:]
+    private static let prefetchedIconsLifetime: TimeInterval = 4
+    /// The pill eases in, settling this far down into place.
+    private static let revealDrop: CGFloat = 5
+    private static let revealDuration: TimeInterval = 0.25
     func resetPanel() {
         dismiss(animated: false)
         activePanel = nil
@@ -260,6 +395,10 @@ final class DesktopChangeTooltip: NSObject {
             }
             return
         }
+        if isPresented && mustStepAside() {
+            dismiss(animated: true)
+            return
+        }
         generation += 1
         presentation?.cancel()
         presentation = nil
@@ -274,6 +413,22 @@ final class DesktopChangeTooltip: NSObject {
             return
         }
         show(destination)
+    }
+
+    /// Looks up the app icons of the desktops a swipe could go to, so the
+    /// pill shows them the moment the swipe arrives.
+    func prefetchAppIcons(for spaceIDs: [UInt64]) {
+        guard Self.showsAppIcons, let appIconProvider,
+              UserDefaults.standard.bool(forKey: Self.preferenceKey) else { return }
+        for spaceID in spaceIDs where prefetchWaiters[spaceID] == nil {
+            prefetchWaiters[spaceID] = []
+            appIconProvider(spaceID) { [weak self] icons in
+                guard let self else { return }
+                self.prefetchedAppIcons[spaceID] = (icons, ProcessInfo.processInfo.systemUptime)
+                let waiters = self.prefetchWaiters.removeValue(forKey: spaceID) ?? []
+                waiters.forEach { $0(icons) }
+            }
+        }
     }
 
     private func schedule(_ destination: DesktopChangeDestination, generation: Int,
@@ -303,6 +458,7 @@ final class DesktopChangeTooltip: NSObject {
     }
 
     func dismiss(animated: Bool = false) {
+        stopFollowingPointer()
         generation += 1
         let closingGeneration = generation
         presentation?.cancel()
@@ -427,9 +583,14 @@ final class DesktopChangeTooltip: NSObject {
     private func checkDismissal(generation: Int) {
         let close = DispatchWorkItem { [weak self] in
             guard let self, self.generation == generation, self.isPresented else { return }
+            if self.mustStepAside() {
+                self.dismiss(animated: true)
+                return
+            }
             let now = ProcessInfo.processInfo.systemUptime
             let ready = self.canRemainVisible?() != false
-            if !ready || self.gestureContactsActive {
+            // It also stays while the pointer rests on it, to pick an app.
+            if !ready || self.gestureContactsActive || self.pointerIsOverPill {
                 self.dismissalDeadline = now + self.readingDuration
             }
             if now >= self.dismissalDeadline {
@@ -458,6 +619,38 @@ final class DesktopChangeTooltip: NSObject {
             return
         }
 
+        buildPanel(for: destination)
+        guard let panel = activePanel else { return }
+        presentationActive = true
+        scheduleDismissal()
+        revealWithIcons(panel, destination: destination)
+    }
+
+    /// Builds the pill's window ahead of the first desktop change, so that
+    /// one appears as quickly as every later one. The window is drawn once,
+    /// invisibly, then stays hidden until it's needed.
+    func prepare(for destination: DesktopChangeDestination) {
+        guard activePanel == nil, !preparing, UserDefaults.standard.bool(forKey: Self.preferenceKey) else { return }
+        preparing = true
+        // Out of the way of everything else DockAway does as it starts.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.preparing = false
+            guard self.activePanel == nil, UserDefaults.standard.bool(forKey: Self.preferenceKey) else { return }
+            self.buildPanel(for: destination)
+            guard let panel = self.activePanel else { return }
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+            panel.contentView?.displayIfNeeded()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak panel] in
+                guard let self, !self.presentationActive else { return }
+                panel?.orderOut(nil)
+            }
+        }
+    }
+
+    /// Builds the pill's window, hidden, showing the given desktop.
+    private func buildPanel(for destination: DesktopChangeDestination) {
         displayedAppIcons = []
         showsIconRow = Self.showsAppIcons
         iconRowCount = 1
@@ -602,9 +795,6 @@ final class DesktopChangeTooltip: NSObject {
         panel.contentView = container
         container.layoutSubtreeIfNeeded()
         activePanel = panel
-        presentationActive = true
-        scheduleDismissal()
-        revealWithIcons(panel, destination: destination)
     }
 
     /// Fades the pill in with its icons already in place, waiting only briefly
@@ -638,15 +828,30 @@ final class DesktopChangeTooltip: NSObject {
             return
         }
         let spaceID = destination.spaceID
-        appIconProvider(spaceID) { [weak self] icons in
+        if let prefetched = prefetchedAppIcons[spaceID],
+           ProcessInfo.processInfo.systemUptime - prefetched.time < Self.prefetchedIconsLifetime {
+            if displayedDestination?.spaceID == spaceID, appIconArea != nil {
+                setAppIcons(prefetched.icons, crossFade: crossFade)
+            }
+            completion?()
+            return
+        }
+        let apply: @MainActor ([DesktopChangeAppIcon]) -> Void = { [weak self] icons in
             defer { completion?() }
             guard let self, self.displayedDestination?.spaceID == spaceID, self.appIconArea != nil else { return }
             self.setAppIcons(icons, crossFade: crossFade)
         }
+        if prefetchWaiters[spaceID] != nil {
+            prefetchWaiters[spaceID]?.append(apply)
+        } else {
+            appIconProvider(spaceID, apply)
+        }
     }
 
-    private func setAppIcons(_ icons: [NSImage], crossFade: Bool) {
-        let unchanged = icons.map(ObjectIdentifier.init) == displayedAppIcons.map(ObjectIdentifier.init)
+    private func setAppIcons(_ icons: [DesktopChangeAppIcon], crossFade: Bool) {
+        let unchanged = icons.map { ObjectIdentifier($0.image) } == displayedAppIcons.map { ObjectIdentifier($0.image) }
+            && icons.map(\.processIdentifier) == displayedAppIcons.map(\.processIdentifier)
+            && icons.map(\.isCurrent) == displayedAppIcons.map(\.isCurrent)
         displayedAppIcons = icons
         guard let area = appIconArea else { return }
         if unchanged, appIconStrip != nil { return }
@@ -694,12 +899,88 @@ final class DesktopChangeTooltip: NSObject {
     }
 
     /// The icons and labels in a column, which fade individually.
+    // MARK: - Clickable icons
+
+    private var iconButtons: [DesktopChangeAppIconButton] {
+        guard let strip = appIconStrip else { return [] }
+        return Self.fadingViews(in: strip).compactMap { $0 as? DesktopChangeAppIconButton }
+    }
+
+    private var pointerIsOverPill: Bool {
+        guard let panel = activePanel, panel.isVisible else { return false }
+        return panel.frame.insetBy(dx: Self.glassOverflowInset, dy: Self.glassOverflowInset)
+            .contains(NSEvent.mouseLocation)
+    }
+
+    private func startFollowingPointer() {
+        guard pointerMonitors.isEmpty else { return }
+        activePanel?.acceptsMouseMovedEvents = true
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: { [weak self] _ in
+            MainActor.assumeIsolated { self?.followPointer() }
+        }) {
+            pointerMonitors.append(global)
+        }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved], handler: { [weak self] event in
+            self?.followPointer()
+            return event
+        }) {
+            pointerMonitors.append(local)
+        }
+        followPointer()
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            MainActor.assumeIsolated { self?.frontmostApplicationChanged(app?.processIdentifier) }
+        }
+    }
+
+    private func stopFollowingPointer() {
+        pointerMonitors.forEach(NSEvent.removeMonitor)
+        pointerMonitors.removeAll()
+        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
+        activationObserver = nil
+        iconButtons.forEach { $0.isHovered = false }
+        activePanel?.ignoresMouseEvents = true
+    }
+
+    /// With the pointer over the pill, the pill takes its clicks, so what's
+    /// beneath can't be clicked through it; only its icons act on them.
+    /// Anywhere else, clicks go through as if it weren't there.
+    private func followPointer() {
+        guard let panel = activePanel, presentationActive, panel.isVisible else { return }
+        let pointer = NSEvent.mouseLocation
+        let overPill = pointerIsOverPill
+        let hovered = !overPill ? nil : iconButtons.first { button in
+            guard let window = button.window, !button.isHiddenOrHasHiddenAncestor else { return false }
+            return window.convertToScreen(button.convert(button.bounds, to: nil)).contains(pointer)
+        }
+        for button in iconButtons { button.isHovered = button === hovered }
+        if panel.ignoresMouseEvents == overPill { panel.ignoresMouseEvents = !overPill }
+    }
+
+    /// The app in front is usually known before the pill shows, from the
+    /// desktop's window order. When another of its apps comes forward while
+    /// the pill shows, such as the one macOS picks as you arrive, it moves to
+    /// the front of the row.
+    private func frontmostApplicationChanged(_ processIdentifier: pid_t?) {
+        guard presentationActive, let processIdentifier,
+              displayedAppIcons.contains(where: { $0.processIdentifier == processIdentifier }) else { return }
+        setAppIcons(Self.leadingWithCurrentApp(displayedAppIcons, current: processIdentifier), crossFade: true)
+    }
+
+    @objc private func appIconClicked(_ sender: DesktopChangeAppIconButton) {
+        let processIdentifier = sender.processIdentifier
+        dismiss(animated: true)
+        onAppIconClick?(processIdentifier)
+    }
+
     private static func fadingViews(in strip: NSStackView) -> [NSView] {
         strip.arrangedSubviews.flatMap { ($0 as? NSStackView)?.arrangedSubviews ?? [$0] }
     }
 
     /// A column of icon rows for the given apps, empty when there are none.
-    private func makeAppIconStrip(for icons: [NSImage]) -> (strip: NSStackView, rowCount: Int) {
+    private func makeAppIconStrip(for icons: [DesktopChangeAppIcon]) -> (strip: NSStackView, rowCount: Int) {
         let strip = NSStackView()
         strip.orientation = .vertical
         strip.alignment = .centerX
@@ -708,11 +989,14 @@ final class DesktopChangeTooltip: NSObject {
         guard !icons.isEmpty else { return (strip, 0) }
         let size = appIconSize
         let overflowWidth = ceil(("+\(icons.count)" as NSString).size(withAttributes: [.font: Self.overflowFont]).width)
+        // The app in front leads, set apart from the rest by a thin line.
+        let leadsWithCurrent = icons.count > 1 && icons[0].isCurrent
         let rowCounts = Self.appIconRowCounts(
             total: icons.count,
             rowWidth: contentWidth - Self.pillLeadingPadding - Self.pillTrailingPadding,
             iconSize: size,
-            overflowLabelWidth: overflowWidth
+            overflowLabelWidth: overflowWidth,
+            firstRowExtraWidth: leadsWithCurrent ? Self.currentAppSeparatorRowCost : 0
         )
         let shown = rowCounts.reduce(0, +)
         var remaining = icons.prefix(shown)[...]
@@ -724,16 +1008,23 @@ final class DesktopChangeTooltip: NSObject {
             // Hug the icons, so a shorter row is centered instead of stretched
             // to the column's width with its icons pushed to the left.
             row.setHuggingPriority(.required, for: .horizontal)
-            for image in remaining.prefix(count) {
-                let view = NSImageView(image: image)
-                view.imageScaling = .scaleProportionallyUpOrDown
-                view.setAccessibilityElement(false)
+            for icon in remaining.prefix(count) {
+                let view = DesktopChangeAppIconButton(icon: icon)
+                view.target = self
+                view.action = #selector(appIconClicked(_:))
                 view.translatesAutoresizingMaskIntoConstraints = false
                 NSLayoutConstraint.activate([
                     view.widthAnchor.constraint(equalToConstant: size),
                     view.heightAnchor.constraint(equalToConstant: size)
                 ])
                 row.addArrangedSubview(view)
+                if leadsWithCurrent, icon.isCurrent {
+                    let separator = DesktopChangeAppIconSeparator()
+                    separator.setAccessibilityElement(false)
+                    row.addArrangedSubview(separator)
+                    row.setCustomSpacing(Self.currentAppSeparatorGap, after: view)
+                    row.setCustomSpacing(Self.currentAppSeparatorGap, after: separator)
+                }
             }
             remaining = remaining.dropFirst(count)
             if index == rowCounts.count - 1, shown < icons.count {
@@ -792,15 +1083,43 @@ final class DesktopChangeTooltip: NSObject {
         }
     }
 
+    /// Eases the pill in, settling a few points down into place under the
+    /// menu bar. One still fading out comes straight back instead.
     private func reveal(_ panel: NSPanel) {
-        panel.alphaValue = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 1 : 0
-        panel.orderFrontRegardless()
-        if panel.alphaValue == 0 {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                panel.animator().alphaValue = 1
+        startFollowingPointer()
+        let fadingOut = panel.isVisible && panel.alphaValue > 0
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            panel.alphaValue = 1
+            panel.orderFrontRegardless()
+            return
+        }
+        if !fadingOut {
+            panel.alphaValue = 0
+            let target = panel.frame
+            panel.setFrame(target.offsetBy(dx: 0, dy: Self.revealDrop), display: false)
+            panel.orderFrontRegardless()
+            if let view = panel.contentView {
+                // A resize starting meanwhile takes over from wherever it is.
+                resizeAnimation?.invalidate()
+                let scale = panel.backingScaleFactor
+                resizeAnimation = EasedAnimation(view: view, duration: Self.revealDuration,
+                                                 curve: easeOutCubic) { [weak self, weak panel] progress, finished in
+                    guard let panel else { return }
+                    let y = ((target.minY + Self.revealDrop * (1 - progress)) * scale).rounded() / scale
+                    panel.setFrame(finished ? target : NSRect(x: target.minX, y: y, width: target.width,
+                                                              height: target.height), display: true)
+                    if finished { self?.resizeAnimation = nil }
+                }
+            } else {
+                panel.setFrame(target, display: true)
             }
+        } else {
+            panel.orderFrontRegardless()
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.revealDuration
+            context.timingFunction = easeOutCubicTiming
+            panel.animator().alphaValue = 1
         }
     }
 }

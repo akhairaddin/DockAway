@@ -95,7 +95,10 @@ final class QuickLookCopyOrientationManager {
         correctionGeneration &+= 1
         let generation = correctionGeneration
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let corrected = Self.correctedRepresentations(from: source) else { return }
+            // An upright image is copied right already. Leaving it alone
+            // saves decoding it and filling the clipboard with a large TIFF.
+            guard !Self.isUpright(source),
+                  let corrected = Self.correctedRepresentations(from: source) else { return }
             RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) {
                 MainActor.assumeIsolated {
                     guard let self,
@@ -196,6 +199,23 @@ final class QuickLookCopyOrientationManager {
             return nil
         }
         return CGSize(width: width.doubleValue, height: height.doubleValue)
+    }
+
+    /// Whether the copied image's own orientation is already upright, read
+    /// from its properties without decoding it.
+    nonisolated static func isUpright(_ source: CopySource) -> Bool {
+        let imageSource: CGImageSource?
+        if let url = source.url {
+            imageSource = self.imageSource(at: url)
+        } else if let data = source.data {
+            imageSource = self.imageSource(from: data)
+        } else {
+            return false
+        }
+        guard let imageSource, CGImageSourceGetCount(imageSource) > 0,
+              let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+        else { return false }
+        return ((properties[kCGImagePropertyOrientation] as? NSNumber)?.int32Value ?? 1) == 1
     }
 
     nonisolated static func correctedRepresentations(

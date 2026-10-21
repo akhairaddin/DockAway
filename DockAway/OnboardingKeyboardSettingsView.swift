@@ -120,7 +120,7 @@ final class OnboardingKeyboardSettingsView: NSView {
         keyboardNavigationCard.wantsLayer = true
         keyboardNavigationCard.layer?.cornerRadius = 10
         keyboardNavigationCard.layer?.borderWidth = 0.5
-        keyboardNavigationCard.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        keyboardNavigationCard.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
         keyboardNavigationCard.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
 
         masterToggle.translatesAutoresizingMaskIntoConstraints = false
@@ -128,11 +128,11 @@ final class OnboardingKeyboardSettingsView: NSView {
         masterToggle.showsLabel = true
         masterToggle.detailLabel = "Control Spaces and switch desktops using hotkeys"
         masterToggle.state = KeyboardNavigationPreferences.isEnabled ? .on : .off
-        masterToggle.setAccessibilityLabel("Enable Keyboard Navigation")
+        masterToggle.setAccessibilityLabel("Keyboard Navigation")
 
         controlsSeparator.translatesAutoresizingMaskIntoConstraints = false
         controlsSeparator.wantsLayer = true
-        controlsSeparator.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        controlsSeparator.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
 
         // Hand cards combine choosing a shortcut set with toggling that set on
         // or off. Their switches remain usable while the master toggle is off.
@@ -172,7 +172,7 @@ final class OnboardingKeyboardSettingsView: NSView {
         shortcutsCard.wantsLayer = true
         shortcutsCard.layer?.cornerRadius = 10
         shortcutsCard.layer?.borderWidth = 0.5
-        shortcutsCard.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        shortcutsCard.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
         shortcutsCard.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
 
         let rowsContainer = NSView()
@@ -376,13 +376,15 @@ final class OnboardingKeyboardSettingsView: NSView {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        keyboardNavigationCard.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
-        keyboardNavigationCard.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
-        controlsSeparator.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        shortcutsCard.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
-        shortcutsCard.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
-        iconContainer.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
-        extrasIconContainer?.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            keyboardNavigationCard.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
+            keyboardNavigationCard.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
+            controlsSeparator.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+            shortcutsCard.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.10).cgColor
+            shortcutsCard.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.38).cgColor
+            iconContainer.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+            extrasIconContainer?.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+        }
     }
 
     /// A section header styled like the page's keyboard navigation header.
@@ -569,8 +571,10 @@ final class OnboardingKeyboardSettingsView: NSView {
 
     private func updateVisualState(isOn: Bool, animated: Bool) {
         let targetAlpha: CGFloat = isOn ? 1.0 : 0.45
-        leftHandOption.handToggle.state = isOn && KeyboardNavigationPreferences.isLeftHandEnabled ? .on : .off
-        rightHandOption.handToggle.state = isOn && KeyboardNavigationPreferences.isRightHandEnabled ? .on : .off
+        // The hand switches stay usable while keyboard navigation is off, so
+        // they show their own setting rather than snapping back to off.
+        leftHandOption.handToggle.state = KeyboardNavigationPreferences.isLeftHandEnabled ? .on : .off
+        rightHandOption.handToggle.state = KeyboardNavigationPreferences.isRightHandEnabled ? .on : .off
         leftHandOption.selectionEnabled = isOn
         rightHandOption.selectionEnabled = isOn
         resetButton.isEnabled = isOn && !isResetting
@@ -658,7 +662,7 @@ final class OnboardingKeyboardSettingsView: NSView {
         resetButton.attributedTitle = NSAttributedString(
             string: "Shortcuts Reset",
             attributes: [
-                .foregroundColor: NSColor.white,
+                .foregroundColor: NSColor.labelColor,
                 .font: NSFont.systemFont(ofSize: 13, weight: .regular)
             ]
         )
@@ -796,7 +800,7 @@ private final class KeyboardHandOptionCardView: NSView {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        updateSelectionAppearance()
+        effectiveAppearance.performAsCurrentDrawingAppearance { updateSelectionAppearance() }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -842,10 +846,10 @@ private final class KeyboardHandOptionCardView: NSView {
 
         layer?.borderColor = isSelected
             ? NSColor.systemBlue.withAlphaComponent(0.72).cgColor
-            : NSColor.white.withAlphaComponent(0.12).cgColor
+            : NSColor.labelColor.withAlphaComponent(0.12).cgColor
         layer?.backgroundColor = isSelected
             ? NSColor.systemBlue.withAlphaComponent(0.12).cgColor
-            : NSColor.white.withAlphaComponent(0.035).cgColor
+            : NSColor.labelColor.withAlphaComponent(0.035).cgColor
     }
 }
 

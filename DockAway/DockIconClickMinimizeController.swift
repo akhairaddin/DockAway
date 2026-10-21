@@ -207,7 +207,9 @@ final class DockIconClickMinimizeController {
 
         // Replayed mouse downs from DockAway or another event-tap utility are
         // transport for a Dock drag, not fresh Dock clicks to toggle again.
-        if event.getIntegerValueField(.eventSourceUserData) != 0 {
+        // A click held back for a possible force click is still a fresh one.
+        let userData = event.getIntegerValueField(.eventSourceUserData)
+        if userData != 0 && userData != EventTap.replayedClickMarker {
             return false
         }
 
@@ -581,7 +583,13 @@ final class DockIconClickMinimizeController {
             .eventSourceUserData,
             value: Self.syntheticEventMarker
         )
-        down.post(tap: .cghidEventTap)
+        // From where the press was held, so whatever saw it before DockAway
+        // doesn't see a second press.
+        if let eventTap {
+            eventTap.post(down)
+        } else {
+            down.post(tap: .cghidEventTap)
+        }
     }
 
     private func pruneFinishedApplicationsIfNeeded() {
@@ -671,13 +679,23 @@ final class DockIconClickMinimizeController {
             guard let listFrame = Self.frame(of: list, budget: budget),
                   let items = budget.perform(on: list, { list.elements(kAXChildrenAttribute) }) ?? nil else { continue }
             let horizontal = listFrame.width >= listFrame.height
+            // The Dock's window covers the whole display while it shows, so
+            // only a click on the strip of icons, or on a magnified icon, is a
+            // Dock click, not one in an app's window just above it.
+            func acrossStrip(_ frame: CGRect) -> Bool {
+                let frame = frame.insetBy(dx: -2, dy: -2)
+                return horizontal
+                    ? (point.y >= frame.minY && point.y <= frame.maxY)
+                    : (point.x >= frame.minX && point.x <= frame.maxX)
+            }
+            let onStrip = acrossStrip(listFrame)
             for item in items {
                 guard !budget.expired else { return nil }
                 guard let itemFrame = Self.frame(of: item, budget: budget) else { continue }
                 let matchesLongAxis = horizontal
                     ? (point.x >= itemFrame.minX && point.x <= itemFrame.maxX)
                     : (point.y >= itemFrame.minY && point.y <= itemFrame.maxY)
-                guard matchesLongAxis,
+                guard matchesLongAxis, onStrip || acrossStrip(itemFrame),
                       let bundleURL = budget.perform(on: item, { item.url(kAXURLAttribute) }) ?? nil else { continue }
                 let bundlePath = bundleURL.standardizedFileURL.path
                 guard let app = NSWorkspace.shared.runningApplications.first(where: {

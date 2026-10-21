@@ -94,23 +94,23 @@ extension SubmenuLabelView {
     }
 
     static func desktopIndicatorAppearance() -> SubmenuLabelView {
-        SubmenuLabelView(title: "Menubar Dock/Desktop Indicator",
+        SubmenuLabelView(title: "Menu Bar Indicator",
                          style: .icon(symbolName: "menubar.rectangle", symbolHeight: 10),
                          highlightsWithMenuItem: false)
     }
 
     static func keyboardNavigation() -> SubmenuLabelView {
-        SubmenuLabelView(title: "DockAway Keyboard Navigation", style: .icon(symbolName: "keyboard"))
+        SubmenuLabelView(title: "Keyboard Navigation", style: .icon(symbolName: "keyboard"))
     }
 
     static func missionControl() -> SubmenuLabelView {
-        SubmenuLabelView(title: "macOS Mission Control Enhancements",
+        SubmenuLabelView(title: "Mission Control",
                          style: .icon(symbolName: "rectangle.3.group"), highlightsWithMenuItem: false)
     }
 
 
     static func indicatorSeparator() -> SubmenuLabelView {
-        SubmenuLabelView(title: "Desktop Indicator Separator", style: .plain)
+        SubmenuLabelView(title: "Desktop Number Separator", style: .plain)
     }
 
     static func desktopNumberIndicator() -> SubmenuLabelView {
@@ -150,7 +150,7 @@ final class DesktopIndicatorPreviewRow: NSButton {
             if dockIndicatorSwitch.state != state { dockIndicatorSwitch.state = state }
         }
     }
-    private static let dockIndicatorTitle = "Menubar Dock Indicator"
+    private static let dockIndicatorTitle = "Dock Arrows"
     /// Vertical room the Dock indicator line adds above the preview.
     private var dockLineHeight: CGFloat { onToggle != nil && onDockIndicatorToggle != nil ? 30 : 0 }
     private var previewLeading: CGFloat { onToggle == nil ? 24 : 20 }
@@ -231,7 +231,7 @@ final class DesktopIndicatorPreviewRow: NSButton {
         indicatorSwitch.target = self
         indicatorSwitch.action = #selector(toggleIndicator(_:))
         indicatorSwitch.isHidden = true
-        indicatorSwitch.setAccessibilityLabel("Menubar Desktop Indicator")
+        indicatorSwitch.setAccessibilityLabel("Desktop Number")
         addSubview(indicatorSwitch)
         dockIndicatorSwitch.controlSize = .small
         dockIndicatorSwitch.sizeToFit()
@@ -243,7 +243,7 @@ final class DesktopIndicatorPreviewRow: NSButton {
         addSubview(dockIndicatorSwitch)
 
         let help = DockSettingHelpButton(
-            heading: "Menubar Desktop Indicator",
+            heading: "Desktop Number",
             textProvider: {
                 "Displays the active macOS desktop space number for each connected display directly in your menu bar.\n\n• Keeps track of your active space without opening Mission Control.\n• Supports multi-display setups with stacked or horizontal layouts.\n• Fully customizable with pills, fills, outlines, and DockAway blue.\n• Click any display in the preview above to customize its appearance individually.\n• One display and two or more each remember their own look and switches. Changes apply to the layout you have connected."
             }

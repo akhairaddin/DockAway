@@ -182,8 +182,13 @@ final class FinderDeleteKeyController {
             keyDown: false
         ) else { return }
 
+        down.flags = .maskCommand
+        // End the chord with the modifiers actually held, so Command doesn't
+        // stay down for the rest of the session after the synthetic key-up.
+        up.flags = CGEventSource.flagsState(.hidSystemState).intersection([
+            .maskShift, .maskControl, .maskAlternate, .maskCommand, .maskAlphaShift, .maskSecondaryFn
+        ])
         for event in [down, up] {
-            event.flags = .maskCommand
             event.setIntegerValueField(
                 .eventSourceUserData,
                 value: Self.syntheticEventMarker
