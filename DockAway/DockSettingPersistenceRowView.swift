@@ -173,12 +173,6 @@ final class DockSettingHelpButton: NSButton {
 }
 
 final class DockSettingPersistenceRowView: NSView {
-    enum LeadingControlStyle {
-        case checkbox
-        case resetAction
-    }
-
-    private let highlightView = NSView()
     private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let titleLabel = NSTextField(labelWithString: "")
     private let shortcutLabel = NSTextField(labelWithString: "")
@@ -186,13 +180,6 @@ final class DockSettingPersistenceRowView: NSView {
     private let itemIcon: NSImage?
     private let centeredTitle: Bool
     private let fullRowHitTarget: Bool
-    private let leadingControlStyle: LeadingControlStyle
-    private var rowTitle: String
-    private var isShowingResetActionSuccess = false
-    private var resetActionSuccessTimer: Timer?
-    private var hoverTrackingArea: NSTrackingArea?
-    private(set) var isResetActionHighlighted = false
-    private var isHovered = false
     private var displayedIsOn: Bool?
     private var controlEnabled = true
     private(set) var helpButton: DockSettingHelpButton?
@@ -218,7 +205,6 @@ final class DockSettingPersistenceRowView: NSView {
         multiline: Bool = false,
         centeredTitle: Bool = false,
         checkboxOnFirstLine: Bool = false,
-        leadingControlStyle: LeadingControlStyle = .checkbox,
         helpHeading: String? = nil,
         helpTextProvider: (() -> String)? = nil,
         previewAccessibilityLabel: String? = nil,
@@ -230,33 +216,12 @@ final class DockSettingPersistenceRowView: NSView {
         self.changeHandler = changeHandler
         self.centeredTitle = centeredTitle
         self.fullRowHitTarget = fullRowHitTarget
-        self.leadingControlStyle = leadingControlStyle
-        self.rowTitle = title
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: multiline ? 40 : 26))
         autoresizingMask = [.width]
 
-        if leadingControlStyle == .resetAction {
-            wantsLayer = true
-            highlightView.wantsLayer = true
-            highlightView.layer?.cornerRadius = 5
-            highlightView.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(highlightView)
-
-            checkbox.setButtonType(.momentaryChange)
-            checkbox.image = NSImage(
-                systemSymbolName: "arrow.counterclockwise",
-                accessibilityDescription: "Restore Default macOS Dock Settings"
-            )?.withSymbolConfiguration(
-                NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-            )
-            checkbox.imagePosition = .imageOnly
-            checkbox.isBordered = false
-            checkbox.contentTintColor = .labelColor
-        } else {
-            checkbox.setButtonType(.switch)
-        }
+        checkbox.setButtonType(.switch)
         checkbox.title = ""
-        checkbox.state = leadingControlStyle == .checkbox && isOn ? .on : .off
+        checkbox.state = isOn ? .on : .off
         checkbox.target = self
         checkbox.action = #selector(toggleCheckbox(_:))
         checkbox.focusRingType = .none
@@ -289,14 +254,6 @@ final class DockSettingPersistenceRowView: NSView {
                 : checkbox.centerYAnchor.constraint(equalTo: centerYAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
         ]
-        if leadingControlStyle == .resetAction {
-            rowConstraints.append(contentsOf: [
-                highlightView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-                highlightView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-                highlightView.topAnchor.constraint(equalTo: topAnchor, constant: 1),
-                highlightView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1)
-            ])
-        }
         rowConstraints.append(titleLabel.leadingAnchor.constraint(
             equalTo: checkbox.trailingAnchor,
             constant: 6 + titleLeadingAdjustment
@@ -337,7 +294,8 @@ final class DockSettingPersistenceRowView: NSView {
                 button.centerYAnchor.constraint(equalTo: centerYAnchor),
                 button.widthAnchor.constraint(equalToConstant: 16),
                 button.heightAnchor.constraint(equalToConstant: 16),
-                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -8)
+                // A long title may come this close before it shortens.
+                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -5)
             ])
         } else if let shortcut {
             shortcutLabel.font = NSFont.menuFont(ofSize: 13)
@@ -403,84 +361,8 @@ final class DockSettingPersistenceRowView: NSView {
         nil
     }
 
-    deinit {
-        resetActionSuccessTimer?.invalidate()
-    }
-
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: frame.height)
-    }
-
-    override func updateTrackingAreas() {
-        if let hoverTrackingArea {
-            removeTrackingArea(hoverTrackingArea)
-            self.hoverTrackingArea = nil
-        }
-        if leadingControlStyle == .resetAction {
-            let trackingArea = NSTrackingArea(
-                rect: .zero,
-                options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                owner: self,
-                userInfo: nil
-            )
-            addTrackingArea(trackingArea)
-            hoverTrackingArea = trackingArea
-            isHovered = window.map { bounds.contains(convert($0.mouseLocationOutsideOfEventStream, from: nil)) } ?? false
-            updateResetActionHighlight()
-        }
-        super.updateTrackingAreas()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        guard leadingControlStyle == .resetAction else {
-            super.mouseEntered(with: event)
-            return
-        }
-        for item in enclosingMenuItem?.menu?.items ?? [] {
-            if let row = item.view as? DockSettingPersistenceRowView, row !== self {
-                row.clearResetActionHover()
-            } else if let row = item.view as? DockAwayMenuRowView {
-                row.clearHoverState()
-            }
-        }
-        isHovered = true
-        updateResetActionHighlight()
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        guard leadingControlStyle == .resetAction else {
-            super.mouseExited(with: event)
-            return
-        }
-        isHovered = false
-        updateResetActionHighlight()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if leadingControlStyle == .resetAction {
-            isHovered = false
-            updateResetActionHighlight()
-        }
-    }
-
-    func clearResetActionHover() {
-        guard leadingControlStyle == .resetAction, isHovered || isResetActionHighlighted else { return }
-        isHovered = false
-        updateResetActionHighlight()
-    }
-
-    private func updateResetActionHighlight() {
-        guard leadingControlStyle == .resetAction else { return }
-        let highlighted = isHovered && controlEnabled && !isShowingResetActionSuccess
-        isResetActionHighlighted = highlighted
-        highlightView.layer?.backgroundColor = highlighted
-            ? NSColor.selectedContentBackgroundColor.cgColor
-            : NSColor.clear.cgColor
-        titleLabel.textColor = highlighted ? .white : .labelColor
-        if !isShowingResetActionSuccess {
-            checkbox.contentTintColor = highlighted ? .white : .labelColor
-        }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -544,33 +426,53 @@ final class DockSettingPersistenceRowView: NSView {
         setIndicatorState(isOn)
     }
 
-    func setTitle(_ title: String) {
-        rowTitle = title
-        if !isShowingResetActionSuccess {
-            updateTitle(title)
+    private var roleLabel: NSTextField?
+
+    /// A word such as "Primary" at the end of the row, before its help button.
+    func setRoleLabel(_ text: String?) {
+        guard let text else {
+            roleLabel?.isHidden = true
+            checkbox.setAccessibilityHelp(nil)
+            return
         }
+        let label = roleLabel ?? {
+            let label = NSTextField(labelWithString: "")
+            label.font = .systemFont(ofSize: 11, weight: .medium)
+            label.textColor = .secondaryLabelColor
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.setContentCompressionResistancePriority(.required, for: .horizontal)
+            label.setAccessibilityElement(false)
+            addSubview(label)
+            NSLayoutConstraint.activate([
+                label.trailingAnchor.constraint(equalTo: helpButton?.leadingAnchor ?? trailingAnchor,
+                                                constant: helpButton == nil ? -12 : -8),
+                label.centerYAnchor.constraint(equalTo: centerYAnchor),
+                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: label.leadingAnchor, constant: -8)
+            ])
+            roleLabel = label
+            return label
+        }()
+        label.stringValue = text
+        label.isHidden = false
+        checkbox.setAccessibilityHelp(text)
+    }
+
+    func setTitle(_ title: String) {
+        updateTitle(title)
     }
 
     func setControlEnabled(_ enabled: Bool, updateMenuItem: Bool = true) {
         controlEnabled = enabled
         if updateMenuItem { enclosingMenuItem?.isEnabled = enabled }
         checkbox.isEnabled = enabled
-        titleLabel.alphaValue = enabled || isShowingResetActionSuccess ? 1 : 0.45
+        titleLabel.alphaValue = enabled ? 1 : 0.45
         shortcutLabel.alphaValue = enabled ? 1 : 0.45
         hierarchyArrowView?.alphaValue = enabled ? 1 : 0.45
         helpButton?.isEnabled = true
         helpButton?.alphaValue = enabled ? 1 : 0.65
-        updateResetActionHighlight()
     }
 
     @objc private func toggleCheckbox(_ sender: NSButton) {
-        if leadingControlStyle == .resetAction {
-            sender.state = .off
-            changeHandler(true)
-            showResetActionSuccess()
-            return
-        }
-
         let requestedState = sender.state == .on
         let previousDisplayedState = displayedIsOn
         changeHandler(requestedState)
@@ -582,66 +484,8 @@ final class DockSettingPersistenceRowView: NSView {
     }
 
     private func setIndicatorState(_ isOn: Bool) {
-        checkbox.state = leadingControlStyle == .checkbox && isOn ? .on : .off
+        checkbox.state = isOn ? .on : .off
         displayedIsOn = isOn
-    }
-
-    private func showResetActionSuccess() {
-        resetActionSuccessTimer?.invalidate()
-        addResetActionTransition(duration: 0.24)
-        isShowingResetActionSuccess = true
-        updateResetActionHighlight()
-        checkbox.isEnabled = true
-        checkbox.image = NSImage(
-            systemSymbolName: "checkmark.circle.fill",
-            accessibilityDescription: "Dock Settings Reset to Default"
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        )
-        checkbox.contentTintColor = .systemGreen
-        checkbox.setAccessibilityLabel("Dock Settings Reset to Default")
-        titleLabel.stringValue = "Dock Settings Reset to Default"
-        titleLabel.alphaValue = 1
-
-        let timer = Timer(timeInterval: 1, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.finishResetActionSuccess()
-            }
-        }
-        resetActionSuccessTimer = timer
-        RunLoop.main.add(timer, forMode: .eventTracking)
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    private func finishResetActionSuccess() {
-        guard isShowingResetActionSuccess else { return }
-        resetActionSuccessTimer?.invalidate()
-        resetActionSuccessTimer = nil
-        addResetActionTransition(duration: 0.5)
-        isShowingResetActionSuccess = false
-        checkbox.image = NSImage(
-            systemSymbolName: "arrow.counterclockwise",
-            accessibilityDescription: rowTitle
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        )
-        checkbox.contentTintColor = .labelColor
-        checkbox.isEnabled = controlEnabled
-        updateTitle(rowTitle)
-        titleLabel.alphaValue = controlEnabled ? 1 : 0.45
-        updateResetActionHighlight()
-    }
-
-    private func addResetActionTransition(duration: TimeInterval) {
-        wantsLayer = true
-        layer?.removeAnimation(forKey: "resetActionTransition")
-        guard window != nil,
-              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
-        let transition = CATransition()
-        transition.type = .fade
-        transition.duration = duration
-        transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        layer?.add(transition, forKey: "resetActionTransition")
     }
 
     private func updateTitle(_ title: String) {
@@ -1108,8 +952,8 @@ final class DockAwayMenuRowView: NSView {
         for item in enclosingMenuItem?.menu?.items ?? [] {
             if let row = item.view as? DockAwayMenuRowView, row !== self {
                 row.clearHoverState()
-            } else if let row = item.view as? DockSettingPersistenceRowView {
-                row.clearResetActionHover()
+            } else if let row = item.view as? DockSettingResetControlsRowView {
+                row.clearHover()
             }
         }
         hovered = true
@@ -1236,9 +1080,9 @@ final class DockSettingResetControlsRowView: NSView {
     }
     var icon: NSImage? = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: "Reset Shortcuts to Defaults") {
         didSet {
-            let iconConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+            let iconConfig = NSImage.SymbolConfiguration(pointSize: iconPointSize, weight: .regular)
             if !isShowingSuccess {
-                normalIcon.image = (icon ?? NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: "Reset Shortcuts to Defaults"))?
+                normalIcon.image = (icon ?? NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: title))?
                     .withSymbolConfiguration(iconConfig)
             }
         }
@@ -1246,6 +1090,11 @@ final class DockSettingResetControlsRowView: NSView {
 
     private let leadingInset: CGFloat
     private let titleLeadingAdjustment: CGFloat
+    private let showsIcon: Bool
+    private let iconPointSize: CGFloat
+    private let highlightInset: CGFloat
+    private let promptAccessibilityLabel: String
+    private let successTitle: String
     private let successHoldDuration: TimeInterval
     private let onReset: (@escaping () -> Void) -> Void
     private var controlEnabled = true
@@ -1270,7 +1119,17 @@ final class DockSettingResetControlsRowView: NSView {
     private let successLabel = NSTextField(labelWithString: "Shortcuts Reset")
     private let successIcon = NSImageView()
 
+    /// Asks in place before acting: a click turns the row into `prompt` with
+    /// Cancel and `confirmTitle` buttons, and confirming shows `successTitle`.
     init(
+        title: String = "Reset Shortcuts to Defaults",
+        showsIcon: Bool = true,
+        iconPointSize: CGFloat = 13,
+        prompt: String = "Reset all shortcuts?",
+        promptAccessibilityLabel: String = "Reset all shortcuts to defaults?",
+        confirmTitle: String = "Reset",
+        successTitle: String = "Shortcuts Reset",
+        highlightInset: CGFloat = 4,
         leadingInset: CGFloat = 18,
         titleLeadingAdjustment: CGFloat = 1.5,
         width: CGFloat = 380,
@@ -1278,8 +1137,14 @@ final class DockSettingResetControlsRowView: NSView {
         successHoldDuration: TimeInterval = 1,
         onReset: @escaping (@escaping () -> Void) -> Void
     ) {
+        self.title = title
         self.leadingInset = leadingInset
         self.titleLeadingAdjustment = titleLeadingAdjustment
+        self.showsIcon = showsIcon
+        self.iconPointSize = iconPointSize
+        self.highlightInset = highlightInset
+        self.promptAccessibilityLabel = promptAccessibilityLabel
+        self.successTitle = successTitle
         self.successHoldDuration = successHoldDuration
         self.onReset = onReset
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
@@ -1289,6 +1154,10 @@ final class DockSettingResetControlsRowView: NSView {
         setAccessibilityRole(.button)
         setAccessibilityLabel(title)
 
+        normalTitleLabel.stringValue = title
+        promptLabel.stringValue = prompt
+        resetBtn.title = confirmTitle
+        successLabel.stringValue = successTitle
         setupNormalContainer()
         setupConfirmContainer()
         setupSuccessContainer()
@@ -1314,10 +1183,11 @@ final class DockSettingResetControlsRowView: NSView {
         highlightBackground.translatesAutoresizingMaskIntoConstraints = false
         normalContainer.addSubview(highlightBackground)
 
-        let iconConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
-        normalIcon.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: "Reset Shortcuts to Defaults")?
+        let iconConfig = NSImage.SymbolConfiguration(pointSize: iconPointSize, weight: .regular)
+        normalIcon.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: title)?
             .withSymbolConfiguration(iconConfig)
         normalIcon.contentTintColor = .labelColor
+        normalIcon.isHidden = !showsIcon
         normalIcon.translatesAutoresizingMaskIntoConstraints = false
         normalContainer.addSubview(normalIcon)
 
@@ -1333,8 +1203,8 @@ final class DockSettingResetControlsRowView: NSView {
             normalContainer.topAnchor.constraint(equalTo: topAnchor),
             normalContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            highlightBackground.leadingAnchor.constraint(equalTo: normalContainer.leadingAnchor, constant: 4),
-            highlightBackground.trailingAnchor.constraint(equalTo: normalContainer.trailingAnchor, constant: -4),
+            highlightBackground.leadingAnchor.constraint(equalTo: normalContainer.leadingAnchor, constant: highlightInset),
+            highlightBackground.trailingAnchor.constraint(equalTo: normalContainer.trailingAnchor, constant: -highlightInset),
             highlightBackground.topAnchor.constraint(equalTo: normalContainer.topAnchor, constant: 1),
             highlightBackground.bottomAnchor.constraint(equalTo: normalContainer.bottomAnchor, constant: -1),
 
@@ -1343,10 +1213,15 @@ final class DockSettingResetControlsRowView: NSView {
             normalIcon.widthAnchor.constraint(equalToConstant: 16),
             normalIcon.heightAnchor.constraint(equalToConstant: 16),
 
-            normalTitleLabel.leadingAnchor.constraint(
-                equalTo: normalIcon.trailingAnchor,
-                constant: 6 + titleLeadingAdjustment
-            ),
+            showsIcon
+                ? normalTitleLabel.leadingAnchor.constraint(
+                    equalTo: normalIcon.trailingAnchor,
+                    constant: 6 + titleLeadingAdjustment
+                )
+                : normalTitleLabel.leadingAnchor.constraint(
+                    equalTo: normalContainer.leadingAnchor,
+                    constant: leadingInset
+                ),
             normalTitleLabel.centerYAnchor.constraint(equalTo: normalContainer.centerYAnchor),
             normalTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: normalContainer.trailingAnchor, constant: -12)
         ])
@@ -1359,10 +1234,11 @@ final class DockSettingResetControlsRowView: NSView {
         confirmContainer.alphaValue = 0
         addSubview(confirmContainer)
 
-        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let config = NSImage.SymbolConfiguration(pointSize: iconPointSize, weight: .regular)
         confirmationIcon.contentTintColor = .secondaryLabelColor
         confirmationIcon.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
+        confirmationIcon.isHidden = !showsIcon
         confirmationIcon.translatesAutoresizingMaskIntoConstraints = false
         confirmContainer.addSubview(confirmationIcon)
 
@@ -1399,7 +1275,9 @@ final class DockSettingResetControlsRowView: NSView {
             confirmationIcon.widthAnchor.constraint(equalToConstant: 16),
             confirmationIcon.heightAnchor.constraint(equalToConstant: 16),
 
-            promptLabel.leadingAnchor.constraint(equalTo: confirmationIcon.trailingAnchor, constant: 6),
+            showsIcon
+                ? promptLabel.leadingAnchor.constraint(equalTo: confirmationIcon.trailingAnchor, constant: 6)
+                : promptLabel.leadingAnchor.constraint(equalTo: confirmContainer.leadingAnchor, constant: leadingInset),
             promptLabel.centerYAnchor.constraint(equalTo: confirmContainer.centerYAnchor),
             promptLabel.trailingAnchor.constraint(lessThanOrEqualTo: cancelBtn.leadingAnchor, constant: -8),
 
@@ -1428,7 +1306,7 @@ final class DockSettingResetControlsRowView: NSView {
             .applying(NSImage.SymbolConfiguration(paletteColors: [.white, .systemGreen]))
         successIcon.image = NSImage(
             systemSymbolName: "checkmark.circle.fill",
-            accessibilityDescription: "Shortcuts Reset"
+            accessibilityDescription: successTitle
         )?.withSymbolConfiguration(config)
         successIcon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1458,9 +1336,13 @@ final class DockSettingResetControlsRowView: NSView {
 
     func setControlEnabled(_ enabled: Bool) {
         controlEnabled = enabled
+        // Arrow keys skip a row with nothing to do, like other disabled items.
+        enclosingMenuItem?.isEnabled = enabled
         cancelBtn.isEnabled = enabled
         resetBtn.isEnabled = enabled
-        if !enabled { restoreNormalState(animated: false) }
+        // A reset that leaves nothing to reset, such as emptying a list, still
+        // shows its success first, then settles into the disabled row.
+        if !enabled && !isShowingSuccess { restoreNormalState(animated: false) }
         setAccessibilityEnabled(enabled)
         updateHoverState()
     }
@@ -1571,10 +1453,10 @@ final class DockSettingResetControlsRowView: NSView {
     }
 
     private func restoreNormalContent() {
-        let iconConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let iconConfig = NSImage.SymbolConfiguration(pointSize: iconPointSize, weight: .regular)
         normalIcon.image = (icon ?? NSImage(
             systemSymbolName: "arrow.counterclockwise",
-            accessibilityDescription: "Reset Shortcuts to Defaults"
+            accessibilityDescription: title
         ))?.withSymbolConfiguration(iconConfig)
         normalTitleLabel.stringValue = title
     }
@@ -1596,8 +1478,8 @@ final class DockSettingResetControlsRowView: NSView {
         // VoiceOver press on the row silently confirm the reset.
         setAccessibilityRole(isConfirming ? .group : .button)
         setAccessibilityLabel(
-            isConfirming ? "Reset all shortcuts to defaults?"
-                : (isShowingSuccess ? "Shortcuts Reset" : title)
+            isConfirming ? promptAccessibilityLabel
+                : (isShowingSuccess ? successTitle : title)
         )
         setAccessibilityChildren(isConfirming ? [promptLabel, cancelBtn, resetBtn] : [])
     }
@@ -1648,11 +1530,26 @@ final class DockSettingResetControlsRowView: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        // Menu tracking can omit a neighbor's exit; retire its hover here.
+        for item in enclosingMenuItem?.menu?.items ?? [] {
+            if let row = item.view as? DockAwayMenuRowView {
+                row.clearHoverState()
+            } else if let row = item.view as? DockSettingResetControlsRowView, row !== self {
+                row.clearHover()
+            }
+        }
         hovered = true
         updateHoverState()
     }
 
     override func mouseExited(with event: NSEvent) {
+        hovered = false
+        updateHoverState()
+    }
+
+    /// For a neighbor whose hover began without this row seeing the pointer leave.
+    func clearHover() {
+        guard hovered else { return }
         hovered = false
         updateHoverState()
     }
@@ -1663,6 +1560,12 @@ final class DockSettingResetControlsRowView: NSView {
         if let menuEndObserver {
             NotificationCenter.default.removeObserver(menuEndObserver)
             self.menuEndObserver = nil
+        }
+        if let item = enclosingMenuItem, item.action == nil {
+            // Return on the highlighted row sends the item's action; a click
+            // reaches mouseDown instead.
+            item.target = self
+            item.action = #selector(performMenuAction(_:))
         }
         if window != nil, let menu = enclosingMenuItem?.menu {
             menuEndObserver = NotificationCenter.default.addObserver(
@@ -1681,9 +1584,19 @@ final class DockSettingResetControlsRowView: NSView {
         updateHoverState()
     }
 
+    /// Return on the highlighted row closes the menu, which leaves nowhere to
+    /// ask in place, so it asks in an alert instead.
     @objc func performMenuAction(_ sender: Any?) {
         guard controlEnabled && !isShowingSuccess else { return }
-        setConfirming(true, animated: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = promptAccessibilityLabel
+        alert.addButton(withTitle: resetBtn.title)
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons.first?.hasDestructiveAction = true
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        onReset { }
     }
 
     override func accessibilityPerformPress() -> Bool {

@@ -4,8 +4,11 @@ import QuartzCore
 enum OnboardingPageLayout {
     static let windowWidth: CGFloat = 540
     /// Both pages share the welcome page's size, so the window keeps its size
-    /// when moving between them. The keyboard page scrolls to fit.
-    static let windowHeight: CGFloat = 744
+    /// when moving between them. The keyboard page scrolls to fit, tall enough
+    /// that the first Extras option peeks in, hinting at more below.
+    static let windowHeight: CGFloat = 824
+    /// Quit and Continue, and Back and Get Started in the same places after them.
+    static let footerButtonWidth: CGFloat = 104
 
     static func windowSize(visibleFrame: NSRect?) -> NSSize {
         let availableHeight = visibleFrame.map { max(1, $0.height - 24) } ?? windowHeight

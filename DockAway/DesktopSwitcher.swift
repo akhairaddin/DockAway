@@ -2,6 +2,7 @@ import Cocoa
 import ApplicationServices
 import QuartzCore
 import OSLog
+import SwiftUI
 
 func desktopInteractionTrace(_ phase: @autoclosure () -> String) {
 #if DEBUG
@@ -601,6 +602,52 @@ private final class DesktopTileCell: NSButtonCell {
 
 private final class DesktopDragPreview: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    /// Replaces the outline drawn around the dragged tile's image.
+    func setOutline(_ outline: NSView?) {
+        subviews.forEach { $0.removeFromSuperview() }
+        guard let outline else { return }
+        outline.frame = bounds
+        addSubview(outline)
+    }
+}
+
+/// A desktop box's measurements. Its app icons sit in its corners, and its
+/// corners are shaped like theirs and run parallel to them.
+enum DesktopBoxMetrics {
+    /// The visible squircle of a macOS app icon within its image.
+    static let iconBodyFraction: CGFloat = 824.0 / 1024.0
+    /// A macOS 26 app icon's continuous corner, relative to its visible width.
+    static let iconCornerFraction: CGFloat = 0.258
+    static let outlineWidth: CGFloat = 1.5
+    /// Between the outline and the icons.
+    static let padding: CGFloat = 2
+    /// Between neighboring icons, across and down alike.
+    static let iconGap: CGFloat = 2
+    static let width: CGFloat = 42
+    /// Extra room around a desktop's only icon, which would look oversized
+    /// filling the box.
+    static let singleIconInset: CGFloat = 5
+    /// Two columns of icons fill the box's width.
+    static let iconSize = (width - 2 * (outlineWidth + padding) - iconGap) / 2
+    static func height(rows: Int) -> CGFloat {
+        CGFloat(rows) * iconSize + CGFloat(rows - 1) * iconGap + 2 * (outlineWidth + padding)
+    }
+    static let compactHeight = height(rows: 2)
+    /// For a row holding a desktop with more than four apps.
+    static let tallHeight = height(rows: 3)
+    /// A corner icon's radius, plus the padding and the outline around it.
+    static let cornerRadius = iconCornerFraction * iconSize + padding + outlineWidth
+
+    /// The box's shape, with app-icon corners. An inset shape passes a
+    /// radius reduced by the inset so it stays parallel.
+    static func path(in rect: CGRect, radius: CGFloat = cornerRadius) -> CGPath {
+        RoundedRectangle(cornerRadius: max(0, radius), style: .continuous).path(in: rect).cgPath
+    }
+
+    static func bezierPath(in rect: CGRect, radius: CGFloat = cornerRadius) -> NSBezierPath {
+        NSBezierPath(cgPath: path(in: rect, radius: radius))
+    }
 }
 
 @available(macOS 26.0, *)
@@ -614,7 +661,7 @@ private final class DesktopGlassOutlineView: NSGlassEffectView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         style = .regular
-        cornerRadius = 6
+        cornerRadius = DesktopBoxMetrics.cornerRadius
         wantsLayer = true
         setAccessibilityElement(false)
     }
@@ -631,13 +678,9 @@ private final class DesktopGlassOutlineView: NSGlassEffectView {
     private func updateOutlineMask() {
         guard bounds.width > outlineWidth * 2, bounds.height > outlineWidth * 2 else { return }
         let path = CGMutablePath()
-        path.addRoundedRect(in: bounds, cornerWidth: 6, cornerHeight: 6)
+        path.addPath(DesktopBoxMetrics.path(in: bounds))
         let inner = bounds.insetBy(dx: outlineWidth, dy: outlineWidth)
-        path.addRoundedRect(
-            in: inner,
-            cornerWidth: max(0, 6 - outlineWidth),
-            cornerHeight: max(0, 6 - outlineWidth)
-        )
+        path.addPath(DesktopBoxMetrics.path(in: inner, radius: DesktopBoxMetrics.cornerRadius - outlineWidth))
         let mask = CAShapeLayer()
         mask.frame = bounds
         mask.path = path
@@ -700,6 +743,20 @@ final class DesktopTileButton: NSButton {
     }
     private weak var glassOutline: NSView?
     private let focusGlowLayer = CAShapeLayer()
+    /// What the tile says when you point at it.
+    var desktopToolTip: String? {
+        didSet { applyToolTip() }
+    }
+    /// While a desktop is held or dragged, a tooltip would follow the
+    /// pointer and cover the dragged desktop's number.
+    var hidesToolTip = false {
+        didSet { applyToolTip() }
+    }
+
+    private func applyToolTip() {
+        let shown = hidesToolTip ? nil : desktopToolTip
+        if toolTip != shown { toolTip = shown }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -731,18 +788,38 @@ final class DesktopTileButton: NSButton {
         glassOutline = glass
     }
 
+    /// The tile as an image to drag. A snapshot draws glass as a solid black
+    /// box, ignoring its mask and even its being hidden, so it's taken without
+    /// the outline; `makeDragOutline()` gives the dragged image its own.
+    func dragImage() -> NSImage? {
+        let glass = glassOutline
+        glass?.removeFromSuperview()
+        defer { if let glass { addSubview(glass, positioned: .below, relativeTo: nil) } }
+        guard let bitmap = bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+        cacheDisplay(in: bounds, to: bitmap)
+        let image = NSImage(size: bounds.size)
+        image.addRepresentation(bitmap)
+        return image
+    }
+
+    /// A live glass outline matching this tile's, for the dragged image.
+    func makeDragOutline() -> NSView? {
+        guard #available(macOS 26.0, *), let source = glassOutline as? DesktopGlassOutlineView else { return nil }
+        let outline = DesktopGlassOutlineView(frame: bounds)
+        outline.tintColor = source.tintColor
+        outline.outlineWidth = source.outlineWidth
+        outline.autoresizingMask = [.width, .height]
+        return outline
+    }
+
     override func layout() {
         super.layout()
         glassOutline?.frame = bounds
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         focusGlowLayer.frame = bounds
-        focusGlowLayer.path = CGPath(
-            roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75),
-            cornerWidth: 6,
-            cornerHeight: 6,
-            transform: nil
-        )
+        focusGlowLayer.path = DesktopBoxMetrics.path(in: bounds.insetBy(dx: 0.75, dy: 0.75),
+                                                     radius: DesktopBoxMetrics.cornerRadius - 0.75)
         if isKeyboardFocused {
             applyFocusScale(animated: false)
         }
@@ -839,28 +916,52 @@ final class DesktopTileButton: NSButton {
         superview?.setNeedsDisplay(frame.insetBy(dx: -12, dy: -12))
     }
 
+    /// Where each app icon's image goes. Icons sit in the box's corners,
+    /// spaced as evenly as its outline: a pair side by side or stacked, and
+    /// an odd one out centered on the last row. One app gets a large icon. In a
+    /// tall box, up to four icons stay at its top.
     static func iconFrames(count: Int, in bounds: NSRect) -> [NSRect] {
+        let metrics = DesktopBoxMetrics.self
         let visibleCount = min(6, max(0, count))
-        let stackedPair = visibleCount == 2 && bounds.height > 28
-        let stackedThree = visibleCount == 3 && bounds.height > 28
-        let horizontalPair = visibleCount == 2 && !stackedPair
-        let size: CGFloat
-        if stackedPair { size = min(bounds.width - 6, (bounds.height - 3) / 2) }
-        else if stackedThree { size = min(bounds.width - 6, (bounds.height - 4) / 3) }
-        else if horizontalPair { size = min(bounds.height - 6, (bounds.width - 5) / 2) }
-        else { size = visibleCount == 1 ? min(bounds.width, bounds.height) - 6 : 11 }
-        let iconColumns = min(2, visibleCount)
-        let gridWidth = CGFloat(iconColumns) * 13 - 2
-        let gridHeight = CGFloat((visibleCount + 1) / 2) * 13 - 2
-        return (0..<visibleCount).map { index in
-            let centered = visibleCount == 1 || stackedPair || stackedThree || (visibleCount % 2 == 1 && index == visibleCount - 1)
-            let x = horizontalPair
-                ? bounds.midX - (2 * size + 1) / 2 + CGFloat(index) * (size + 1)
-                : (centered ? bounds.midX - size / 2 : bounds.midX - gridWidth / 2 + CGFloat(index % 2) * 13)
-            let y = stackedPair || stackedThree
-                ? bounds.midY - (CGFloat(visibleCount) * size + CGFloat(visibleCount - 1)) / 2 + CGFloat(index) * (size + 1)
-                : (visibleCount == 1 || horizontalPair ? bounds.midY - size / 2 : bounds.midY - gridHeight / 2 + CGFloat(index / 2) * 13)
-            return NSRect(x: x, y: y, width: size, height: size)
+        let inset = metrics.outlineWidth + metrics.padding
+        let inner = bounds.insetBy(dx: inset, dy: inset)
+        let gap = metrics.iconGap
+        let isTall = bounds.height > metrics.compactHeight + 0.5
+        let bodies: [NSRect]
+        switch visibleCount {
+        case 0:
+            return []
+        case 1:
+            let size = min(inner.width, inner.height) - 2 * metrics.singleIconInset
+            bodies = [NSRect(x: inner.midX - size / 2, y: inner.midY - size / 2, width: size, height: size)]
+        case 2 where isTall:
+            let size = min(inner.width, (inner.height - gap) / 2)
+            let top = inner.midY - size - gap / 2
+            bodies = (0..<2).map {
+                NSRect(x: inner.midX - size / 2, y: top + CGFloat($0) * (size + gap), width: size, height: size)
+            }
+        case 2:
+            let size = min(inner.height, (inner.width - gap) / 2)
+            bodies = [NSRect(x: inner.minX, y: inner.midY - size / 2, width: size, height: size),
+                      NSRect(x: inner.maxX - size, y: inner.midY - size / 2, width: size, height: size)]
+        default:
+            let rows = (visibleCount + 1) / 2
+            let size = min((inner.width - gap) / 2, (inner.height - CGFloat(rows - 1) * gap) / CGFloat(rows))
+            // Rows keep the icons' spacing from the top corners down, even
+            // when a tall box has fewer of them than it holds.
+            let rowStep = min((inner.height - size) / CGFloat(rows - 1), size + gap)
+            bodies = (0..<visibleCount).map { index in
+                let y = inner.minY + CGFloat(index / 2) * rowStep
+                let x: CGFloat
+                if visibleCount % 2 == 1 && index == visibleCount - 1 { x = inner.midX - size / 2 }
+                else { x = index % 2 == 0 ? inner.minX : inner.maxX - size }
+                return NSRect(x: x, y: y, width: size, height: size)
+            }
+        }
+        // An icon's image has a margin around its visible squircle.
+        return bodies.map { body in
+            let size = body.width / metrics.iconBodyFraction
+            return NSRect(x: body.midX - size / 2, y: body.midY - size / 2, width: size, height: size)
         }
     }
 
@@ -870,8 +971,11 @@ final class DesktopTileButton: NSButton {
         for (index, rect) in Self.iconFrames(count: icons.count, in: bounds).enumerated() {
             if icons.count > 6 && index == 5 {
                 let text = "+\(icons.count - 5)" as NSString
-                text.draw(in: rect.insetBy(dx: -1, dy: 0), withAttributes: [
-                    .font: NSFont.systemFont(ofSize: 8, weight: .semibold), .foregroundColor: NSColor.labelColor])
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 10, weight: .semibold), .foregroundColor: NSColor.labelColor]
+                let size = text.size(withAttributes: attributes)
+                text.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
+                          withAttributes: attributes)
             } else {
                 NSGraphicsContext.current?.imageInterpolation = .high
                 icons[index].image.draw(in: backingAlignedRect(rect, options: [.alignAllEdgesNearest]), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
@@ -891,7 +995,9 @@ final class DesktopTileButton: NSButton {
                 } else {
                     glass.tintColor = .systemBlue
                 }
-                glass.outlineWidth = isActiveTile ? 2.75 : 2.0
+                // The current desktop's outline is as thin as an idle one's;
+                // its color sets it apart. A drop target stays bold.
+                glass.outlineWidth = isDropTarget ? 2.75 : (isActiveTile ? 1.5 : 2.0)
             } else {
                 glass.tintColor = NSColor.secondaryLabelColor.withAlphaComponent(0.32)
                 glass.outlineWidth = 1.5
@@ -903,11 +1009,8 @@ final class DesktopTileButton: NSButton {
             // Idle desktops keep their shape without bringing back the old
             // blue-tinted button fill.
             NSColor.secondaryLabelColor.withAlphaComponent(0.62).setStroke()
-            let outline = NSBezierPath(
-                roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75),
-                xRadius: 5.5,
-                yRadius: 5.5
-            )
+            let outline = DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: 0.75, dy: 0.75),
+                                                       radius: DesktopBoxMetrics.cornerRadius - 0.75)
             outline.lineWidth = 1.0
             outline.stroke()
             return
@@ -936,12 +1039,8 @@ final class DesktopTileButton: NSButton {
             let activeLineWidth: CGFloat = 2.25
             // Expand outward rather than inward so interior icon padding remains spacious.
             let activeInset: CGFloat = -0.15
-            let activeRadius: CGFloat = 6.0
-            let outline = NSBezierPath(
-                roundedRect: bounds.insetBy(dx: activeInset, dy: activeInset),
-                xRadius: activeRadius,
-                yRadius: activeRadius
-            )
+            let outline = DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: activeInset, dy: activeInset),
+                                                       radius: DesktopBoxMetrics.cornerRadius - activeInset)
             outline.lineWidth = activeLineWidth
 
             NSGraphicsContext.saveGraphicsState()
@@ -956,7 +1055,8 @@ final class DesktopTileButton: NSButton {
             NSGraphicsContext.restoreGraphicsState()
         } else {
             strokeColor.setStroke()
-            let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 5, yRadius: 5)
+            let outline = DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: 1, dy: 1),
+                                                       radius: DesktopBoxMetrics.cornerRadius - 1)
             outline.lineWidth = 1.0
             outline.stroke()
         }
@@ -1024,12 +1124,8 @@ final class DesktopAddButton: NSButton {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         focusGlowLayer.frame = bounds
-        focusGlowLayer.path = CGPath(
-            roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75),
-            cornerWidth: 6,
-            cornerHeight: 6,
-            transform: nil
-        )
+        focusGlowLayer.path = DesktopBoxMetrics.path(in: bounds.insetBy(dx: 0.75, dy: 0.75),
+                                                     radius: DesktopBoxMetrics.cornerRadius - 0.75)
         if isKeyboardFocused || isAddButtonHovered {
             applyHover(animated: false)
         }
@@ -1072,11 +1168,8 @@ final class DesktopAddButton: NSButton {
             glass.outlineWidth = isFocusedOrHovered ? 2.0 : 1.5
         } else {
             NSColor.secondaryLabelColor.withAlphaComponent(0.62).setStroke()
-            let outline = NSBezierPath(
-                roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75),
-                xRadius: 5.5,
-                yRadius: 5.5
-            )
+            let outline = DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: 0.75, dy: 0.75),
+                                                       radius: DesktopBoxMetrics.cornerRadius - 0.75)
             outline.lineWidth = 1.0
             outline.stroke()
         }
@@ -1085,7 +1178,8 @@ final class DesktopAddButton: NSButton {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        // Like the row's, so the plus loses its hover after sliding out from under the pointer.
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect, .assumeInside], owner: self)
         addTrackingArea(area)
         hoverTrackingArea = area
     }
@@ -1103,6 +1197,8 @@ final class DesktopAddButton: NSButton {
         guard isAddButtonHovered != hovered else { return }
         isAddButtonHovered = hovered
         applyHover(animated: animated)
+        // The outline's color is drawn, so it needs a redraw to follow.
+        needsDisplay = true
     }
 
     private func applyHover(animated: Bool) {
@@ -1393,7 +1489,9 @@ final class DesktopDisplaySectionsView: NSView {
     func update(_ sections: [DesktopDisplaySection], showLabels: Bool,
                 enabled: Bool, canAdd: Bool, canClose: Bool, activeDisplayID: CGDirectDisplayID) {
         let maxBoxes = sections.map { $0.snapshot.managerSpaceIDs.count + (canAdd ? 1 : 0) }.max() ?? 0
-        let targetWidth: CGFloat = sections.isEmpty ? (bounds.width > 0 ? bounds.width : 190) : (maxBoxes >= 5 ? 230 : 190)
+        let targetWidth: CGFloat = sections.isEmpty
+            ? (bounds.width > 0 ? bounds.width : DesktopTilesView.compactRowWidth)
+            : (maxBoxes >= 5 ? DesktopTilesView.wideRowWidth : DesktopTilesView.compactRowWidth)
         let previousWidth = frame.width
         let previousWindowFrame = window?.frame
         let widthChanged = abs(previousWidth - targetWidth) > 0.5
@@ -1436,6 +1534,11 @@ final class DesktopDisplaySectionsView: NSView {
                         if let hit { target = hit }
                     }
                     return target
+                }
+                tiles.crossDisplayLane = { [weak self, weak tiles] point in
+                    self?.rows.first {
+                        $0.tiles !== tiles && $0.tiles.bounds.contains($0.tiles.convert(point, from: nil))
+                    }?.tiles.dragLane(nearWindowPoint: point)
                 }
                 tiles.clearCrossDisplayTarget = { [weak self] animated in
                     self?.rows.forEach { $0.tiles.highlightDesktopDrop(nil, animated: animated) }
@@ -1586,7 +1689,7 @@ final class DesktopDisplaySectionsView: NSView {
             wantsLayer = true
             layer?.masksToBounds = true
             alphaValue = 0
-            let currentW = bounds.width > 0 ? bounds.width : 190
+            let currentW = bounds.width > 0 ? bounds.width : DesktopTilesView.compactRowWidth
             let nextFrame = Self.resizedFrame(NSRect(x: frame.minX, y: frame.minY, width: currentW, height: 0),
                                              height: 0,
                                              parentIsFlipped: superview?.isFlipped ?? true)
@@ -1770,6 +1873,8 @@ final class DesktopTilesView: NSView {
         var after = false
     }
     var crossDisplayTarget: ((NSPoint) -> DropTarget?)?
+    /// The other display's row of tiles under a window point; see `dragLane`.
+    var crossDisplayLane: ((NSPoint) -> (midY: CGFloat, minX: CGFloat, maxX: CGFloat)?)?
     var clearCrossDisplayTarget: ((Bool) -> Void)?
 
     func desktopDropTarget(atWindowPoint point: NSPoint) -> DropTarget? {
@@ -1777,12 +1882,7 @@ final class DesktopTilesView: NSView {
         let local = convert(point, from: nil)
         if externalDropTarget != nil {
             guard bounds.contains(local) else { return nil }
-            // Use the row capacity that existed before this drag. NSMenu does
-            // not support changing a custom item's size while it is tracking.
-            let heights = previewRowHeights
-            let capacity = heights.count * columns
-            let slots = Self.tileFrames(count: min(desktopIDs.count + 2, capacity),
-                                        width: bounds.width, heights: heights)
+            let slots = dropSlots
             if let index = slots.firstIndex(where: { $0.contains(local) }),
                desktopIDs.indices.contains(index) {
                 return DropTarget(id: desktopIDs[index])
@@ -1799,6 +1899,32 @@ final class DesktopTilesView: NSView {
         guard let index = dragSlots.firstIndex(where: { $0.contains(local) }),
               desktopIDs.indices.contains(index) else { return nil }
         return DropTarget(id: desktopIDs[index])
+    }
+
+    /// Where tiles sit for a drop: as they were before the drag, or with room
+    /// for one more while another display's desktop is dragged over. That
+    /// uses the row capacity from before the drag, since NSMenu does not
+    /// support changing a custom item's size while it is tracking.
+    private var dropSlots: [NSRect] {
+        guard externalDropTarget != nil else { return dragSlots }
+        let heights = previewRowHeights
+        return Self.tileFrames(count: min(desktopIDs.count + 2, heights.count * columns),
+                               width: bounds.width, heights: heights)
+    }
+
+    /// The row of tiles nearest a point, which a dragged desktop slides along
+    /// without drifting up or down, from its first desktop to its last, never
+    /// past them onto the plus button. In window coordinates.
+    func dragLane(nearWindowPoint point: NSPoint) -> (midY: CGFloat, minX: CGFloat, maxX: CGFloat)? {
+        let local = convert(point, from: nil)
+        // Desktops only; another display's desktop gets the place it would take.
+        let slots = externalDropTarget != nil ? Array(dropSlots.prefix(desktopIDs.count + 1)) : dragSlots
+        guard let midY = slots.map(\.midY).min(by: { abs($0 - local.y) < abs($1 - local.y) }) else { return nil }
+        let row = slots.filter { $0.minY <= midY && midY <= $0.maxY }
+        guard let minX = row.map(\.minX).min(), let maxX = row.map(\.maxX).max() else { return nil }
+        let lower = convert(NSPoint(x: minX, y: midY), to: nil)
+        let upper = convert(NSPoint(x: maxX, y: midY), to: nil)
+        return (lower.y, min(lower.x, upper.x), max(lower.x, upper.x))
     }
 
     func highlightDesktopDrop(_ identifier: DropTarget?, animated: Bool = true) {
@@ -1831,7 +1957,7 @@ final class DesktopTilesView: NSView {
         if !buttons.isEmpty && cellCount > heights.count * columns {
             // A plus-only row has no application icons to accommodate. Do not
             // inherit the expanded height of a populated desktop in another row.
-            heights.append(28)
+            heights.append(DesktopBoxMetrics.compactHeight)
         }
         return heights
     }
@@ -1873,11 +1999,14 @@ final class DesktopTilesView: NSView {
     }
 
     /// Horizontal distance between neighboring tile slots.
-    static let tilePitch: CGFloat = 44
+    static let tilePitch: CGFloat = 48
+    /// The row's width with four boxes or fewer, and with five.
+    static let compactRowWidth: CGFloat = 206
+    static let wideRowWidth: CGFloat = 254
 
     static func tileFrames(count: Int, width: CGFloat, heights: [CGFloat]) -> [NSRect] {
         let cols = width >= 220 ? 5 : 4
-        let tileWidth: CGFloat = 36
+        let tileWidth = DesktopBoxMetrics.width
         let pitch = tilePitch
         let margin = cols == 5 ? 10 : max(8, floor((width - CGFloat(cols - 1) * pitch - tileWidth) / 2))
         return (0..<count).map { index in
@@ -1923,6 +2052,75 @@ final class DesktopTilesView: NSView {
     private var pressedDesktopID: UInt64?
     private var mouseDownLocationInWindow: NSPoint?
     private var desktopDragStarted = false
+    /// How far from the dragged desktop's middle it was grabbed.
+    private var dragGrabOffset: CGFloat = 0
+    /// The dragged desktop's number, which travels underneath it.
+    private var draggedNumberLabel: NSTextField?
+    /// Whether the pointer is a closed hand for a drag, to restore afterward.
+    private var showsGrabCursor = false
+
+    /// Keeps the dragged desktop's number underneath it, including when a
+    /// layout pass puts every number back under its own place.
+    private func placeDraggedNumberLabel() {
+        guard let label = draggedNumberLabel else { return }
+        label.frame = numberLabelFrame(under: convert(dragPreview.frame, from: dragPreview.superview))
+    }
+
+    /// Where a desktop's number sits under a tile in this row.
+    private func numberLabelFrame(under frame: NSRect) -> NSRect {
+        let minX = max(0, frame.minX - 4)
+        return NSRect(x: minX, y: frame.maxY + numberLabelYOffset,
+                      width: min(bounds.width - minX, frame.width + 8), height: 20)
+    }
+
+    /// Follows a pressed desktop until it's released, like a slider in a menu.
+    /// Left to the menu, drags reach this row only while the pointer is over
+    /// it; elsewhere the menu highlights its items and opens their submenus,
+    /// and the dragged desktop stops following.
+    private func trackPressedDesktop() {
+        guard let window else { return }
+        var dragged = false
+        var lastEvent: NSEvent?
+        // Holding a desktop still for a moment closes the hand too.
+        let grabTime = Date(timeIntervalSinceNow: 0.5)
+        while pressedDesktopID != nil {
+            let wake = Date(timeIntervalSinceNow: 0.1)
+            let event = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp],
+                                         until: showsGrabCursor ? wake : min(wake, grabTime),
+                                         inMode: .eventTracking, dequeue: true)
+            if !showsGrabCursor, Date() >= grabTime, pressedDesktopCanReorder {
+                showsGrabCursor = true
+            }
+            // The menu puts the arrow back, even while the pointer holds still.
+            if showsGrabCursor { NSCursor.closedHand.set() }
+            guard let event else {
+                // A release can go missing; never hold the menu once the button is up.
+                if NSEvent.pressedMouseButtons & 1 == 0 {
+                    release(atWindowPoint: window.mouseLocationOutsideOfEventStream)
+                }
+                continue
+            }
+            lastEvent = event
+            if event.type == .leftMouseUp {
+                mouseUp(with: event)
+            } else {
+                mouseDragged(with: event)
+                dragged = dragged || desktopDragStarted
+            }
+        }
+        // The menu items the pointer crossed meanwhile would otherwise light
+        // up as their queued hovers arrive after the drop.
+        if dragged {
+            NSApp.discardEvents(matching: [.mouseEntered, .mouseExited, .mouseMoved], before: lastEvent)
+        }
+    }
+
+    private var pressedDesktopCanReorder: Bool {
+        guard let id = pressedDesktopID, let index = desktopIDs.firstIndex(of: id),
+              buttons.indices.contains(index) else { return false }
+        return buttons[index].canReorder
+    }
+
     private var gestureGeneration: UInt = 0
     private var animationGeneration: UInt = 0
     private var columns: Int { bounds.width >= 220 ? 5 : 4 }
@@ -2038,7 +2236,7 @@ final class DesktopTilesView: NSView {
         closeContainer.isHidden = true
         addSubview(closeContainer)
         dragPreview.isHidden = true
-        dragPreview.alphaValue = 0.85
+        dragPreview.alphaValue = 1
         addSubview(dragPreview)
         NotificationCenter.default.addObserver(self, selector: #selector(refreshAccentColors),
             name: NSColor.systemColorsDidChangeNotification, object: nil)
@@ -2077,6 +2275,9 @@ final class DesktopTilesView: NSView {
         mouseDownLocationInWindow = event.locationInWindow
         closeContainer.isHidden = true
         addButton.setHovered(false, animated: false)
+        // Holding a desktop clears its tooltip, which stays away until release.
+        setTileToolTipsHidden(true)
+        trackPressedDesktop()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -2085,6 +2286,12 @@ final class DesktopTilesView: NSView {
               let index = desktopIDs.firstIndex(of: source),
               buttons.indices.contains(index), buttons[index].canReorder else { return }
         let beginning = !desktopDragStarted
+        // The hand closes at the first movement, before the desktop itself
+        // lifts, so a slightly unsteady click still selects it.
+        if !showsGrabCursor, event.locationInWindow != origin {
+            showsGrabCursor = true
+            NSCursor.closedHand.set()
+        }
         if beginning,
            hypot(event.locationInWindow.x - origin.x, event.locationInWindow.y - origin.y) < 5 {
             return
@@ -2095,6 +2302,10 @@ final class DesktopTilesView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         desktopInteractionTrace("row mouseUp received")
+        release(atWindowPoint: event.locationInWindow)
+    }
+
+    private func release(atWindowPoint location: NSPoint) {
         guard let source = pressedDesktopID else { return }
         let completedDrag = desktopDragStarted
         let generation = gestureGeneration
@@ -2113,7 +2324,12 @@ final class DesktopTilesView: NSView {
             return
         }
 
-        let point = convert(event.locationInWindow, from: nil)
+        if showsGrabCursor {
+            showsGrabCursor = false
+            NSCursor.arrow.set()
+        }
+        setTileToolTipsHidden(false)
+        let point = convert(location, from: nil)
         guard let index = desktopIDs.firstIndex(of: source),
               buttons.indices.contains(index),
               buttons[index].frame.contains(point), buttons[index].isEnabled else { return }
@@ -2126,7 +2342,7 @@ final class DesktopTilesView: NSView {
         let button = DesktopTileButton(title: "\(index + 1)", target: self, action: #selector(selectDesktop(_:)))
         button.applicationIcons = applicationIcons
         let names = button.applicationIcons.map(\.name).joined(separator: ", ")
-        button.toolTip = names.isEmpty ? "Desktop \(index + 1)" : "Desktop \(index + 1): \(names)"
+        button.desktopToolTip = names.isEmpty ? "Desktop \(index + 1)" : "Desktop \(index + 1): \(names)"
         button.cell = DesktopTileCell(textCell: "\(index + 1)")
         button.target = self
         button.action = #selector(selectDesktop(_:))
@@ -2181,7 +2397,7 @@ final class DesktopTilesView: NSView {
                 && !button.representsFullscreenSpace
                 && (snapshot?.desktopIDs.count ?? 0) > 1
             // Keep the app inventory tooltip intact across status refreshes.
-            if button.toolTip == nil { button.toolTip = "Desktop \(index + 1)" }
+            if button.desktopToolTip == nil { button.desktopToolTip = "Desktop \(index + 1)" }
         }
         addButton.isHidden = ids.isEmpty
         if addButton.isHidden { addButton.setHovered(false, animated: false) }
@@ -2774,7 +2990,8 @@ final class DesktopTilesView: NSView {
 
     private var rowHeights: [CGFloat] {
         stride(from: 0, to: buttons.count, by: columns).map { start in
-            buttons[start..<min(start + columns, buttons.count)].contains { $0.applicationIcons.count > 4 } ? 42 : 28
+            buttons[start..<min(start + columns, buttons.count)].contains { $0.applicationIcons.count > 4 }
+                ? DesktopBoxMetrics.tallHeight : DesktopBoxMetrics.compactHeight
         }
     }
 
@@ -2965,7 +3182,7 @@ final class DesktopTilesView: NSView {
             let title = "Desktop \(desktopNumber ?? index + 1)"
             tooltip = title + ": " + (names.isEmpty ? "Empty" : names.joined(separator: ", "))
         }
-        if button.toolTip != tooltip { button.toolTip = tooltip }
+        if button.desktopToolTip != tooltip { button.desktopToolTip = tooltip }
         button.setAccessibilityLabel(tooltip)
     }
 
@@ -2979,26 +3196,47 @@ final class DesktopTilesView: NSView {
             previewOrder = desktopIDs
             closeContainer.isHidden = true
             addButton.setHovered(false, animated: false)
-            if let bitmap = button.bitmapImageRepForCachingDisplay(in: button.bounds) {
-                button.cacheDisplay(in: button.bounds, to: bitmap)
-                let image = NSImage(size: button.bounds.size)
-                image.addRepresentation(bitmap)
-                dragPreview.image = image
-            }
+            if let image = button.dragImage() { dragPreview.image = image }
             dragPreview.frame.size = button.frame.size
+            dragPreview.setOutline(button.makeDragOutline())
             dragPreview.isHidden = false
             (superview ?? self).addSubview(dragPreview, positioned: .above, relativeTo: nil)
-            button.alphaValue = 0.15
-            numberLabels[button.tag].alphaValue = 0.35
+            // The desktop itself moves, held where it was grabbed, leaving
+            // its place empty rather than a faint copy behind. Its number
+            // moves with it.
+            button.alphaValue = 0
+            draggedNumberLabel = numberLabels[button.tag]
+            let grabbed = mouseDownLocationInWindow ?? event.locationInWindow
+            dragGrabOffset = grabbed.x - convert(NSPoint(x: button.frame.midX, y: 0), to: nil).x
         }
         guard dragOriginalIDs == desktopIDs else { finishReorder(cancelled: true); return }
-        let point = convert(event.locationInWindow, from: nil)
-        let previewPoint = (dragPreview.superview ?? self).convert(event.locationInWindow, from: nil)
-        dragPreview.frame.origin = NSPoint(x: previewPoint.x - dragPreview.frame.width / 2, y: previewPoint.y - dragPreview.frame.height / 2)
+        let externalTarget = crossDisplayTarget?(event.locationInWindow)
+        // The dragged desktop slides along a row of tiles, never up or down
+        // off it nor past its ends, and moves to another row only when you
+        // point at that row.
+        let lane = (externalTarget != nil ? crossDisplayLane?(event.locationInWindow) : nil)
+            ?? dragLane(nearWindowPoint: event.locationInWindow)
+        let size = dragPreview.frame.size
+        var center = NSPoint(x: event.locationInWindow.x - dragGrabOffset, y: event.locationInWindow.y)
+        if let lane {
+            center.x = min(max(center.x, lane.minX + size.width / 2), lane.maxX - size.width / 2)
+            center.y = lane.midY
+        }
+        let previewCenter = (dragPreview.superview ?? self).convert(center, from: nil)
+        dragPreview.frame.origin = NSPoint(x: previewCenter.x - size.width / 2, y: previewCenter.y - size.height / 2)
+        // Over another display's row, that row's own numbers show instead.
+        draggedNumberLabel?.alphaValue = externalTarget == nil ? 1 : 0
+        placeDraggedNumberLabel()
         // Hit-test stationary slots, not the tiles moving out of the way.
         // Otherwise an animated neighbor can repeatedly reverse the shuffle.
-        let destination = dragSlots.firstIndex { $0.insetBy(dx: -3, dy: -6).contains(point) }
-        let externalTarget = crossDisplayTarget?(event.locationInWindow)
+        // In its own row, the desktop goes to the place nearest where it is.
+        var destination: Int?
+        if externalTarget == nil, lane != nil {
+            let point = convert(center, from: nil)
+            destination = dragSlots.indices
+                .filter { dragSlots[$0].minY <= point.y && point.y <= dragSlots[$0].maxY }
+                .min { abs(dragSlots[$0].midX - point.x) < abs(dragSlots[$1].midX - point.x) }
+        }
         dragAppends = externalTarget?.after ?? false
         let localTarget = destination.flatMap { desktopIDs.indices.contains($0) ? desktopIDs[$0] : nil }
         let target = externalTarget?.id ?? localTarget
@@ -3021,20 +3259,28 @@ final class DesktopTilesView: NSView {
             for (index, identifier) in desktopIDs.enumerated() {
                 guard let slot = previewOrder.firstIndex(of: identifier) else { continue }
                 let frame = dragSlots[slot]
-                let labelMinX = max(0, frame.minX - 4)
-                let labelWidth = min(bounds.width - labelMinX, frame.width + 8)
-                let labelFrame = NSRect(x: labelMinX,
-                    y: frame.maxY + numberLabelYOffset,
-                    width: labelWidth, height: 20)
+                let labelFrame = numberLabelFrame(under: frame)
+                // A dragged desktop's number stays underneath it instead (below).
+                let label: NSTextField? = numberLabels[index] === draggedNumberLabel ? nil : numberLabels[index]
                 if context.duration > 0 {
                     buttons[index].animator().frame = frame
-                    numberLabels[index].animator().frame = labelFrame
+                    label?.animator().frame = labelFrame
                 } else {
                     buttons[index].frame = frame
-                    numberLabels[index].frame = labelFrame
+                    label?.frame = labelFrame
                 }
             }
         }
+        placeDraggedNumberLabel()
+    }
+
+    /// Every display's tiles, since a desktop can be dragged onto another display's row.
+    private func setTileToolTipsHidden(_ hidden: Bool) {
+        func visit(_ view: NSView) {
+            (view as? DesktopTileButton)?.hidesToolTip = hidden
+            view.subviews.forEach(visit)
+        }
+        visit(window?.contentView ?? self)
     }
 
     private func finishReorder(cancelled: Bool, animated: Bool = true) {
@@ -3048,16 +3294,24 @@ final class DesktopTilesView: NSView {
         dragSourceID = nil
         dragTargetID = nil
         dragOriginalIDs = []
+        setTileToolTipsHidden(false)
         dragPreview.isHidden = true
         addSubview(dragPreview)
         buttons.forEach { $0.alphaValue = 1; $0.isDropTarget = false }
         numberLabels.forEach { $0.alphaValue = 1 }
+        draggedNumberLabel = nil
+        if showsGrabCursor {
+            showsGrabCursor = false
+            NSCursor.arrow.set()
+        }
         if !valid || source == target || target == nil {
             previewOrder = desktopIDs
             applyShuffle(animated: animated)
             previewOrder = []
         }
         if valid, let source, let target, source != target {
+            // The number settles under the desktop's new place.
+            applyShuffle(animated: animated)
             let expectedIDs = desktopIDs
             // Complete on the menu's next tracking-loop turn. Main-queue work
             // waits for NSMenu to close, which would strand the drag preview and
@@ -3076,14 +3330,19 @@ final class DesktopTilesView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let hoverArea { removeTrackingArea(hoverArea) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self)
+        // A replaced area doesn't know the pointer is inside, so it would
+        // never report leaving, and a desktop that appeared under the pointer
+        // would keep its hover. Assuming inside reports every exit.
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect, .assumeInside], owner: self)
         addTrackingArea(area)
         hoverArea = area
     }
 
     override func mouseEntered(with event: NSEvent) { updateHover() }
     override func mouseMoved(with event: NSEvent) { updateHover() }
-    override func mouseExited(with event: NSEvent) {
+    override func mouseExited(with event: NSEvent) { clearHover() }
+
+    private func clearHover() {
         hoveredID = nil
         hoveredIndex = nil
         closeContainer.isHidden = true

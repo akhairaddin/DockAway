@@ -44,6 +44,12 @@ final class OnboardingKeyboardSettingsView: NSView {
     private var rightHandRows: [DockSettingKeyRebindRowView] = []
     private var leftHandRows: [DockSettingKeyRebindRowView] = []
     private let resetButton = NSButton()
+    // Takes the button's place to ask first, like "Reset Shortcuts to Defaults"
+    // in the menu.
+    private let resetConfirmation = NSStackView()
+    private let resetPromptLabel = NSTextField(labelWithString: "Reset all shortcuts?")
+    private let resetCancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private let resetConfirmButton = DockDestructiveButton(title: "Reset", target: nil, action: nil)
     private var isResetting = false
     private var resetSuccessTimer: Timer?
 
@@ -56,6 +62,13 @@ final class OnboardingKeyboardSettingsView: NSView {
     private let backButton = NSButton()
     private let getStartedButton: OnboardingPrimaryButton
     private let bottomControlsStack = NSStackView()
+    private var footerBottom: NSLayoutConstraint!
+    /// How far above the page's bottom Back and Get Started sit, so they line
+    /// up with the welcome page's Quit and Continue.
+    var footerBottomInset: CGFloat {
+        get { -footerBottom.constant }
+        set { footerBottom.constant = -newValue }
+    }
     private let shortcutRowHeight: CGFloat
 
     init(
@@ -206,8 +219,31 @@ final class OnboardingKeyboardSettingsView: NSView {
         )
         resetButton.translatesAutoresizingMaskIntoConstraints = false
 
+        resetPromptLabel.font = .systemFont(ofSize: 13)
+        resetPromptLabel.textColor = .labelColor
+        resetCancelButton.bezelStyle = .rounded
+        resetCancelButton.controlSize = .small
+        resetCancelButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        resetConfirmButton.controlSize = .small
+        resetConfirmButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        resetConfirmButton.hasDestructiveAction = true
+        resetConfirmation.orientation = .horizontal
+        resetConfirmation.alignment = .centerY
+        resetConfirmation.spacing = 6
+        resetConfirmation.addArrangedSubview(resetPromptLabel)
+        resetConfirmation.setCustomSpacing(8, after: resetPromptLabel)
+        resetConfirmation.addArrangedSubview(resetCancelButton)
+        resetConfirmation.addArrangedSubview(resetConfirmButton)
+        resetConfirmation.wantsLayer = true
+        resetConfirmation.isHidden = true
+        resetConfirmation.setAccessibilityElement(true)
+        resetConfirmation.setAccessibilityRole(.group)
+        resetConfirmation.setAccessibilityLabel("Reset all shortcuts to defaults?")
+        resetConfirmation.translatesAutoresizingMaskIntoConstraints = false
+
         shortcutsCard.addSubview(rowsContainer)
         shortcutsCard.addSubview(resetButton)
+        shortcutsCard.addSubview(resetConfirmation)
 
         rowsContainer.addSubview(rightHandStack)
         rowsContainer.addSubview(leftHandStack)
@@ -229,7 +265,12 @@ final class OnboardingKeyboardSettingsView: NSView {
 
             resetButton.topAnchor.constraint(equalTo: rowsContainer.bottomAnchor, constant: compact ? 6 : 8),
             resetButton.centerXAnchor.constraint(equalTo: shortcutsCard.centerXAnchor),
-            resetButton.bottomAnchor.constraint(equalTo: shortcutsCard.bottomAnchor, constant: compact ? -6 : -9)
+            resetButton.bottomAnchor.constraint(equalTo: shortcutsCard.bottomAnchor, constant: compact ? -6 : -9),
+
+            resetConfirmation.centerXAnchor.constraint(equalTo: resetButton.centerXAnchor),
+            resetConfirmation.centerYAnchor.constraint(equalTo: resetButton.centerYAnchor),
+            resetConfirmButton.heightAnchor.constraint(equalToConstant: 20),
+            resetCancelButton.heightAnchor.constraint(equalToConstant: 20)
         ])
 
         // Bottom Controls
@@ -238,7 +279,7 @@ final class OnboardingKeyboardSettingsView: NSView {
         backButton.controlSize = .large
         backButton.keyEquivalent = "\u{1b}"
         backButton.translatesAutoresizingMaskIntoConstraints = false
-        backButton.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        backButton.widthAnchor.constraint(equalToConstant: OnboardingPageLayout.footerButtonWidth).isActive = true
         if #available(macOS 26.0, *) {
             backButton.borderShape = .capsule
         }
@@ -247,7 +288,7 @@ final class OnboardingKeyboardSettingsView: NSView {
         getStartedButton.controlSize = .large
         getStartedButton.keyEquivalent = "\r"
         getStartedButton.translatesAutoresizingMaskIntoConstraints = false
-        getStartedButton.widthAnchor.constraint(equalToConstant: 114).isActive = true
+        getStartedButton.widthAnchor.constraint(equalToConstant: OnboardingPageLayout.footerButtonWidth).isActive = true
 
         let spacer = NSView()
         spacer.translatesAutoresizingMaskIntoConstraints = false
@@ -257,8 +298,10 @@ final class OnboardingKeyboardSettingsView: NSView {
         bottomControlsStack.alignment = .centerY
         bottomControlsStack.translatesAutoresizingMaskIntoConstraints = false
         bottomControlsStack.heightAnchor.constraint(equalToConstant: 32).isActive = true
-        bottomControlsStack.addArrangedSubview(backButton)
+        // Grouped on the right, like the welcome page's Quit and Continue.
+        bottomControlsStack.spacing = 10
         bottomControlsStack.addArrangedSubview(spacer)
+        bottomControlsStack.addArrangedSubview(backButton)
         bottomControlsStack.addArrangedSubview(getStartedButton)
 
         super.init(frame: .zero)
@@ -279,6 +322,7 @@ final class OnboardingKeyboardSettingsView: NSView {
         addSubview(scrollView)
         addSubview(bottomControlsStack)
 
+        footerBottom = bottomControlsStack.bottomAnchor.constraint(equalTo: bottomAnchor)
         var constraints = [
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -302,8 +346,8 @@ final class OnboardingKeyboardSettingsView: NSView {
             shortcutsCard.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
 
             bottomControlsStack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            bottomControlsStack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            bottomControlsStack.bottomAnchor.constraint(equalTo: bottomAnchor)
+            bottomControlsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            footerBottom!
         ]
         var lastSection: NSView = shortcutsCard
         if let extras {
@@ -344,6 +388,10 @@ final class OnboardingKeyboardSettingsView: NSView {
 
         resetButton.target = self
         resetButton.action = #selector(handleResetClicked(_:))
+        resetCancelButton.target = self
+        resetCancelButton.action = #selector(handleResetCancelled(_:))
+        resetConfirmButton.target = self
+        resetConfirmButton.action = #selector(handleResetConfirmed(_:))
 
         backButton.target = self
         backButton.action = #selector(handleBackClicked(_:))
@@ -578,6 +626,7 @@ final class OnboardingKeyboardSettingsView: NSView {
         leftHandOption.selectionEnabled = isOn
         rightHandOption.selectionEnabled = isOn
         resetButton.isEnabled = isOn && !isResetting
+        if !isOn { setResetConfirming(false, animated: animated) }
 
         if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             NSAnimationContext.runAnimationGroup { ctx in
@@ -590,6 +639,55 @@ final class OnboardingKeyboardSettingsView: NSView {
     }
 
     @objc private func handleResetClicked(_ sender: NSButton) {
+        guard !isResetting else { return }
+        setResetConfirming(true, animated: true)
+    }
+
+    @objc private func handleResetCancelled(_ sender: NSButton) {
+        setResetConfirming(false, animated: true)
+    }
+
+    @objc private func handleResetConfirmed(_ sender: NSButton) {
+        guard !isResetting, !resetConfirmation.isHidden else { return }
+        setResetConfirming(false, animated: true)
+        resetAllShortcuts()
+    }
+
+    /// Swaps "Reset to Defaults" for the question and its buttons, in place.
+    private func setResetConfirming(_ confirming: Bool, animated: Bool) {
+        guard resetConfirmation.isHidden == confirming else { return }
+        if animated, window != nil, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let transition = CATransition()
+            transition.type = .fade
+            transition.duration = 0.16
+            transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            shortcutsCard.layer?.add(transition, forKey: "resetConfirmationFade")
+        }
+        // Show the new controls before hiding the old ones, so keyboard focus
+        // moves between them rather than skipping ahead.
+        let hadFocus = confirming
+            ? window?.firstResponder === resetButton
+            : [resetCancelButton, resetConfirmButton].contains { window?.firstResponder === $0 }
+        if confirming {
+            resetConfirmation.isHidden = false
+            if hadFocus { window?.makeFirstResponder(resetCancelButton) }
+            resetButton.isHidden = true
+        } else {
+            resetButton.isHidden = false
+            if hadFocus { window?.makeFirstResponder(resetButton) }
+            resetConfirmation.isHidden = true
+        }
+        // While it asks, Escape cancels the question instead of going Back.
+        resetCancelButton.keyEquivalent = confirming ? "\u{1b}" : ""
+        backButton.keyEquivalent = confirming ? "" : "\u{1b}"
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        setResetConfirming(false, animated: false)
+    }
+
+    private func resetAllShortcuts() {
         guard !isResetting else { return }
         isResetting = true
         resetButton.isEnabled = false

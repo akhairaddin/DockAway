@@ -1,5 +1,6 @@
 #import "DesktopCreationBridge.h"
 #import "DesktopRemovalWindowPolicy.h"
+#import "EverySpaceWindowPolicy.h"
 #import <objc/runtime.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <AppKit/AppKit.h>
@@ -23,6 +24,8 @@ typedef struct {
     CFArrayRef (*copyManagedDisplaySpaces)(int32_t);
     CFArrayRef (*copySpacesForWindows)(int32_t, uint32_t, CFArrayRef);
     CFArrayRef (*copyWindowsWithOptionsAndTags)(int32_t, uint32_t, CFArrayRef, uint32_t, uint64_t *, uint64_t *);
+    void (*addWindowsToSpaces)(int32_t, CFArrayRef, CFArrayRef);
+    int32_t (*windowIsOrderedIn)(int32_t, uint32_t, bool *);
 } DockAwaySkyLightFunctions;
 
 // Resolved once. Loading SkyLight also registers the SLSBridged* operation
@@ -38,6 +41,8 @@ static const DockAwaySkyLightFunctions *DockAwaySkyLight(void) {
         functions.copyManagedDisplaySpaces = dlsym(lib, "SLSCopyManagedDisplaySpaces");
         functions.copySpacesForWindows = dlsym(lib, "SLSCopySpacesForWindows");
         functions.copyWindowsWithOptionsAndTags = dlsym(lib, "SLSCopyWindowsWithOptionsAndTags");
+        functions.addWindowsToSpaces = dlsym(lib, "SLSAddWindowsToSpaces");
+        functions.windowIsOrderedIn = dlsym(lib, "SLSWindowIsOrderedIn");
     });
     return &functions;
 }
@@ -327,6 +332,7 @@ NSDictionary<NSNumber *, NSArray<NSNumber *> *> *DockAwayCopyDesktopApplicationP
         if (!windows) return nil;
         NSMutableDictionary<NSNumber *, NSMutableOrderedSet<NSNumber *> *> *owners = [NSMutableDictionary dictionary];
         for (NSNumber *sid in spaceIDs) owners[sid] = [NSMutableOrderedSet orderedSet];
+        NSMutableDictionary<NSNumber *, NSNumber *> *hiddenApps = [NSMutableDictionary dictionary];
         for (NSDictionary *window in windows) {
             // Window identity and PID only. No titles, thumbnails, or screen recording.
             if ([window[(id)kCGWindowLayer] integerValue] != 0) continue;
@@ -337,6 +343,20 @@ NSDictionary<NSNumber *, NSArray<NSNumber *> *> *DockAwayCopyDesktopApplicationP
             // Shared utility windows are not evidence of an app having a
             // desktop-specific window on every Space they span.
             if (spaces.count != 1) continue;
+            // A window nobody can see, such as one a Chrome web app leaves on
+            // a desktop it isn't using, isn't the app being there. A hidden
+            // app's windows still count; a minimized window doesn't, as in
+            // Mission Control.
+            bool orderedIn = true;
+            if (skyLight->windowIsOrderedIn && skyLight->windowIsOrderedIn(connection(), wid.unsignedIntValue, &orderedIn) == 0
+                && !orderedIn) {
+                NSNumber *hidden = hiddenApps[pid];
+                if (!hidden) {
+                    hidden = @([NSRunningApplication runningApplicationWithProcessIdentifier:pid.intValue].hidden);
+                    hiddenApps[pid] = hidden;
+                }
+                if (!hidden.boolValue) continue;
+            }
             for (NSNumber *sid in spaces) [owners[sid] addObject:pid];
         }
         NSMutableDictionary *result = [NSMutableDictionary dictionary];
@@ -629,6 +649,25 @@ BOOL DockAwayIsWindowOnSpace(CGWindowID windowID, uint64_t spaceID) {
             }
         }
         return NO;
+    }
+}
+
+BOOL DockAwayRestoreWindowToEverySpace(CGWindowID windowID) {
+    @autoreleasepool {
+        if (!windowID) return NO;
+        const DockAwaySkyLightFunctions *skyLight = DockAwaySkyLight();
+        int32_t (*connection)(void) = skyLight->mainConnection;
+        CFArrayRef (*copyManaged)(int32_t) = skyLight->copyManagedDisplaySpaces;
+        CFArrayRef (*copySpaces)(int32_t, uint32_t, CFArrayRef) = skyLight->copySpacesForWindows;
+        void (*addToSpaces)(int32_t, CFArrayRef, CFArrayRef) = skyLight->addWindowsToSpaces;
+        if (!connection || !copyManaged || !copySpaces || !addToSpaces) return NO;
+
+        NSArray *membership = CFBridgingRelease(copySpaces(connection(), 7, (__bridge CFArrayRef)@[@(windowID)]));
+        NSArray *displays = CFBridgingRelease(copyManaged(connection()));
+        NSArray *missing = DockAwayMissingSpaces(displays, membership);
+        if (missing.count == 0) return NO;
+        addToSpaces(connection(), (__bridge CFArrayRef)@[@(windowID)], (__bridge CFArrayRef)missing);
+        return YES;
     }
 }
 

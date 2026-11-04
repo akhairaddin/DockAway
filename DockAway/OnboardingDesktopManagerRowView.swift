@@ -217,7 +217,7 @@ final class OnboardingDesktopManagerRowView: NSView, NSPopoverDelegate {
 
     /// Whole points, so a popover anchored to the preview never lands half a point off.
     private static func previewHeight(named name: String, width: CGFloat) -> CGFloat {
-        let fallbackAspect: CGFloat = name == sharedPreviewName ? 768.0 / 880.0 : 1024.0 / 880.0
+        let fallbackAspect: CGFloat = name == sharedPreviewName ? 916.0 / 1016.0 : 1228.0 / 1016.0
         guard let size = NSImage(named: name)?.size, size.width > 0 else { return (width * fallbackAspect).rounded() }
         return (width * size.height / size.width).rounded()
     }

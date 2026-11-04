@@ -9,6 +9,37 @@
     </style>
 </head>
 <body>
+    <h3>Version 2.1.5 <span style="font-weight: normal;">(Unreleased)</span></h3>
+    <h4>New Features</h4>
+    <ul>
+        <li>None</li>
+    </ul>
+    <h4>Improvements</h4>
+    <ul>
+        <li><b>Bigger App Icons in the Desktop Manager:</b> App icons are nearly twice as large, each tucked into its own corner of a slightly bigger box. Box corners now follow the shape of app icons, and on macOS 26 and later the current desktop's outline is as thin as the others'.</li>
+        <li><b>Steadier Desktop Dragging:</b> A dragged desktop now moves as one solid box, held where you grabbed it, with its number underneath at full brightness. It slides only along its row, between the first desktop and the "+" button, and the pointer becomes a closed hand as soon as you start moving it or hold it for half a second. Menu items below no longer highlight or open while you drag.</li>
+        <li><b>Black Menu Bar Sweeps In From the Middle:</b> With "Black Out Menu Bar for Filled Screens" on, the black now opens out from the middle of the menu bar instead of fading in, then grows down the sides of the window. It closes back into the middle with a little bounce. On Macs with a camera notch, it grows out of the notch and disappears back into it.</li>
+        <li><b>Menu Bar Stays Black While Swiping:</b> With "Black Out Menu Bar for Filled Screens" on, swiping away from a filled desktop keeps the menu bar black until the swipe lands. Before, it faded out partway through the swipe.</li>
+        <li><b>Menu Stays Open When Closing a Full-Screen App:</b> Closing a full-screen desktop from the Desktop Manager no longer closes the DockAway menu. If it's the desktop you're on, the menu closes while macOS moves you to another desktop, then opens again.</li>
+        <li><b>Clearer Dock Icon Click Options:</b> "Cycle Through Windows" now leads "When You Click a Dock Icon". With "Hide &amp; Show" or "Minimize &amp; Restore" also on, the two are marked "Primary" and "Secondary", since the second takes over for apps with only one window to show.</li>
+        <li><b>Resets Ask First:</b> "Restore Default macOS Dock Settings", "Remove All" in both blacklists, and "Reset to Defaults" in setup now ask before acting, right where you clicked, like "Reset Shortcuts to Defaults". Before, most of them acted on the first click.</li>
+        <li><b>Clearer Dock Position Choice:</b> "Dock Position" in "Dock Settings" is now a single Left, Bottom, Right control instead of three checkboxes, making clear that only one can be chosen.</li>
+        <li><b>Extras Peek Into View During Setup:</b> The setup window is a little taller, so the first Extras option peeks in on the keyboard page, hinting that there's more to scroll to.</li>
+        <li><b>Updated Sparkle:</b> Updated to Sparkle 2.10.1. An update can no longer install early from a folder whose name has non-English characters, and "Install on Quit" is translated into more languages.</li>
+    </ul>
+    <h4>Bug Fixes</h4>
+    <ul>
+        <li><b>Desktop Change Popup No Longer Vanishes After Full Screen:</b> After you leave full screen, the "Desktop Change Popup" could stop appearing on every desktop but one until DockAway restarted. It now shows on every desktop.</li>
+        <li><b>No False Alarm When Closing a Full-Screen Web App:</b> Closing a full-screen Chrome web app such as Google Keep no longer shows "Fullscreen desktop wasn't closed". These apps quit as their window closes, and DockAway now checks that the desktop is actually gone.</li>
+        <li><b>No Ghost App Icons on Desktops:</b> A desktop could show an app it didn't have a window on, such as Google Keep after you closed the desktop its window was on. Chrome web apps leave invisible windows behind, and DockAway now only counts windows you can see.</li>
+        <li><b>Black Menu Bar Stays Off Full-Screen Videos:</b> With "Black Out Menu Bar for Filled Screens" on, the black frame could draw over a full-screen video or app, especially on Macs with a camera notch. It now steps aside whenever a window goes full screen.</li>
+        <li><b>Black Menu Bar Returns on Every Desktop After Full Screen:</b> With "Black Out Menu Bar for Filled Screens" on, leaving full screen could leave the black showing only on the desktop you returned to. It now shows on every desktop again.</li>
+        <li><b>Black Menu Bar No Longer Flickers After Swiping:</b> With "Black Out Menu Bar for Filled Screens" on, arriving on a filled desktop could briefly drop the black and bring it back. It now stays.</li>
+        <li><b>Dragged Desktops Stay Clear and Readable:</b> On macOS 26 and later, a dragged desktop showed as a solid black box. It now keeps its outline and app icons, and its tooltip disappears as soon as you press and hold so it can't cover the desktop's number.</li>
+        <li><b>No More Stuck Highlights After Adding a Desktop:</b> After adding a desktop, the "+" box and the new desktop under the pointer could stay highlighted. Both now return to normal once the pointer leaves them.</li>
+        <li><b>Mission Control Close Button Stays Visible:</b> With "Close Windows in Mission Control" on, an app leaving full screen while Mission Control was open could hide the close button on other desktops. It now appears on every desktop.</li>
+    </ul>
+    <hr>
     <h3>Version 2.1.4 <span style="font-weight: normal;">(10-21-26)</span></h3>
     <h4>New Features</h4>
     <ul>

@@ -18,6 +18,10 @@ BOOL DockAwayReorderDesktop(uint64_t spaceID, uint64_t targetID);
 BOOL DockAwayAppendDesktop(uint64_t spaceID, uint64_t targetID);
 BOOL DockAwayMoveWindowToSpace(CGWindowID windowID, uint64_t targetSpaceID);
 BOOL DockAwayIsWindowOnSpace(CGWindowID windowID, uint64_t spaceID);
+/// Puts an all-desktops window back on every Space it's missing from. macOS
+/// strips a hidden one down to a single Space when a full-screen Space
+/// closes. Returns whether it had to.
+BOOL DockAwayRestoreWindowToEverySpace(CGWindowID windowID);
 BOOL DockAwayRepositionWindowToDisplay(pid_t pid, CGWindowID windowID, CGRect displayBounds);
 NSDictionary<NSNumber *, NSArray<NSNumber *> *> * _Nullable DockAwayCopyDesktopApplicationPIDs(NSArray<NSNumber *> *spaceIDs);
 NS_ASSUME_NONNULL_END

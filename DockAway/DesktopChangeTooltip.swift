@@ -299,6 +299,10 @@ final class DesktopChangeTooltip: NSObject {
     /// Whether the pill steps aside, even while showing, such as in Mission
     /// Control, which shows the desktops itself.
     var mustStepAside: @MainActor () -> Bool = { false }
+    /// Puts the pill back on every desktop. macOS takes a hidden pill off all
+    /// but one when a full-screen desktop closes, and it would then show only
+    /// on that one.
+    var restoreToEveryDesktop: @MainActor (NSWindow) -> Void = { _ in }
 
     private var tracker = DesktopChangeTracker()
     private var presentation: DispatchWorkItem?
@@ -375,6 +379,8 @@ final class DesktopChangeTooltip: NSObject {
         gestureContactsActive = fingers >= 3
         if gestureContactsActive {
             dismissalDeadline = ProcessInfo.processInfo.systemUptime + readingDuration
+            // A showing pill has to be on the next desktop before the swipe slides it in.
+            if presentationActive, let activePanel { restoreToEveryDesktop(activePanel) }
         }
     }
 
@@ -545,6 +551,8 @@ final class DesktopChangeTooltip: NSObject {
     }
 
     private func updateContent(_ destination: DesktopChangeDestination, requestsIcons: Bool = true) {
+        // A pill already showing stays with you only if it's on every desktop.
+        if presentationActive, let activePanel { restoreToEveryDesktop(activePanel) }
         let shouldAnimate = presentationActive && activePanel?.isVisible == true
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let labels = formatLabels(for: destination)
@@ -1086,6 +1094,13 @@ final class DesktopChangeTooltip: NSObject {
     /// Eases the pill in, settling a few points down into place under the
     /// menu bar. One still fading out comes straight back instead.
     private func reveal(_ panel: NSPanel) {
+        restoreToEveryDesktop(panel)
+        // Leaving full screen can still take it off the other desktops just
+        // after it shows, so look once more as it settles.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak panel] in
+            guard let self, let panel, self.presentationActive, panel === self.activePanel else { return }
+            self.restoreToEveryDesktop(panel)
+        }
         startFollowingPointer()
         let fadingOut = panel.isVisible && panel.alphaValue > 0
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {

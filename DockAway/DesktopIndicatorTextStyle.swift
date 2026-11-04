@@ -641,9 +641,20 @@ final class DesktopIndicatorStyleOptionsView: NSView {
             12: "Draws the enclosing pill capsule only around the indicator for the active display containing your pointer.\n\n• Other display indicators remain unencapsulated.\n• Creates a distinctive focal spotlight on your current screen.\n• Automatically moves to the target display as your pointer crosses screens."
         ]
 
-        col0Width = 212
-        col1Width = 212
-        colX = [18.0, 18.0 + col0Width + 14]
+        // Each column is as wide as its longest option needs, in either layout.
+        let titleFont = NSFont.systemFont(ofSize: 11)
+        let titles = Dictionary(uniqueKeysWithValues: items.map { ($0.index, $0.title) })
+        func columnWidth(_ column: Int) -> CGFloat {
+            let indices = (Self.pillLayout + Self.plainLayout).filter { $0.col == column }.map(\.index)
+            let widest = indices.compactMap { titles[$0] }
+                .map { ceil(($0 as NSString).size(withAttributes: [.font: titleFont]).width) }
+                .max() ?? 0
+            // Checkbox and gap, room before the help button, the button, and its inset.
+            return widest + 22 + 5 + 16 + 2
+        }
+        col0Width = columnWidth(0)
+        col1Width = columnWidth(1)
+        colX = [18.0, 18.0 + col0Width + 13]
         self.frame.size.width = max(colX[1] + col1Width + 10, 280)
 
         for item in items {
@@ -679,6 +690,25 @@ final class DesktopIndicatorStyleOptionsView: NSView {
     required init?(coder: NSCoder) { nil }
     override func mouseDown(with event: NSEvent) {} // Keep the native menu open.
 
+    // (option, column, row). The longest names stay in the first column, so
+    // the second only fits shorter ones. With Pill on, its two options sit
+    // right below it.
+    private static let pillLayout: [(index: Int, col: Int, row: Int)] = [
+        (0, 0, 0), (1, 1, 0),
+        (2, 0, 1), (3, 1, 1),
+        (5, 0, 2), (9, 1, 2),
+        (7, 0, 3), (10, 1, 3),
+        (12, 0, 4), (11, 1, 4),
+        (8, 0, 5)
+    ]
+    private static let plainLayout: [(index: Int, col: Int, row: Int)] = [
+        (0, 0, 0), (1, 1, 0),
+        (2, 0, 1), (3, 1, 1),
+        (5, 0, 2), (9, 1, 2),
+        (8, 0, 3), (10, 1, 3),
+        (11, 0, 4)
+    ]
+
     private func applyLayout(usesPill: Bool) {
         currentUsesPill = usesPill
         let totalRows: Int
@@ -686,14 +716,7 @@ final class DesktopIndicatorStyleOptionsView: NSView {
 
         if usesPill {
             totalRows = 6
-            layoutItems = [
-                (0, 0, 0), (1, 1, 0),
-                (2, 0, 1), (3, 1, 1),
-                (5, 0, 2), (7, 1, 2),
-                (9, 0, 3), (8, 1, 3),
-                (10, 0, 4), (11, 1, 4),
-                (12, 0, 5)
-            ]
+            layoutItems = Self.pillLayout
             if let row7 = controls[7] {
                 if row7.superview == nil {
                     if let next = controls[9] {
@@ -714,13 +737,7 @@ final class DesktopIndicatorStyleOptionsView: NSView {
             }
         } else {
             totalRows = 5
-            layoutItems = [
-                (0, 0, 0), (1, 1, 0),
-                (2, 0, 1), (3, 1, 1),
-                (5, 0, 2), (9, 1, 2),
-                (8, 0, 3), (10, 1, 3),
-                (11, 0, 4)
-            ]
+            layoutItems = Self.plainLayout
             controls[7]?.isHidden = true
             controls[7]?.removeFromSuperview()
             controls[12]?.isHidden = true
@@ -740,9 +757,25 @@ final class DesktopIndicatorStyleOptionsView: NSView {
             control.layoutSubtreeIfNeeded()
         }
 
-        self.frame.size.height = CGFloat(totalRows) * rowHeight + 4
+        let height = CGFloat(totalRows) * rowHeight + 4
+        guard abs(frame.height - height) > 0.5 else { return }
+        // Grow or shrink from the top, as the Desktop Manager does, so an open
+        // menu makes room for the row Pill adds or removes instead of cutting
+        // the rows off. The menu itself keeps its top where it was.
+        let menuTop = window?.frame.maxY
+        let flipped = superview?.isFlipped ?? true
+        setFrameOrigin(NSPoint(x: frame.minX, y: flipped ? frame.minY : frame.maxY - height))
+        setFrameSize(NSSize(width: frame.width, height: height))
         invalidateIntrinsicContentSize()
-        enclosingMenuItem?.menu?.update()
+        // An open menu only measures an item's view when it's attached.
+        if let item = enclosingMenuItem, item.menu != nil {
+            item.view = nil
+            item.view = self
+        }
+        if let window, let menuTop, abs(window.frame.maxY - menuTop) > 0.25 {
+            let lowestTop = (window.screen?.visibleFrame.minY ?? -.greatestFiniteMagnitude) + window.frame.height
+            window.setFrameTopLeftPoint(NSPoint(x: window.frame.minX, y: max(menuTop, lowestTop)))
+        }
     }
 
     override func layout() {

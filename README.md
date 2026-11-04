@@ -16,8 +16,6 @@ A native macOS menu-bar utility that shows the Dock on empty desktops and hides 
   <a href="https://github.com/akhairaddin/DockAway/issues">Support</a>
 </p>
 
-**DockAway 2.1.4** adds a black menu bar for filled screens and middle click with force click. See the [changelog](changelog.html) for the complete release notes.
-
 ## Features
 
 - **Automatic Dock visibility:** Reacts to app switches, window changes, and desktop swipes on the display under your pointer. Predictive hiding helps the Dock get out of the way as you open an app.

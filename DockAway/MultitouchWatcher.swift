@@ -48,14 +48,10 @@ final class MultitouchWatcher {
 
     // Finger-count changes fire on contact. Once four contacts move far enough
     // to reject resting noise, their dominant direction is reported once.
-    // `onHorizontalSwipe` follows the whole gesture instead: it reports which
-    // way the fingers have travelled sideways each time that changes, and at
-    // the latest as they lift.
     @discardableResult
     func start(
         onFingerCountChange handler: @escaping FingerCountHandler,
-        onFourFingerMotion motionHandler: @escaping FourFingerMotionHandler,
-        onHorizontalSwipe swipeHandler: FourFingerMotionHandler? = nil
+        onFourFingerMotion motionHandler: @escaping FourFingerMotionHandler
     ) -> Bool {
         guard !isRunning else { return true }
 
@@ -106,10 +102,8 @@ final class MultitouchWatcher {
         mtLastFingerCount = -1
         mtFourFingerOrigin = nil
         mtFourFingerMotionSent = false
-        mtResetSwipe()
         mtFingerHandler = handler
         mtMotionHandler = motionHandler
-        mtSwipeHandler = swipeHandler
         registerCB(dev, mtContactCallback)
         startDevice(dev, 0)
 
@@ -129,10 +123,8 @@ final class MultitouchWatcher {
         device = nil
         mtFingerHandler = nil
         mtMotionHandler = nil
-        mtSwipeHandler = nil
         mtFourFingerOrigin = nil
         mtFourFingerMotionSent = false
-        mtResetSwipe()
         isRunning = false
     }
 
@@ -194,60 +186,6 @@ private let mtMotionThreshold: Float = 0.0035
 private let mtAmbiguousMotionThreshold: Float = 0.010
 private let mtAxisDominance: Float = 1.35
 
-// Sideways travel for `onHorizontalSwipe`. Each frame adds the average move of
-// the contacts that were also down in the previous frame, so a finger landing
-// or lifting mid-gesture never counts as travel, and an early wobble up or
-// down as the fingers land doesn't hide the sideways swipe that follows.
-private var mtSwipeHandler: MultitouchWatcher.FourFingerMotionHandler?
-private var mtSwipeContacts: [(id: Int32, position: MTPoint)] = []
-private var mtSwipeFrameContacts: [(id: Int32, position: MTPoint)] = []
-private var mtSwipeTravel = MTPoint(x: 0, y: 0)
-// -1 after reporting left, 1 after reporting right, 0 before either.
-private var mtSwipeReported: Int8 = 0
-private let mtSwipeThreshold: Float = 0.004
-// Any clearly sideways travel at all is reported as the fingers lift.
-private let mtSwipeLiftThreshold: Float = 0.0015
-
-private func mtResetSwipe() {
-    mtSwipeContacts.removeAll(keepingCapacity: true)
-    mtSwipeTravel = MTPoint(x: 0, y: 0)
-    mtSwipeReported = 0
-}
-
-private func mtSwipeDirection(threshold: Float) -> MultitouchWatcher.FourFingerMotion? {
-    let sideways = abs(mtSwipeTravel.x)
-    guard sideways >= threshold, sideways >= abs(mtSwipeTravel.y) else { return nil }
-    let direction: Int8 = mtSwipeTravel.x < 0 ? -1 : 1
-    guard direction != mtSwipeReported else { return nil }
-    mtSwipeReported = direction
-    return direction < 0 ? .horizontalLeft : .horizontalRight
-}
-
-private func mtFollowSwipe(
-    _ contacts: UnsafeMutablePointer<MTContact>,
-    count: Int
-) -> MultitouchWatcher.FourFingerMotion? {
-    var deltaX: Float = 0
-    var deltaY: Float = 0
-    var matched: Float = 0
-    mtSwipeFrameContacts.removeAll(keepingCapacity: true)
-    for index in 0..<count {
-        let identifier = contacts[index].identifier
-        let position = contacts[index].normalized.position
-        if let previous = mtSwipeContacts.first(where: { $0.id == identifier }) {
-            deltaX += position.x - previous.position.x
-            deltaY += position.y - previous.position.y
-            matched += 1
-        }
-        mtSwipeFrameContacts.append((identifier, position))
-    }
-    swap(&mtSwipeContacts, &mtSwipeFrameContacts)
-    guard matched > 0 else { return nil }
-    mtSwipeTravel.x += deltaX / matched
-    mtSwipeTravel.y += deltaY / matched
-    return mtSwipeDirection(threshold: mtSwipeThreshold)
-}
-
 private let mtContactCallback: @convention(c)
     (Int32, UnsafeMutableRawPointer?, Int32, Double, Int32) -> Int32 = {
         _, contactBytes, nFingers, _, _ in
@@ -255,30 +193,12 @@ private let mtContactCallback: @convention(c)
         let hadGestureContact = mtLastFingerCount >= 3
         let hasGestureContact = nFingers >= 3
         var detectedMotion: MultitouchWatcher.FourFingerMotion?
-        var swipe: MultitouchWatcher.FourFingerMotion?
 
-        // MultitouchSupport still delivers hardware frames, but while fewer
-        // than three fingers remain unchanged there is no useful work for
-        // DockAway to perform.
-        if !countChanged, !hasGestureContact {
-            return 0
-        }
-
-        if hasGestureContact, let contactBytes {
-            let count = Int(nFingers)
-            let contacts = contactBytes.assumingMemoryBound(to: MTContact.self)
-            if !hadGestureContact { mtResetSwipe() }
-            if mtSwipeHandler != nil {
-                swipe = mtFollowSwipe(contacts, count: count)
-            }
-        }
-
-        // After the gesture direction is known, only the sideways travel
-        // above still needs each frame.
-        if hasGestureContact, !countChanged, mtFourFingerMotionSent {
-            if let swipe {
-                DispatchQueue.main.async { mtSwipeHandler?(swipe) }
-            }
+        // MultitouchSupport still delivers hardware frames, but after the
+        // gesture direction is known—or while fewer than three fingers remain
+        // unchanged—there is no useful work for DockAway to perform.
+        if !countChanged,
+           !hasGestureContact || mtFourFingerMotionSent {
             return 0
         }
 
@@ -322,20 +242,11 @@ private let mtContactCallback: @convention(c)
                 }
             }
         } else {
-            if hadGestureContact {
-                // A short flick can lift before crossing the usual threshold.
-                swipe = mtSwipeDirection(threshold: mtSwipeLiftThreshold)
-            }
-            mtResetSwipe()
             mtFourFingerOrigin = nil
             mtFourFingerMotionSent = false
         }
 
         mtLastFingerCount = nFingers
-        // The direction goes first, so it arrives before a lift's count.
-        if let swipe {
-            DispatchQueue.main.async { mtSwipeHandler?(swipe) }
-        }
         // Also report three-finger Mission Control gestures and their release.
         if countChanged {
             let count = Int(nFingers)

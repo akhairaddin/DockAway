@@ -57,7 +57,9 @@ enum MenuBarBlackoutDecision {
 
     /// Displays whose usable area an ordinary window fills. A window reaching
     /// into the menu bar is in native full screen, where macOS hides the menu
-    /// bar itself, so it doesn't count.
+    /// bar itself, so it doesn't count. On a display with a camera notch, a
+    /// full-screen window sits below the notch like a filling window does, so
+    /// the controller also steps aside on a full-screen desktop.
     static func filledDisplays(_ displays: [MenuBarBlackoutDisplay], windows: [MenuBarBlackoutWindow],
                                excluding ownPID: pid_t) -> Set<CGDirectDisplayID> {
         Set(fillingWindows(displays, windows: windows, excluding: ownPID).keys)
@@ -78,6 +80,33 @@ enum MenuBarBlackoutDecision {
             }
         }
         return filling
+    }
+
+    /// Displays a window covers completely, menu bar and all, in front of any
+    /// window filling the space below the menu bar, such as a video player's
+    /// full screen that stays on the desktop. The black steps aside there
+    /// rather than frame the window behind it.
+    static func coveredDisplays(_ displays: [MenuBarBlackoutDisplay], windows: [MenuBarBlackoutWindow],
+                                excluding ownPID: pid_t) -> Set<CGDirectDisplayID> {
+        var covered = Set<CGDirectDisplayID>()
+        for display in displays {
+            let usable = display.usableFrame
+            for window in windows where window.layer == 0 && window.alpha > 0 && window.ownerPID != ownPID
+                && window.bounds.intersects(display.frame) {
+                let bounds = window.bounds
+                if bounds.minX <= display.frame.minX + tolerance && bounds.minY <= display.frame.minY + tolerance
+                    && bounds.maxX >= display.frame.maxX - tolerance && bounds.maxY >= display.frame.maxY - tolerance {
+                    covered.insert(display.id)
+                    break
+                }
+                // A filling window in front of anything covering decides it.
+                if abs(bounds.minY - usable.minY) <= tolerance && bounds.minX <= usable.minX + tolerance
+                    && bounds.maxX >= usable.maxX - tolerance && bounds.maxY >= usable.maxY - tolerance {
+                    break
+                }
+            }
+        }
+        return covered
     }
 
     /// The display as it may be on another desktop, where the Dock might be
@@ -229,6 +258,11 @@ final class MenuBarBlackoutController {
     var menuBarTextIsWhite: (CGDirectDisplayID) -> Bool? = { _ in nil }
     /// The desktop a display shows, to remember which desktops have a filling window.
     var currentSpaceID: (CGDirectDisplayID) -> UInt64? = { _ in nil }
+    /// Whether a display shows an app's full-screen desktop rather than an ordinary one.
+    var currentDesktopIsFullscreen: (CGDirectDisplayID) -> Bool = { _ in false }
+    /// Puts the black back on every desktop before it shows. macOS takes it
+    /// off all but one if it's hidden when a full-screen desktop closes.
+    var restoreToEveryDesktop: (NSWindow) -> Void = { _ in }
     /// True while DockAway itself is moving between desktops.
     var isSwitchingDesktops: () -> Bool = { false }
     /// The desktops either side of a display's current one, to look ahead
@@ -261,16 +295,10 @@ final class MenuBarBlackoutController {
     /// macOS just reported a new desktop: its window list is settled, so the
     /// next check acts on it straight away.
     private var desktopJustChanged = false
-    /// Whether the desktops either side of the swipe's display have a filling
-    /// window, worked out as the swipe starts.
-    private var swipeLookahead: (display: CGDirectDisplayID, previous: Bool?, next: Bool?)?
     /// The desktop each display showed as the swipe started. macOS keeps
     /// reporting it as current until the swipe's animation ends, so it's no
     /// sign of where the swipe is landing.
     private var swipeStartDesktops: [CGDirectDisplayID: UInt64] = [:]
-    /// The swipe took the black away as it headed for a desktop that isn't
-    /// filled, so it comes back if the swipe turns around.
-    private var swipeHidBlack = false
     /// The menu bar text color last logged, to log only changes.
     private var loggedTextIsWhite: Bool?
     /// The lock screen shows the desktop's wallpaper, so while the screen is
@@ -379,7 +407,6 @@ final class MenuBarBlackoutController {
                 self.wallpaperReverts.removeAll()
                 self.rememberedFilled.removeAll()
                 self.swipeStartDesktops.removeAll()
-                self.swipeHidBlack = false
                 self.wallpaperRedos.removeAll()
                 self.blackTextSince.removeAll()
                 self.desktopSwitchSettlesAt = 0
@@ -503,11 +530,10 @@ final class MenuBarBlackoutController {
     }
 
     /// Works out whether the desktops either side have a filling window, so
-    /// the black can follow the swipe instead of waiting for it to land.
+    /// the black can follow as soon as the swipe lands instead of waiting for
+    /// the window list to settle. Until then, the menu bar stays as it is.
     private func lookAheadForSwipe() {
-        swipeLookahead = nil
         swipeStartDesktops.removeAll()
-        swipeHidBlack = false
         guard isEnabled else { return }
         for display in NSScreen.screens.compactMap(\.displayID) {
             swipeStartDesktops[display] = currentSpaceID(display)
@@ -535,8 +561,7 @@ final class MenuBarBlackoutController {
             spaceFilled[desktop.id] = isFilled
             return isFilled
         }
-        let lookahead = (display: display, previous: filled(neighbors.previous), next: filled(neighbors.next))
-        swipeLookahead = lookahead
+        let lookahead = (previous: filled(neighbors.previous), next: filled(neighbors.next))
         func describe(_ filled: Bool?) -> String { filled.map { $0 ? "filled" : "not filled" } ?? "none" }
         dockAwayDebugLog("Menu bar blackout: previous desktop \(describe(lookahead.previous)), "
                          + "next desktop \(describe(lookahead.next))")
@@ -555,26 +580,6 @@ final class MenuBarBlackoutController {
         let tileSize = (CFPreferencesCopyAppValue("tilesize" as CFString, "com.apple.dock" as CFString)
                         as? NSNumber)?.doubleValue ?? 64
         return CGFloat(min(max(tileSize, 16), 128)) + 40
-    }
-
-    /// The swipe's direction is known as soon as the fingers start moving, and
-    /// again each time it turns around, up to when the fingers lift. Heading
-    /// for a desktop with nothing filling it, the black fades out now. The
-    /// desktop being left still has its black-band wallpaper, so the menu bar
-    /// stays black and slides away with it, and its text never ends up black
-    /// on black. Turning back, the black returns.
-    func desktopSwipeMoved(towardNext: Bool) {
-        let landing = ProcessInfo.processInfo.systemUptime < desktopSwitchSettlesAt
-        guard isEnabled, !isAway, desktopGestureActive || landing, let lookahead = swipeLookahead,
-              let overlay = overlays[lookahead.display] else { return }
-        let destination = towardNext ? lookahead.next : lookahead.previous
-        if destination == false {
-            if overlay.isShown { swipeHidBlack = true }
-            hideOverlay(on: lookahead.display, animated: true, reason: "swiping to a desktop that isn't filled")
-        } else if swipeHidBlack {
-            swipeHidBlack = false
-            overlay.setShown(true, animated: true, reason: "the swipe turned back")
-        }
     }
 
     private func displayUnderPointer() -> CGDirectDisplayID? {
@@ -597,7 +602,7 @@ final class MenuBarBlackoutController {
                                                              excluding: getpid())[display.id] == nil {
                 // Only once the window list agrees, in case this desktop
                 // has been filled since it was last showing.
-                hideOverlay(on: display.id, animated: true, quickly: true, reason: "arrived on a desktop that wasn't filled")
+                hideOverlay(on: display.id, animated: true, reason: "arrived on a desktop that wasn't filled")
             }
         }
     }
@@ -627,12 +632,20 @@ final class MenuBarBlackoutController {
         desktopJustChanged = false
         let windows = currentWindows()
         let filling = MenuBarBlackoutDecision.fillingWindows(displays, windows: windows, excluding: getpid())
+        // A full-screen window, on its own desktop or covering the display in
+        // place, such as a video, hides the menu bar itself. The black and its
+        // frame step aside rather than draw over it, and the wallpaper stays
+        // as it is for when the window leaves full screen.
+        let fullScreen = MenuBarBlackoutDecision.coveredDisplays(displays, windows: windows, excluding: getpid())
+            .union(displays.map(\.id).filter(currentDesktopIsFullscreen))
         // Mid-slide, the window list mixes two desktops, and macOS still
         // counts the one being left as current, so a wallpaper set then lands
         // on the wrong desktop and the menu bar text ends up out of step with
         // it. Keyboard shortcuts and other switches give no notice of the
         // slide, so nothing changes until it's over.
-        let changing = displays.contains { (filling[$0.id] != nil) != (overlays[$0.id]?.isShown == true) }
+        let changing = displays.contains {
+            !fullScreen.contains($0.id) && (filling[$0.id] != nil) != (overlays[$0.id]?.isShown == true)
+        }
         if !changing || settledDesktop {
             slidingSince = nil
         } else if desktopIsSliding(displays, windows: windows, now: now) {
@@ -643,14 +656,23 @@ final class MenuBarBlackoutController {
 
         for display in displays {
             guard let screen = NSScreen.screen(withDisplayID: display.id) else { continue }
+            if fullScreen.contains(display.id) {
+                hideOverlay(on: display.id, animated: true, quickly: true, reason: "a full-screen window covers the screen")
+                continue
+            }
             if checkWallpapers, let inputs = wallpaperInputs(for: screen), !isBandedCopy(inputs.url) {
                 // Ready before a window fills this desktop, so the swap is instant.
                 prepareWallpaper(inputs)
             }
             var filled = filling[display.id] != nil
+            // Just arrived on a desktop, its window can be missing from the
+            // list for a moment, so unless the desktop was empty last time,
+            // the black waits for it like any other gap rather than closing
+            // and opening again.
+            let arrivedEmpty = currentSpaceID(display.id).flatMap { spaceFilled[$0] } == false
             if filled {
                 unfilledSince[display.id] = nil
-            } else if overlays[display.id]?.isShown == true, !settledDesktop {
+            } else if overlays[display.id]?.isShown == true, !settledDesktop || !arrivedEmpty {
                 let since = unfilledSince[display.id] ?? now
                 unfilledSince[display.id] = since
                 // Keep the black through a brief gap, such as mid-transition.
@@ -664,8 +686,8 @@ final class MenuBarBlackoutController {
             if filling[display.id] == nil, filled { continue }
             if let window = filling[display.id] {
                 filledSince[display.id] = filledSince[display.id] ?? now
-                // The wallpaper swaps as the black fades in, so the menu bar
-                // text turns white about when the fade finishes.
+                // The wallpaper swaps as the black sweeps in, so the menu bar
+                // text turns white while it opens.
                 let checkedRecently = now - (lastWallpaperCheck[display.id] ?? 0) < Self.wallpaperCheckInterval
                 if checkWallpapers || !checkedRecently {
                     lastWallpaperCheck[display.id] = now
@@ -691,8 +713,9 @@ final class MenuBarBlackoutController {
                 let restored = (wasFilled || checkWallpapers) && restoreWallpaper(on: screen)
                 if settledDesktop {
                     // Arriving on this desktop, macOS gives its menu bar the
-                    // wallpaper's text color right away, so the black goes quickly.
-                    hideOverlay(on: display.id, animated: true, quickly: true, reason: "arrived on a desktop with nothing filling it")
+                    // wallpaper's text color right away, so the black goes now
+                    // rather than waiting for a wallpaper.
+                    hideOverlay(on: display.id, animated: true, reason: "arrived on a desktop with nothing filling it")
                 } else {
                     hideOverlay(on: display.id, animated: true, awaitingWallpaper: restored, reason: "no window fills the screen")
                 }
@@ -792,6 +815,14 @@ final class MenuBarBlackoutController {
 
     // MARK: - Overlay
 
+    /// The camera housing between the menu bar's two halves, in screen
+    /// coordinates, on a display that has one.
+    private static func notch(of screen: NSScreen) -> CGRect? {
+        guard let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea,
+              right.minX > left.maxX else { return nil }
+        return CGRect(x: left.maxX, y: left.minY, width: right.minX - left.maxX, height: left.height)
+    }
+
     /// Blacks out the menu bar and a thin frame down the window's sides, with
     /// the window showing through an opening rounded like its corners.
     private func showOverlay(on screen: NSScreen, display: MenuBarBlackoutDisplay, around window: MenuBarBlackoutWindow) {
@@ -802,12 +833,12 @@ final class MenuBarBlackoutController {
         let menuBarBottom = screen.visibleFrame.maxY + MenuBarBlackoutDecision.tolerance
         let top = min(windowFrame.maxY, menuBarBottom)
         let menuBar = NSRect(x: screen.frame.minX, y: top, width: screen.frame.width, height: screen.frame.maxY - top)
-        let overlay = overlays[display.id] ?? MenuBarBlackoutOverlay()
+        let overlay = overlays[display.id] ?? MenuBarBlackoutOverlay { [weak self] in self?.restoreToEveryDesktop($0) }
         overlays[display.id] = overlay
         overlay.update(screen: screen.frame, menuBar: menuBar,
                        window: windowFrame.intersection(screen.frame),
                        opening: MenuBarBlackoutDecision.frameOpening(window: windowFrame, menuBarBottom: menuBarBottom),
-                       radius: cornerRadius(of: window.id))
+                       radius: cornerRadius(of: window.id), notch: Self.notch(of: screen))
         fadesAwaitingWallpaper.remove(display.id)
         overlay.setShown(true, animated: true, reason: "a window fills the screen")
     }
@@ -1253,38 +1284,52 @@ final class MenuBarBlackoutController {
 
 /// The black menu bar and thin frame around the window filling one display.
 @MainActor
-private final class MenuBarBlackoutOverlay {
+final class MenuBarBlackoutOverlay {
     private let frame = MenuBarBlackoutPanel(content: MenuBarBlackoutFrameView())
-    /// Whether it's showing or fading in, rather than hidden or fading out.
+    /// Whether it's showing or sweeping in, rather than hidden or sweeping out.
     private(set) var isShown = false
-    /// Cancels a delayed fade out when the black is wanted again first.
+    /// Cancels a delayed sweep out when the black is wanted again first.
     private var fadeGeneration = 0
     private var fadeOutWaiting = false
-    private static let fadeDuration: TimeInterval = 0.35
+    /// The black opens out from the middle of the screen and closes back into it.
+    private static let wipeInDuration: TimeInterval = 0.85
+    private static let wipeOutDuration: TimeInterval = 1.3
     /// For when the menu bar text is already, or about to be, black.
-    private static let quickFadeDuration: TimeInterval = 0.15
+    private static let quickWipeDuration: TimeInterval = 0.6
+    private let restoreToEveryDesktop: (NSWindow) -> Void
+
+    init(restoreToEveryDesktop: @escaping (NSWindow) -> Void) {
+        self.restoreToEveryDesktop = restoreToEveryDesktop
+    }
 
     private var windows: [MenuBarBlackoutPanel] { [frame] }
 
+    private func orderFront(_ windows: [MenuBarBlackoutPanel]) {
+        windows.forEach { restoreToEveryDesktop($0); $0.orderFrontRegardless() }
+    }
+
     /// Everything in screen coordinates (origin at the bottom left).
-    func update(screen: NSRect, menuBar: NSRect, window: CGRect, opening: CGRect, radius: CGFloat) {
+    func update(screen: NSRect, menuBar: NSRect, window: CGRect, opening: CGRect, radius: CGFloat,
+                notch: CGRect? = nil) {
         if frame.frame != screen { frame.setFrame(screen, display: false) }
         func local(_ rect: CGRect) -> CGRect { rect.offsetBy(dx: -screen.minX, dy: -screen.minY) }
         (frame.contentView as? MenuBarBlackoutFrameView)?.update(menuBar: local(menuBar), window: local(window),
                                                                   opening: local(opening), radius: radius)
+        frameView?.notch = notch.map(local)
     }
 
-    /// Fades in or out. A fade out can wait, keeping the black solid meanwhile.
+    /// Sweeps in or out. A sweep out can wait, keeping the black solid meanwhile.
     func setShown(_ shown: Bool, animated: Bool, after delay: TimeInterval = 0, quickly: Bool = false,
                   reason: String) {
         guard animated else {
             fadeGeneration += 1
             isShown = shown
             windows.forEach { $0.contentView?.alphaValue = shown ? 1 : 0 }
-            windows.forEach { shown ? $0.orderFrontRegardless() : $0.orderOut(nil) }
+            frameView?.setRevealed(shown)
+            if shown { orderFront(windows) } else { windows.forEach { $0.orderOut(nil) } }
             return
         }
-        // Repeating the same request, as every check does, keeps a pending fade.
+        // Repeating the same request, as every check does, keeps a pending sweep.
         guard shown != isShown else { return }
         dockAwayDebugLog("Menu bar blackout: \(shown ? "show" : "hide") — \(reason)")
         fadeGeneration += 1
@@ -1295,44 +1340,42 @@ private final class MenuBarBlackoutOverlay {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self, self.fadeGeneration == generation else { return }
                 self.fadeOutWaiting = false
-                self.fade(shown: false)
+                self.sweep(shown: false)
             }
         } else {
-            fade(shown: shown, duration: quickly ? Self.quickFadeDuration : Self.fadeDuration)
+            sweep(shown: shown, quickly: quickly)
         }
     }
 
-    /// Starts a fade out that's waiting, without waiting any longer.
+    private var frameView: MenuBarBlackoutFrameView? { frame.contentView as? MenuBarBlackoutFrameView }
+
+    /// Starts a sweep out that's waiting, without waiting any longer.
     func fadeOutIfWaiting() {
         guard fadeOutWaiting, !isShown else { return }
         fadeGeneration += 1
         fadeOutWaiting = false
-        fade(shown: false)
+        sweep(shown: false)
     }
 
-    /// Fades the black through its layers, so Core Animation runs the fade and
-    /// work on DockAway's main thread can't make it stall.
-    private func fade(shown: Bool, duration: TimeInterval? = nil) {
+    /// Sweeps the black through its mask's path, so Core Animation runs the
+    /// sweep and work on DockAway's main thread can't make it stall.
+    private func sweep(shown: Bool, quickly: Bool = false) {
         let windows = self.windows
-        if shown { windows.forEach { $0.orderFrontRegardless() } }
+        if shown { orderFront(windows) }
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             windows.forEach { $0.contentView?.alphaValue = shown ? 1 : 0 }
+            frameView?.setRevealed(shown)
             if !shown { windows.forEach { $0.orderOut(nil) } }
             return
         }
         let generation = fadeGeneration
         let overlay = self
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = duration ?? Self.fadeDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            context.allowsImplicitAnimation = true
-            windows.forEach { $0.contentView?.animator().alphaValue = shown ? 1 : 0 }
-        } completionHandler: {
-            MainActor.assumeIsolated {
-                // A later fade in wins over this one finishing.
-                guard !shown, overlay.fadeGeneration == generation else { return }
-                windows.forEach { $0.orderOut(nil) }
-            }
+        frameView?.alphaValue = 1
+        let duration = quickly ? Self.quickWipeDuration : (shown ? Self.wipeInDuration : Self.wipeOutDuration)
+        frameView?.setRevealed(shown, duration: duration) {
+            // A later sweep in wins over this one finishing.
+            guard !shown, overlay.fadeGeneration == generation else { return }
+            windows.forEach { $0.orderOut(nil) }
         }
     }
 }
@@ -1341,7 +1384,7 @@ private final class MenuBarBlackoutOverlay {
 /// filling window, so the menu bar and its items always draw over it. At the
 /// menu bar's own level, whichever was brought forward last would be on top,
 /// sometimes hiding the menus. The window itself stays clear; its
-/// layer-backed content fades.
+/// layer-backed content sweeps in and out.
 private final class MenuBarBlackoutPanel: NSWindow {
     init(content: NSView) {
         super.init(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
@@ -1352,7 +1395,7 @@ private final class MenuBarBlackoutPanel: NSWindow {
         ignoresMouseEvents = true
         animationBehavior = .none
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) - 1)
-        // Not in full screen spaces, where macOS hides the menu bar.
+        // This still joins full-screen desktops; the controller hides it there.
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         content.wantsLayer = true
         content.alphaValue = 0
@@ -1375,6 +1418,91 @@ private final class MenuBarBlackoutFrameView: NSView {
     private let border = CAShapeLayer()
     private var geometry: [CGRect] = []
     private var radius: CGFloat = 0
+    /// A solid band centered on the notch that the black shows through. Its
+    /// ends are shaped like the sides of a MacBook Pro's notch, so it grows
+    /// out of the notch as a wider notch and shrinks back into it. Only the
+    /// ends move, so they keep their exact shape.
+    private let wipeMask = CAShapeLayer()
+    private var isRevealed = false
+    /// The band's current width, from one end's outer edge to the other's.
+    private var wipeWidth: CGFloat = 0
+    /// The camera housing, in this view's coordinates.
+    var notch: CGRect? {
+        didSet {
+            guard notch != oldValue, wipeMask.animation(forKey: "wipe") == nil else { return }
+            needsLayout = true
+        }
+    }
+    /// The notch's rounded lower corners.
+    private static let notchBottomRadius: CGFloat = 10
+    /// The small inward curves where the notch meets the top of the screen.
+    private static let notchTopRadius: CGFloat = 6
+    /// How much deeper than the notch the band's shaped ends reach.
+    private static let extraNotchDepth: CGFloat = 1
+    /// How long the extra point below the notch takes to rise back into it
+    /// at the end of a close, or grow at the start of an open, as a share of
+    /// the close's usual duration.
+    private static let settleShare: Double = 0.12
+    /// Without a notch, how narrow the last of the band gets before it pulls
+    /// up toward the top of the screen.
+    private static let skinnyWidth: CGFloat = 8
+    /// How far each shaped end reaches in from the band's outer edge.
+    private static var endLength: CGFloat { notchTopRadius + notchBottomRadius }
+    private var wipeGeneration = 0
+    /// Opening starts gently out of the notch and reaches the screen's edges
+    /// at full speed, with no easing out. Closing, without a notch, lands
+    /// softly in the middle.
+    private static let wipeInTiming = CAMediaTimingFunction(controlPoints: 0.42, 0, 1, 1)
+    private static let wipeOutTiming = CAMediaTimingFunction(controlPoints: 0.5, 0, 0.2, 1)
+    /// Closing into a notch glides in and, the moment the band's ends meet
+    /// the notch's sides, bounces straight back off them, with no dip behind
+    /// the notch: out a little way, then back in an arc, like a ball, to rest.
+    /// How long the glide and the bounce take, as shares of the close's usual
+    /// duration.
+    private static let glideShare: Double = 0.36
+    private static let bounceShare: Double = 0.35
+    /// How far each end bounces back out from where it rests, in points:
+    /// about 17 pt past the notch's side, since at rest its straight side
+    /// sits a flare's width inside it.
+    private static let bounceHeight: CGFloat = 23
+    /// The band arrives faster than it bounces back, as a ball loses some
+    /// speed when it bounces.
+    private static let bounceRestitution: Double = 0.55
+
+    /// Each end's offset from where it rests in the notch, in points (wider is
+    /// positive), along the whole close, sampled smoothly for the animation,
+    /// and how long that takes.
+    private static func bounceOffsets(from start: CGFloat, glide: Double, bounce: Double,
+                                      samplesPerSecond: Double = 120) -> (offsets: [CGFloat], duration: Double) {
+        // An arc out and back, like a ball, over the bounce's time, reaching
+        // its height.
+        let height = Double(bounceHeight)
+        let pull = 8 * height / (bounce * bounce)
+        // Then a second, half-height bounce, under the same pull.
+        let heights = [height, height / 2]
+        let arcs = heights.map { (launch: sqrt(2 * pull * $0), time: sqrt(8 * $0 / pull)) }
+        let arrivalSpeed = arcs[0].launch / bounceRestitution   // Points a second, inward.
+        let duration = glide + arcs.reduce(0) { $0 + $1.time }
+        let count = max(2, Int(duration * samplesPerSecond))
+        let offsets = (0...count).map { index -> CGFloat in
+            let t = duration * Double(index) / Double(count)
+            if t <= glide {
+                // A smooth start, arriving at the notch still moving.
+                let s = t / glide
+                let h00 = 2 * s * s * s - 3 * s * s + 1, h11 = s * s * s - s * s
+                return CGFloat(Double(start) * h00 - arrivalSpeed * glide * h11)
+            }
+            var since = t - glide
+            for arc in arcs {
+                if since <= arc.time {
+                    return CGFloat(max(0, arc.launch * since - pull * since * since / 2))
+                }
+                since -= arc.time
+            }
+            return 0
+        }
+        return (offsets, duration)
+    }
     /// Over the window's own colors, like the border macOS draws on a dark window.
     private static let borderColor = NSColor(white: 1, alpha: 0.12).cgColor
     private static let borderWidth: CGFloat = 0.5
@@ -1391,6 +1519,241 @@ private final class MenuBarBlackoutFrameView: NSView {
             shape.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
             layer?.addSublayer(shape)
         }
+        wipeMask.fillColor = NSColor.black.cgColor
+        wipeMask.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
+        layer?.mask = wipeMask
+    }
+
+    private var menuBarHeight: CGFloat { geometry.first.map { bounds.maxY - $0.minY } ?? 0 }
+
+    /// Wide enough that both shaped ends are past the screen's edges.
+    private var revealedWidth: CGFloat { bounds.width + 2 * Self.endLength }
+
+    /// Fully open, or closed: exactly as wide as the notch, where it's hidden
+    /// behind it, or a small notch shape in the middle without one.
+    private func wipeWidth(revealed: Bool) -> CGFloat {
+        if revealed { return revealedWidth }
+        // Without a notch, the last of it shrinks away to nothing.
+        return notch.map { max(2 * Self.endLength, $0.width) } ?? 0
+    }
+
+    /// The band's depth for a width: a point deeper than the notch, so as it
+    /// docks the notch looks a point taller, and when open at least the whole
+    /// black bar. Changes in step with the width.
+    private func wipeDepth(width: CGFloat) -> CGFloat {
+        guard let notch else { return menuBarHeight }
+        // Open, it covers the whole black bar, which reaches down to the
+        // filling window's top and can be a point or two deeper than the
+        // menu bar, or else a sliver of wallpaper shows below it.
+        // Docked in the notch, it's a point deeper than the notch.
+        let dockedDepth = notch.height + Self.extraNotchDepth
+        let openDepth = max(dockedDepth, menuBarHeight)
+        return dockedDepth + (openDepth - dockedDepth) * openness(width: width)
+    }
+
+    /// How far open the band is, from 0 docked in the notch to 1 fully open.
+    private func openness(width: CGFloat) -> CGFloat {
+        let closed = wipeWidth(revealed: false), open = wipeWidth(revealed: true)
+        return min(1, max(0, (width - closed) / max(1, open - closed)))
+    }
+
+    /// How far below the menu bar the black has grown, from 0 to 1: the black
+    /// in the window's rounded top corners and the side strips. It grows down
+    /// out of the bar once the bar is nearly open, and pulls back up into it
+    /// before the bar closes.
+    private var wipeDrop: CGFloat = 0
+    /// How long the black takes to grow down as the bar finishes opening, as
+    /// a share of the opening's usual duration, and how far through the
+    /// bar's sweep it starts. (0.48 of the 0.85 s opening is 0.4 s.)
+    private static let dropShare: Double = 0.48
+    // Where the bar is, as a share of its way out, when the black starts
+    // growing down: tuned by eye to just as it reaches the screen's edges.
+    private static let dropStartPosition: Double = 0.9947
+    /// How long the black takes to pull back up as the bar starts to close,
+    /// as a share of the close's glide.
+    private static let dropRetract: Double = 0.45
+    /// A cubic curve's handle for a quarter circle.
+    private static let quarterCircle: CGFloat = 0.5523
+
+    /// The band, `width` wide and centered on the notch: down to the notch's
+    /// depth, each end the side of a notch (an inward curve meeting the top
+    /// of the screen, straight down, a rounded lower corner). Below the menu
+    /// bar, between the ends' straight sides, it reaches `drop` of the way
+    /// down the screen. Every width and drop has the same points, so only the
+    /// ends and that lower edge move.
+    private func wipePath(width: CGFloat, drop: CGFloat, settle: CGFloat = 0) -> CGPath {
+        let top = bounds.maxY
+        // Without a notch, once it's down to just its two ends it keeps
+        // narrowing, its curves shrinking to fit, and only when it's really
+        // skinny does it pull up toward the top of the screen until it's gone.
+        let shrink = notch == nil ? min(1, max(0, width) / (2 * Self.endLength)) : 1
+        let lift = notch == nil ? min(1, max(0, width) / Self.skinnyWidth) : 1
+        // `settle` lets the extra point below the notch rise back into it at
+        // the very end of a close, or grow out of it at the start of an open.
+        let depth = (wipeDepth(width: width) - (notch == nil ? 0 : Self.extraNotchDepth * settle)) * lift
+        let center = notch?.midX ?? bounds.midX
+        let half = max(width, 2 * Self.endLength * shrink) / 2
+        let left = center - half, right = center + half
+        let flare = Self.notchTopRadius * shrink, corner = Self.notchBottomRadius * shrink
+        let handle = corner * Self.quarterCircle, flareHandle = flare * Self.quarterCircle
+        let bottom = top - depth
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: left, y: top))
+        // Left end: the inward curve, down the side, the rounded corner.
+        path.addCurve(to: CGPoint(x: left + flare, y: top - flare),
+                      control1: CGPoint(x: left + flareHandle, y: top),
+                      control2: CGPoint(x: left + flare, y: top - flare + flareHandle))
+        path.addLine(to: CGPoint(x: left + flare, y: bottom + corner))
+        path.addCurve(to: CGPoint(x: left + flare + corner, y: bottom),
+                      control1: CGPoint(x: left + flare, y: bottom + corner - handle),
+                      control2: CGPoint(x: left + flare + corner - handle, y: bottom))
+        // Along the bottom to the right end, the mirror image.
+        path.addLine(to: CGPoint(x: right - flare - corner, y: bottom))
+        path.addCurve(to: CGPoint(x: right - flare, y: bottom + corner),
+                      control1: CGPoint(x: right - flare - corner + handle, y: bottom),
+                      control2: CGPoint(x: right - flare, y: bottom + corner - handle))
+        path.addLine(to: CGPoint(x: right - flare, y: top - flare))
+        path.addCurve(to: CGPoint(x: right, y: top),
+                      control1: CGPoint(x: right - flare, y: top - flare + flareHandle),
+                      control2: CGPoint(x: right - flareHandle, y: top))
+        path.closeSubpath()
+        // Below the menu bar, growing down from it.
+        let barBottom = top - menuBarHeight
+        let reach = max(0, barBottom - bounds.minY) * min(1, max(0, drop))
+        path.addRect(CGRect(x: left + flare, y: barBottom - reach,
+                            width: max(0, right - left - 2 * flare), height: reach))
+        return path
+    }
+
+    /// Where a timing curve is at `x` of the way through, as CAMediaTimingFunction would put it.
+    private static func eased(_ timing: CAMediaTimingFunction, _ x: Double) -> Double {
+        var a: [Float] = [0, 0], b: [Float] = [0, 0]
+        timing.getControlPoint(at: 1, values: &a)
+        timing.getControlPoint(at: 2, values: &b)
+        let (x1, y1, x2, y2) = (Double(a[0]), Double(a[1]), Double(b[0]), Double(b[1]))
+        func bezier(_ t: Double, _ p1: Double, _ p2: Double) -> Double {
+            3 * (1 - t) * (1 - t) * t * p1 + 3 * (1 - t) * t * t * p2 + t * t * t
+        }
+        var low = 0.0, high = 1.0
+        for _ in 0..<30 {
+            let mid = (low + high) / 2
+            if bezier(mid, x1, x2) < x { low = mid } else { high = mid }
+        }
+        return bezier((low + high) / 2, y1, y2)
+    }
+
+    private static func smooth(_ x: Double) -> CGFloat {
+        let t = min(1, max(0, x))
+        return CGFloat(t * t * (3 - 2 * t))
+    }
+
+    /// Opens the black out of the notch, or closes it back into the notch.
+    func setRevealed(_ revealed: Bool, duration: TimeInterval? = nil, completion: (() -> Void)? = nil) {
+        wipeGeneration += 1
+        let generation = wipeGeneration
+        let wasRevealed = isRevealed
+        isRevealed = revealed
+        let targetWidth = wipeWidth(revealed: revealed)
+        let targetDrop: CGFloat = revealed ? 1 : 0
+        // Picks up from wherever an interrupted wipe had got to; otherwise from
+        // where the last one ended. Black that's still fully open, such as
+        // when a waiting close is called off, stays put rather than snapping
+        // into the notch and sweeping out again.
+        let barBottom = bounds.maxY - menuBarHeight
+        let fullReach = max(1, barBottom - bounds.minY)
+        let currentWidth: CGFloat, currentDrop: CGFloat
+        if wipeMask.animation(forKey: "wipe") != nil, let box = wipeMask.presentation()?.path?.boundingBox {
+            currentWidth = box.width
+            currentDrop = min(1, max(0, (barBottom - box.minY) / fullReach))
+        } else {
+            currentWidth = wipeWidth(revealed: wasRevealed)
+            currentDrop = wasRevealed ? 1 : 0
+        }
+        wipeWidth = targetWidth
+        wipeDrop = targetDrop
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        wipeMask.removeAnimation(forKey: "wipe")
+        wipeMask.frame = bounds
+        // Closed, the extra point below the notch is gone too.
+        wipeMask.path = wipePath(width: targetWidth, drop: targetDrop, settle: revealed ? 0 : 1)
+        let distance = abs(targetWidth - currentWidth)
+        guard let duration, duration > 0, distance > 0.5 || abs(targetDrop - currentDrop) > 0.01 else {
+            CATransaction.setCompletionBlock { completion?() }
+            CATransaction.commit()
+            return
+        }
+        let samplesPerSecond = 120.0
+        var frames: [(width: CGFloat, drop: CGFloat)] = []
+        let settle = duration * Self.settleShare
+        var total = duration
+        let isFullClose = !revealed && notch != nil
+            && abs(currentWidth - wipeWidth(revealed: true)) < 0.5
+        if isFullClose {
+            // The black below the bar pulls back up into it, while the bar
+            // glides into the notch and bounces off it before it settles.
+            let glide = duration * Self.glideShare, bounce = duration * Self.bounceShare
+            // The bar holds until the black below it has fully pulled back up.
+            let delay = currentDrop > 0 ? glide * Self.dropRetract : 0
+            let (offsets, moveDuration) = Self.bounceOffsets(from: (currentWidth - targetWidth) / 2, glide: glide,
+                                                             bounce: bounce, samplesPerSecond: samplesPerSecond)
+            total = delay + moveDuration
+            let count = max(2, Int(total * samplesPerSecond))
+            frames = (0...count).map { index in
+                let t = total * Double(index) / Double(count)
+                let moving = max(0, t - delay) / moveDuration
+                let offset = offsets[min(offsets.count - 1, Int((moving * Double(offsets.count - 1)).rounded()))]
+                return (targetWidth + 2 * offset, currentDrop * (1 - Self.smooth(t / (glide * Self.dropRetract))))
+            }
+        } else {
+            // A partial wipe takes its share of the time.
+            let fullDistance = abs(wipeWidth(revealed: true) - wipeWidth(revealed: false))
+            total = duration * max(0.35, Double(distance / max(1, fullDistance)))
+            let timing = revealed ? Self.wipeInTiming : Self.wipeOutTiming
+            // Opening grows the black down as the bar settles at the edges,
+            // from the top of the screen to the bottom; closing pulls it up
+            // first.
+            let sweep = total
+            let grow = revealed ? duration * Self.dropShare * Double(1 - currentDrop) : 0
+            // The moment the bar has got that far out.
+            var growStart = sweep
+            if revealed {
+                var low = 0.0, high = 1.0
+                for _ in 0..<30 {
+                    let mid = (low + high) / 2
+                    if Self.eased(timing, mid) < Self.dropStartPosition { low = mid } else { high = mid }
+                }
+                growStart = sweep * high
+            }
+            total = max(sweep, growStart + grow)
+            let count = max(2, Int(total * samplesPerSecond))
+            frames = (0...count).map { index in
+                let t = total * Double(index) / Double(count)
+                let x = min(1, t / sweep)
+                let width = currentWidth + (targetWidth - currentWidth) * CGFloat(Self.eased(timing, x))
+                let dropProgress = revealed
+                    ? (grow > 0 ? Self.smooth((t - growStart) / grow) : 1)
+                    : Self.smooth(x / 0.25)
+                return (width, currentDrop + (targetDrop - currentDrop) * dropProgress)
+            }
+        }
+        let animation = CAKeyframeAnimation(keyPath: "path")
+        // The extra point below the notch: gone at the very end of a close,
+        // growing at the very start of an open.
+        let count = max(1, frames.count - 1)
+        animation.values = frames.enumerated().map { index, frame in
+            let t = total * Double(index) / Double(count)
+            let settled = revealed ? 1 - Self.smooth(t / settle) : Self.smooth((t - (total - settle)) / settle)
+            return wipePath(width: frame.width, drop: frame.drop, settle: settled)
+        }
+        animation.calculationMode = .linear
+        animation.duration = total
+        CATransaction.setCompletionBlock { [weak self] in
+            guard self?.wipeGeneration == generation else { return }
+            completion?()
+        }
+        wipeMask.add(animation, forKey: "wipe")
+        CATransaction.commit()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -1418,6 +1781,15 @@ private final class MenuBarBlackoutFrameView: NSView {
         super.layout()
         black.frame = bounds
         border.frame = bounds
+        if wipeMask.animation(forKey: "wipe") == nil {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            wipeWidth = wipeWidth(revealed: isRevealed)
+            wipeDrop = isRevealed ? 1 : 0
+            wipeMask.frame = bounds
+            wipeMask.path = wipePath(width: wipeWidth, drop: wipeDrop)
+            CATransaction.commit()
+        }
     }
 
     private static func roundedRect(_ rect: CGRect, radius: CGFloat) -> CGPath {

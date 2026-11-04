@@ -21,6 +21,15 @@ func dockAwayDebugLog(_ message: @autoclosure () -> String) {
 #endif
 }
 
+/// Puts an all-desktops window back on every desktop. macOS takes a hidden
+/// one off all but one when a full-screen desktop closes, and it would then
+/// show only on that one.
+func restoreWindowToEveryDesktop(_ window: NSWindow, _ name: String) {
+    guard window.windowNumber > 0,
+          DockAwayRestoreWindowToEverySpace(CGWindowID(window.windowNumber)) else { return }
+    dockAwayDebugLog("🩹 \(name) was on one desktop only; put it back on every desktop")
+}
+
 private final class PulsingStatusDotView: NSView {
     private enum IndicatorState: Equatable {
         case active
@@ -709,7 +718,6 @@ private final class DockAwayStatusView: NSView {
             detail = "App: \(status)"
         }
 
-        // Every state keeps three lines, so the title stays in one place.
         let desktopText: String
         if !active {
             desktopText = unknownDesktop
@@ -718,8 +726,8 @@ private final class DockAwayStatusView: NSView {
         } else {
             desktopText = desktopStatus ?? (warning ? "" : unknownDesktop)
         }
-        // A space keeps an empty line's height.
-        let desktopLine = desktopText.isEmpty ? " " : desktopText
+        // On a desktop the header has two lines, and the menu item shrinks.
+        let desktopLine = desktopText
 
         let permissionRequired = !active
             && !warning
@@ -754,6 +762,7 @@ private final class DockAwayStatusView: NSView {
             fadeText(of: desktopLabel, if: fades)
             desktopLabel.stringValue = desktopLine
         }
+        desktopLabel.isHidden = desktopLine.isEmpty
 
         let actionTitle = warning
             ? warningActionTitle
@@ -778,6 +787,12 @@ private final class DockAwayStatusView: NSView {
         updatePauseResumeTint()
         pauseResumeButton.toolTip = actionTitle
         pauseResumeButton.setAccessibilityLabel(pauseResumeButton.toolTip ?? "Toggle DockAway")
+    }
+
+    /// How much shorter the header is without its third line.
+    var hiddenLineHeight: CGFloat {
+        guard desktopLabel.isHidden, let font = desktopLabel.font else { return 0 }
+        return ceil(NSLayoutManager().defaultLineHeight(for: font)) + detailStack.spacing
     }
 
     /// The pause glyph rests at secondary emphasis and rises to full emphasis
@@ -1205,7 +1220,7 @@ private final class DockSettingSliderView: NSView {
         titleLabel = NSTextField(labelWithString: title)
         leadingLabel = NSTextField(labelWithString: leadingTitle)
         trailingLabel = NSTextField(labelWithString: trailingTitle)
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 62))
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 66))
         autoresizingMask = [.width]
 
         titleLabel.font = .menuFont(ofSize: 0)
@@ -1214,16 +1229,17 @@ private final class DockSettingSliderView: NSView {
         titleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        // The ends mark the scale, quieter than the value between them.
         for label in [leadingLabel, trailingLabel] {
             label.font = .systemFont(ofSize: 10)
-            label.textColor = .labelColor
+            label.textColor = .secondaryLabelColor
             label.setContentHuggingPriority(.required, for: .vertical)
             label.setContentCompressionResistancePriority(.required, for: .vertical)
             label.translatesAutoresizingMaskIntoConstraints = false
         }
         trailingLabel.alignment = .right
 
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 9.5, weight: .medium)
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
         valueLabel.textColor = .labelColor
         valueLabel.alignment = .center
         valueLabel.setContentHuggingPriority(.required, for: .vertical)
@@ -1258,7 +1274,8 @@ private final class DockSettingSliderView: NSView {
         addSubview(trailingLabel)
 
         let leadingInset: CGFloat = 20
-        let trailingInset: CGFloat = -20
+        // At the far end the knob sits centered under the help button.
+        let trailingInset: CGFloat = -10.5
         let helpTrailingInset: CGFloat = -12
 
         var constraints: [NSLayoutConstraint] = [
@@ -1267,7 +1284,7 @@ private final class DockSettingSliderView: NSView {
 
             slider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingInset),
             slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: trailingInset),
-            slider.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            slider.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
 
             leadingLabel.leadingAnchor.constraint(equalTo: slider.leadingAnchor),
             leadingLabel.topAnchor.constraint(equalTo: slider.bottomAnchor, constant: 4),
@@ -1388,7 +1405,7 @@ private final class PillPaddingSlidersView: NSView {
     var helpControl: NSView? { helpButton }
 
     init(width: CGFloat = 280) {
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 62))
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 66))
         autoresizingMask = [.width]
 
         titleLabel.font = .menuFont(ofSize: 0)
@@ -1399,14 +1416,14 @@ private final class PillPaddingSlidersView: NSView {
 
         for label in [leadingLabel, trailingLabel] {
             label.font = .systemFont(ofSize: 9.5)
-            label.textColor = .labelColor
+            label.textColor = .secondaryLabelColor
             label.setContentHuggingPriority(.required, for: .vertical)
             label.setContentCompressionResistancePriority(.required, for: .vertical)
             label.translatesAutoresizingMaskIntoConstraints = false
         }
         trailingLabel.alignment = .right
 
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 9.5, weight: .medium)
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
         valueLabel.textColor = .labelColor
         valueLabel.alignment = .center
         valueLabel.setContentHuggingPriority(.required, for: .vertical)
@@ -1460,8 +1477,8 @@ private final class PillPaddingSlidersView: NSView {
             help.heightAnchor.constraint(equalToConstant: 16),
 
             slider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leadingInset),
-            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
-            slider.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            slider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10.5),
+            slider.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
 
             leadingLabel.leadingAnchor.constraint(equalTo: slider.leadingAnchor),
             leadingLabel.topAnchor.constraint(equalTo: slider.bottomAnchor, constant: 4),
@@ -1531,6 +1548,8 @@ private final class PillPaddingSlidersView: NSView {
 private final class BlacklistGroupSeparatorView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: NSRect(x: 0, y: 0, width: 190, height: 9))
+        // Spans the whole menu, like the dividers around it.
+        autoresizingMask = [.width]
 
         let separator = NSBox()
         separator.boxType = .separator
@@ -1551,7 +1570,8 @@ private final class BlacklistGroupSeparatorView: NSView {
 
 
 private final class DockPositionRowView: NSView {
-    private let buttons: [NSButton]
+    // One control, so it reads as a single choice rather than three checkboxes.
+    private let segmentedControl = NSSegmentedControl()
     private let changeHandler: (Int) -> Void
 
     override var intrinsicContentSize: NSSize {
@@ -1564,36 +1584,29 @@ private final class DockPositionRowView: NSView {
         changeHandler: @escaping (Int) -> Void
     ) {
         self.changeHandler = changeHandler
-        buttons = options.map { option in
-            let button = NSButton(
-                checkboxWithTitle: option.title,
-                target: nil,
-                action: nil
-            )
-            button.tag = option.tag
-            button.focusRingType = .none
-            return button
-        }
         super.init(frame: NSRect(x: 0, y: 0, width: 232, height: 28))
         autoresizingMask = [.width]
 
-        for button in buttons {
-            button.target = self
-            button.action = #selector(selectPosition(_:))
+        segmentedControl.segmentCount = options.count
+        for (index, option) in options.enumerated() {
+            segmentedControl.setLabel(option.title, forSegment: index)
+            segmentedControl.setTag(option.tag, forSegment: index)
         }
+        segmentedControl.trackingMode = .selectOne
+        segmentedControl.segmentDistribution = .fillEqually
+        segmentedControl.controlSize = .regular
+        segmentedControl.focusRingType = .none
+        segmentedControl.target = self
+        segmentedControl.action = #selector(selectPosition(_:))
+        segmentedControl.setAccessibilityLabel("Dock Position")
+        segmentedControl.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(segmentedControl)
 
-        let stack = NSStackView(views: buttons)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 14
-        addSubview(stack)
-
+        // Spans the same width as the sliders below it.
         NSLayoutConstraint.activate([
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-            stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8)
+            segmentedControl.centerYAnchor.constraint(equalTo: centerYAnchor),
+            segmentedControl.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
+            segmentedControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10.5)
         ])
 
         setSelectedTag(selectedTag)
@@ -1604,18 +1617,15 @@ private final class DockPositionRowView: NSView {
     }
 
     func setSelectedTag(_ selectedTag: Int) {
-        for button in buttons {
-            button.state = button.tag == selectedTag ? .on : .off
-        }
+        segmentedControl.selectSegment(withTag: selectedTag)
     }
 
     func setControlsEnabled(_ enabled: Bool) {
-        buttons.forEach { $0.isEnabled = enabled }
+        segmentedControl.isEnabled = enabled
     }
 
-    @objc private func selectPosition(_ sender: NSButton) {
-        setSelectedTag(sender.tag)
-        changeHandler(sender.tag)
+    @objc private func selectPosition(_ sender: NSSegmentedControl) {
+        changeHandler(sender.selectedTag())
     }
 }
 
@@ -2931,17 +2941,17 @@ final class OnboardingPrimaryButton: NSButton {
     private var desktopIndicatorPreviewContext: String?
     private var availableUpdateVersion: String?
     private var blacklistMenu: NSMenu!
-    private weak var blacklistClearActionView: BlacklistActionMenuItemView?
+    private weak var blacklistClearActionView: DockSettingResetControlsRowView?
     private var currentBlacklistBundleIdentifier: String?
     private weak var hoverActivationBlacklistMenu: NSMenu?
-    private weak var hoverActivationBlacklistClearActionView: BlacklistActionMenuItemView?
+    private weak var hoverActivationBlacklistClearActionView: DockSettingResetControlsRowView?
     private var dockSettingsMenu: NSMenu!
     private var dockPositionRowView: DockPositionRowView!
     private var dockAnimationSliderView: DockSettingSliderView!
     private var dockRevealDelaySliderView: DockSettingSliderView!
     private var dockSettingsPersistenceItems = [NSMenuItem]()
     private var dockSettingsPersistenceNoneRowView: DockSettingPersistenceRowView!
-    private var restoreDockDefaultsRowView: DockSettingPersistenceRowView!
+    private var restoreDockDefaultsRowView: DockSettingResetControlsRowView!
     private var dockIconClickMinimizeRowView: DockSettingPersistenceRowView?
     private var dockIconClickHideRowView: DockSettingPersistenceRowView?
     private var dockIconClickCycleRowView: DockSettingPersistenceRowView?
@@ -3131,6 +3141,8 @@ final class OnboardingPrimaryButton: NSButton {
     private weak var permissionSetupSeparateSpacesRowView: OnboardingSeparateSpacesRowView?
     private var nextSeparateSpacesRefresh: TimeInterval = 0
     private weak var permissionSetupKeyboardSettingsView: OnboardingKeyboardSettingsView?
+    /// The welcome page's Launch at Login, Quit and Continue.
+    private weak var permissionSetupFooterRow: NSView?
     private weak var permissionSetupExtrasView: OnboardingExtrasView?
     private var menuBarAppearanceObservation: NSKeyValueObservation?
     /// Whether the menu bar indicator was last drawn for a dark menu bar.
@@ -3239,6 +3251,11 @@ final class OnboardingPrimaryButton: NSButton {
         menuBarBlackoutController.currentSpaceID = { [weak self] display in
             self?.dockWatcher?.desktopSelection(on: display)?.currentID
         }
+        menuBarBlackoutController.currentDesktopIsFullscreen = { [weak self] display in
+            guard let selection = self?.dockWatcher?.desktopSelection(on: display) else { return false }
+            return selection.fullscreenSpaceIDs.contains(selection.currentID)
+        }
+        menuBarBlackoutController.restoreToEveryDesktop = { restoreWindowToEveryDesktop($0, "Black menu bar") }
         menuBarBlackoutController.isSwitchingDesktops = { [weak self] in
             self?.desktopSwitcher.isSwitching == true
         }
@@ -3311,6 +3328,7 @@ final class OnboardingPrimaryButton: NSButton {
         desktopChangeTooltip.mustStepAside = { [weak self] in
             self?.dockWatcher?.isMissionControlActive == true
         }
+        desktopChangeTooltip.restoreToEveryDesktop = { restoreWindowToEveryDesktop($0, "Desktop Change Pill") }
         #if DEBUG
         observeDebugDesktopSwipes()
         #endif
@@ -4358,11 +4376,6 @@ final class OnboardingPrimaryButton: NSButton {
                         ? "  ⚡ Motion confirmed → hidden hold armed"
                         : "  ⚡ Motion confirmed → pre-hide suppressed"
                 )
-            },
-            onHorizontalSwipe: { [weak self] motion in
-                guard let self, self.monitoringShouldRun else { return }
-                // Fingers moving left bring in the next desktop.
-                self.menuBarBlackoutController.desktopSwipeMoved(towardNext: motion == .horizontalLeft)
             }
         )
 
@@ -4436,7 +4449,7 @@ final class OnboardingPrimaryButton: NSButton {
         let menu = NSMenu()
 
         let statusMenuItem = NSMenuItem()
-        let statusContainer = NSView(frame: NSRect(x: 0, y: 0, width: 190, height: 56))
+        let statusContainer = NSView(frame: NSRect(x: 0, y: 0, width: 190, height: Self.statusHeaderHeight))
         statusContainer.autoresizingMask = [.width]
         let statusView = DockAwayStatusView(frame: .zero)
         statusView.translatesAutoresizingMaskIntoConstraints = false
@@ -4465,6 +4478,7 @@ final class OnboardingPrimaryButton: NSButton {
         ])
         statusMenuItem.view = statusContainer
         dockAwayStatusView = statusView
+        fitStatusHeader()
         menu.addItem(statusMenuItem)
 
         let tilesItem = NSMenuItem()
@@ -4473,7 +4487,7 @@ final class OnboardingPrimaryButton: NSButton {
         let initialDesktopCount = dockWatcher?.desktopSelection(on: CGMainDisplayID())?.managerSpaceIDs.count ?? 0
         let canAddInitial = DockAwayDesktopCreationAvailable()
         let initialBoxes = initialDesktopCount + (canAddInitial ? 1 : 0)
-        let initialTilesWidth: CGFloat = initialBoxes >= 5 ? 230 : 190
+        let initialTilesWidth = initialBoxes >= 5 ? DesktopTilesView.wideRowWidth : DesktopTilesView.compactRowWidth
         let tiles = DesktopDisplaySectionsView(frame: NSRect(x: 0, y: 0, width: initialTilesWidth, height: 0))
         tiles.onSelect = { [weak self] identifier in self?.selectDesktop(identifier) }
         tiles.onAdd = { [weak self] displayID in self?.addDesktop(on: displayID) }
@@ -4610,12 +4624,20 @@ final class OnboardingPrimaryButton: NSButton {
         let dockSettingsPersistenceNoneItem = NSMenuItem()
         dockSettingsPersistenceNoneItem.view = dockSettingsPersistenceNoneRowView
 
-        let restoreDockDefaultsRowView = DockSettingPersistenceRowView(
+        // Asks in place first, like "Reset Shortcuts to Defaults".
+        let restoreDockDefaultsRowView = DockSettingResetControlsRowView(
             title: "Restore Default macOS Dock Settings",
-            isOn: false,
-            leadingControlStyle: .resetAction
-        ) { [weak self] _ in
+            iconPointSize: 15,
+            prompt: "Restore defaults?",
+            promptAccessibilityLabel: "Restore default macOS Dock settings?",
+            confirmTitle: "Restore",
+            successTitle: "Dock Settings Reset to Default",
+            highlightInset: 8,
+            titleLeadingAdjustment: 0,
+            width: 190
+        ) { [weak self] finished in
             self?.restoreDefaultDockSettings()
+            finished()
         }
         let restoreDockDefaultsItem = NSMenuItem()
         restoreDockDefaultsItem.view = restoreDockDefaultsRowView
@@ -4623,13 +4645,18 @@ final class OnboardingPrimaryButton: NSButton {
         let dockIconClickMinimizeTitle = "Minimize & Restore"
         let dockIconClickHideTitle = "Hide & Show"
         let dockIconClickCycleTitle = "Cycle Through Windows"
-        let dockIconActionsWidth = max(CGFloat(360), [
+        // 305 pt, or wider if a row needs it: the inset, checkbox, title,
+        // a "Secondary" label, and help button, with the gaps between.
+        let dockIconRoleWidth = ("Secondary" as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium)
+        ]).width
+        let dockIconActionsWidth = max(CGFloat(305), ceil([
             dockIconClickMinimizeTitle, dockIconClickHideTitle, dockIconClickCycleTitle
         ].map {
-            ceil(($0 as NSString).size(withAttributes: [
+            ($0 as NSString).size(withAttributes: [
                 .font: NSFont.systemFont(ofSize: NSFont.systemFontSize)
-            ]).width) + 82
-        }.max() ?? 360)
+            ]).width + dockIconRoleWidth + 84
+        }.max() ?? 305))
         let dockIconActionsHeaderItem = NSMenuItem()
         dockIconActionsHeaderItem.view = DockSettingSectionHeaderView(
             title: "When You Click a Dock Icon",
@@ -4650,7 +4677,7 @@ final class OnboardingPrimaryButton: NSButton {
             trailingInset: 12,
             helpHeading: dockIconClickMinimizeTitle,
             helpTextProvider: {
-                "Click the Dock icon of the app you are using to minimize its open windows. Click it again to restore only the windows DockAway minimized.\n\n• With Cycle Through Windows on, this happens only when the app has one window to show.\n• Turning this on turns off Hides/Unhides App When Dock Icon Clicked.\n• Windows minimized another way stay minimized.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
+                "Click the Dock icon of the app you are using to minimize its open windows. Click it again to restore only the windows DockAway minimized.\n\n\(Self.dockIconCycleFallbackNote)• Turning this on turns off Hide & Show.\n• Windows minimized another way stay minimized.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
             self?.setDockIconClickOption(DockIconClickMinimizeController.preferenceKey, enabled: enabled)
@@ -4673,7 +4700,7 @@ final class OnboardingPrimaryButton: NSButton {
             trailingInset: 12,
             helpHeading: dockIconClickHideTitle,
             helpTextProvider: {
-                "Click the Dock icon of the app you are using to hide the entire app. Click its Dock icon again to unhide and reactivate it.\n\n• With Cycle Through Windows on, this happens only when the app has one window to show.\n• Turning this on turns off Minimize/Expands App When Dock Icon Clicked.\n• Clicking an app that is not currently active keeps the normal macOS activation behavior.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
+                "Click the Dock icon of the app you are using to hide the entire app. Click its Dock icon again to unhide and reactivate it.\n\n\(Self.dockIconCycleFallbackNote)• Turning this on turns off Minimize & Restore.\n• Clicking an app that is not currently active keeps the normal macOS activation behavior.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
             self?.setDockIconClickOption(DockIconClickMinimizeController.hidePreferenceKey, enabled: enabled)
@@ -4691,7 +4718,7 @@ final class OnboardingPrimaryButton: NSButton {
             trailingInset: 12,
             helpHeading: dockIconClickCycleTitle,
             helpTextProvider: {
-                "Click an active app's Dock icon to bring its next window forward. Repeated clicks cycle through its windows in a stable order.\n\n• Windows on the current desktop are included, across displays.\n• Minimized windows stay minimized, and fullscreen windows and dialogs are not cycled.\n• The first click on a background app activates it normally.\n• To minimize or hide an app with only one window, also turn on Minimize/Expands or Hides/Unhides.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
+                "Click an active app's Dock icon to bring its next window forward. Repeated clicks cycle through its windows in a stable order.\n\n• Windows on the current desktop are included, across displays.\n• Minimized windows stay minimized, and fullscreen windows and dialogs are not cycled.\n• The first click on a background app activates it normally.\n• For an app with only one window to show, turn on Hide & Show or Minimize & Restore as the secondary action.\n• Dragging Dock icons and modifier-click actions keep their normal macOS behavior."
             }
         ) { [weak self] enabled in
             self?.setDockIconClickOption(DockIconClickMinimizeController.cyclePreferenceKey, enabled: enabled)
@@ -4748,9 +4775,9 @@ final class OnboardingPrimaryButton: NSButton {
         dockSettingsMenu.addItem(moreSettingsItem)
         dockSettingsMenu.addItem(wideMenuSeparator(width: dockIconActionsWidth, leadingInset: 18, trailingInset: 14))
         dockSettingsMenu.addItem(dockIconActionsHeaderItem)
-        dockSettingsMenu.addItem(dockIconClickHideItem)
-        dockSettingsMenu.addItem(dockIconClickMinimizeItem)
         dockSettingsMenu.addItem(dockIconClickCycleItem)
+        dockSettingsMenu.addItem(dockIconClickMinimizeItem)
+        dockSettingsMenu.addItem(dockIconClickHideItem)
         dockSettingsMenu.addItem(wideMenuSeparator(width: dockIconActionsWidth, leadingInset: 18, trailingInset: 14))
         dockSettingsMenu.addItem(keepDockSettingsAfterQuitItem)
         dockSettingsPersistenceItems.forEach { dockSettingsMenu.addItem($0) }
@@ -4874,22 +4901,9 @@ final class OnboardingPrimaryButton: NSButton {
         dockAwaySettingsMenu.delegate = self
         self.dockAwaySettingsMenu = dockAwaySettingsMenu
 
-        let settingsRowTitles = [
-            "Desktop Manager",
-            "Teleport Pointer in Desktop Manager",
-            "Teleport Pointer to Dock Icon's Window",
-            "Teleport Pointer on “Move to Display”",
-            "Keyboard Navigation"
-        ]
-        let maxSettingTitleWidth = settingsRowTitles.map {
-            ceil(($0 as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 13)]).width)
-        }.max() ?? 200
-        // Keep the settings rows compact so help buttons and submenu chevrons
-        // share the same right edge without crowding the longest title.
-        let desktopManagerTitleWidth = ceil(("Desktop Manager" as NSString).size(
-            withAttributes: [.font: NSFont.menuFont(ofSize: 13)]
-        ).width)
-        let settingsRowWidth = max(240, maxSettingTitleWidth + 76, desktopManagerTitleWidth + 90)
+        // Narrow enough to leave little room beside "Teleport Pointer to Dock
+        // Icon's Window", the longest row.
+        let settingsRowWidth: CGFloat = 300
 
         let desktopManagerItem = NSMenuItem(title: "Desktop Manager", action: nil, keyEquivalent: "")
         let desktopManagerRow = DockSettingToggleRowView(
@@ -4969,7 +4983,7 @@ final class OnboardingPrimaryButton: NSButton {
         keyboardNavMenu.delegate = self
         self.keyboardNavigationMenu = keyboardNavMenu
 
-        let navSubmenuWidth: CGFloat = 380
+        let navSubmenuWidth: CGFloat = 320
 
         let enableNavTitle = "Keyboard Navigation"
         let enableNavItem = NSMenuItem(title: enableNavTitle, action: nil, keyEquivalent: "")
@@ -6890,11 +6904,52 @@ final class OnboardingPrimaryButton: NSButton {
         defaults.set(enabled, forKey: key)
         if enabled, key == DockIconClickMinimizeController.preferenceKey {
             defaults.set(false, forKey: DockIconClickMinimizeController.hidePreferenceKey)
+            defaults.set(true, forKey: Self.dockIconClickMinimizeListedFirstKey)
         } else if enabled, key == DockIconClickMinimizeController.hidePreferenceKey {
             defaults.set(false, forKey: DockIconClickMinimizeController.preferenceKey)
+            defaults.set(false, forKey: Self.dockIconClickMinimizeListedFirstKey)
         }
         refreshDockIconClickMinimizeController()
         refreshDockSettingsMenu()
+    }
+
+    /// Only true while Cycle Through Windows is on, so said only then.
+    private static var dockIconCycleFallbackNote: String {
+        UserDefaults.standard.bool(forKey: DockIconClickMinimizeController.cyclePreferenceKey)
+            ? "• With Cycle Through Windows on, this happens only when the app has one window to show.\n"
+            : ""
+    }
+
+    /// With a fallback on too, cycling is the primary action and the fallback
+    /// takes over for an app with only one window to show.
+    private func updateDockIconClickRoles(cycle: Bool, hide: Bool, minimize: Bool) {
+        let hasFallback = cycle && (hide || minimize)
+        dockIconClickCycleRowView?.setRoleLabel(hasFallback ? "Primary" : nil)
+        dockIconClickHideRowView?.setRoleLabel(hasFallback && hide ? "Secondary" : nil)
+        dockIconClickMinimizeRowView?.setRoleLabel(hasFallback && minimize && !hide ? "Secondary" : nil)
+    }
+
+    /// Whether Minimize & Restore was the fallback chosen last, and so is
+    /// listed above Hide & Show.
+    private static let dockIconClickMinimizeListedFirstKey = "dockIconClickMinimizeListedFirst"
+
+    /// The fallback chosen last sits right below Cycle Through Windows, and
+    /// stays there when turned off; Minimize & Restore at first. Only as the menu opens, so rows never
+    /// move under the pointer.
+    private func arrangeDockIconClickRows() {
+        let defaults = UserDefaults.standard
+        let minimizeOn = defaults.bool(forKey: DockIconClickMinimizeController.preferenceKey)
+        let hideOn = defaults.bool(forKey: DockIconClickMinimizeController.hidePreferenceKey)
+        // A choice made before the order was remembered counts too.
+        if minimizeOn != hideOn { defaults.set(minimizeOn, forKey: Self.dockIconClickMinimizeListedFirstKey) }
+        // Minimize & Restore leads until Hide & Show is chosen.
+        let minimizeFirst = defaults.object(forKey: Self.dockIconClickMinimizeListedFirstKey) as? Bool ?? true
+        let fallback = minimizeFirst ? dockIconClickMinimizeRowView : dockIconClickHideRowView
+        guard let item = fallback?.enclosingMenuItem, let menu = item.menu,
+              let cycleItem = dockIconClickCycleRowView?.enclosingMenuItem, cycleItem.menu === menu,
+              menu.index(of: item) != menu.index(of: cycleItem) + 1 else { return }
+        menu.removeItem(item)
+        menu.insertItem(item, at: menu.index(of: cycleItem) + 1)
     }
 
     private func refreshDockIconClickMinimizeController() {
@@ -6918,6 +6973,7 @@ final class OnboardingPrimaryButton: NSButton {
         dockIconClickMinimizeRowView?.setOn(minimizeEnabled)
         dockIconClickHideRowView?.setOn(hideEnabled)
         dockIconClickCycleRowView?.setOn(cycleEnabled)
+        updateDockIconClickRoles(cycle: cycleEnabled, hide: hideEnabled, minimize: minimizeEnabled)
         dockIconClickMinimizeController.setMode(hasRequiredPermissions ? mode : .disabled)
     }
 
@@ -7532,6 +7588,7 @@ final class OnboardingPrimaryButton: NSButton {
         dockIconClickMinimizeRowView?.setOn(minimizeEnabled)
         dockIconClickHideRowView?.setOn(hideEnabled)
         dockIconClickCycleRowView?.setOn(cycleEnabled)
+        updateDockIconClickRoles(cycle: cycleEnabled, hide: hideEnabled, minimize: minimizeEnabled)
 
         let resettableKeys = [
             Self.dockOrientationKey,
@@ -7545,17 +7602,10 @@ final class OnboardingPrimaryButton: NSButton {
             && animationUsesSystemDefault
             && revealDelayUsesSystemDefault
             && !hasCustomDockIconActions
-        if allDockSettingsUseDefaults {
-            restoreDockDefaultsRowView?.setTitle("Restore Default macOS Dock Settings")
-            restoreDockDefaultsRowView?.setControlEnabled(false)
-            restoreDockDefaultsRowView?.setOn(true)
-        } else {
-            restoreDockDefaultsRowView?.setTitle("Restore Default macOS Dock Settings")
-            restoreDockDefaultsRowView?.setControlEnabled(
-                (canRestartDock && !resettableKeys.isEmpty) || hasCustomDockIconActions
-            )
-            restoreDockDefaultsRowView?.setOn(false)
-        }
+        restoreDockDefaultsRowView?.setControlEnabled(
+            !allDockSettingsUseDefaults
+                && ((canRestartDock && !resettableKeys.isEmpty) || hasCustomDockIconActions)
+        )
     }
 
     private func animationSliderPercentage(forDuration duration: Double?) -> Double {
@@ -8063,18 +8113,15 @@ final class OnboardingPrimaryButton: NSButton {
         menu.addItem(chooseItem)
 
         let clearItem = NSMenuItem(title: "Remove All", action: nil, keyEquivalent: "")
-        let clearView = BlacklistActionMenuItemView(
-            title: "Remove All",
-            isEnabled: !protectedIdentifiers.isEmpty,
+        let clearView = removeAllBlacklistRow(
+            blacklistName: "Focus Prevention Blacklist",
             width: 280,
-            titleLeadingInset: 18
+            leadingInset: 18
         ) { [weak self] in
             self?.clearHoverActivationProtectedApplications()
         }
         clearItem.view = clearView
-        clearItem.isEnabled = !protectedIdentifiers.isEmpty
-        clearItem.target = clearView
-        clearItem.action = #selector(BlacklistActionMenuItemView.performMenuAction(_:))
+        clearView.setControlEnabled(!protectedIdentifiers.isEmpty)
         hoverActivationBlacklistClearActionView = clearView
         menu.addItem(clearItem)
 
@@ -8225,7 +8272,37 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func clearHoverActivationProtectedApplications() {
         saveHoverActivationProtectedBundleIdentifiers([])
-        rebuildHoverActivationBlacklistMenu()
+        // Uncheck in place, like the Auto-Hide Blacklist, so "Remove All" can
+        // show that it worked instead of being rebuilt away.
+        for item in hoverActivationBlacklistMenu?.items ?? [] {
+            guard item.representedObject is String,
+                  let rowView = item.view as? DockSettingPersistenceRowView else { continue }
+            rowView.setOn(false)
+        }
+    }
+
+    /// "Remove All" for a blacklist, asking in place before it empties the list.
+    private func removeAllBlacklistRow(
+        blacklistName: String,
+        width: CGFloat,
+        leadingInset: CGFloat,
+        removeAll: @escaping () -> Void
+    ) -> DockSettingResetControlsRowView {
+        DockSettingResetControlsRowView(
+            title: "Remove All",
+            showsIcon: false,
+            prompt: "Remove all?",
+            promptAccessibilityLabel: "Remove all apps from the \(blacklistName)?",
+            confirmTitle: "Remove",
+            successTitle: "All Apps Removed",
+            // Matches "Choose Application…" right above it.
+            highlightInset: 8,
+            leadingInset: leadingInset,
+            width: width
+        ) { finished in
+            removeAll()
+            finished()
+        }
     }
 
     // MARK: - Blacklist
@@ -8383,16 +8460,16 @@ final class OnboardingPrimaryButton: NSButton {
 
         let clearItem = NSMenuItem()
         clearItem.title = "Remove All"
-        let clearActionView = BlacklistActionMenuItemView(
-            title: "Remove All",
-            isEnabled: !ignoredIdentifiers.isEmpty
+        // Wide enough for "Remove all?" and its two buttons.
+        let clearActionView = removeAllBlacklistRow(
+            blacklistName: "Auto-Hide Blacklist",
+            width: 240,
+            leadingInset: 22
         ) { [weak self] in
             self?.clearBlacklist()
         }
         clearItem.view = clearActionView
-        clearItem.isEnabled = !ignoredIdentifiers.isEmpty
-        clearItem.target = clearActionView
-        clearItem.action = #selector(BlacklistActionMenuItemView.performMenuAction(_:))
+        clearActionView.setControlEnabled(!ignoredIdentifiers.isEmpty)
         blacklistClearActionView = clearActionView
         blacklistMenu.addItem(clearItem)
 
@@ -8434,12 +8511,13 @@ final class OnboardingPrimaryButton: NSButton {
         let item = NSMenuItem()
         item.title = title
         item.isEnabled = false
+        // Over the app icons in the rows below, which follow an 18 pt inset
+        // and a 16 pt checkbox.
         item.view = DockSettingSectionHeaderView(
             title: title,
             width: width,
-            leadingInset: 18,
-            font: .systemFont(ofSize: 11.5, weight: .semibold),
-            centered: true
+            leadingInset: 38,
+            font: .systemFont(ofSize: 11.5, weight: .semibold)
         )
         return item
     }
@@ -8530,39 +8608,7 @@ final class OnboardingPrimaryButton: NSButton {
         }
     }
 
-    @objc private func clearBlacklist() {
-        let applicationCount = ignoredWindowBundleIdentifiers.count
-        if applicationCount >= 2 {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Remove All Blacklisted Apps?"
-            alert.informativeText = "Are you sure you want to:\nRemove \(applicationCount) apps from the Auto-Hide Blacklist?"
-            alert.addButton(withTitle: "Remove All")
-            alert.addButton(withTitle: "Cancel")
-            alert.buttons.first?.hasDestructiveAction = true
-
-            alert.layout()
-            if let contentView = alert.window.contentView {
-                if let imageView = contentView.subviews.first(where: { $0 is NSImageView }) {
-                    imageView.frame.origin.x = floor((contentView.bounds.width - imageView.frame.width) / 2)
-                }
-                for subview in contentView.subviews {
-                    guard let textField = subview as? NSTextField,
-                          textField.stringValue == alert.messageText || textField.stringValue == alert.informativeText
-                    else { continue }
-                    textField.alignment = .center
-                    let paragraphStyle = NSMutableParagraphStyle()
-                    paragraphStyle.alignment = .center
-                    let attributed = NSMutableAttributedString(attributedString: textField.attributedStringValue)
-                    attributed.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: attributed.length))
-                    textField.attributedStringValue = attributed
-                }
-            }
-
-            NSApp.activate(ignoringOtherApps: true)
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-        }
-
+    private func clearBlacklist() {
         saveIgnoredWindowBundleIdentifiers([])
         for item in blacklistMenu.items {
             guard
@@ -8666,7 +8712,18 @@ final class OnboardingPrimaryButton: NSButton {
             warningActionTitle: dockShortcutWarningVisible ? "Open Keyboard Settings" : "Retry Gesture Support"
         )
         dockAwayStatusView?.pauseResumeButton.isEnabled = !dockSettingsRestartInProgress
+        fitStatusHeader()
     }
+
+    /// The header loses its third line on a desktop, and its menu item the height.
+    private func fitStatusHeader() {
+        guard let statusView = dockAwayStatusView, let container = statusView.superview else { return }
+        let height = Self.statusHeaderHeight - statusView.hiddenLineHeight
+        guard abs(container.frame.height - height) > 0.5 else { return }
+        container.setFrameSize(NSSize(width: container.frame.width, height: height))
+        if let item = container.enclosingMenuItem { item.menu?.itemChanged(item) }
+    }
+    private static let statusHeaderHeight: CGFloat = 56
 
     private func desktopTileIcon(for app: NSRunningApplication) -> NSImage? {
         let cacheKey = app.bundleURL?.path ?? "pid:\(app.processIdentifier)"
@@ -9160,7 +9217,11 @@ final class OnboardingPrimaryButton: NSButton {
             return true
         }
 
-        if isFullscreen && (statusMenuIsOpen || before.currentID == identifier) {
+        // Closing another desktop's fullscreen window leaves the menu open.
+        // Closing the one you're on moves you off it, so the menu closes for
+        // the move and comes back afterward.
+        let reopensMenu = isFullscreen && before.currentID == identifier && (statusMenuIsOpen || restoreMenu)
+        if reopensMenu {
             statusItem.menu?.cancelTracking()
         }
         desktopCreationInProgress = true
@@ -9168,7 +9229,10 @@ final class OnboardingPrimaryButton: NSButton {
         DesktopMenuOperation.run(work: {
             isFullscreen ? DockAwayCloseFullscreenSpace(identifier) : DockAwayRemoveDesktop(identifier)
         }, attempts: 40, confirmed: { [weak self] sent in
-            guard sent, let current = self?.dockWatcher?.desktopSelection(on: display) else { return false }
+            // A web app such as Google Keep can quit the moment its window
+            // closes, failing the press that closed it. Whether the desktop
+            // is gone decides, not what the press reported.
+            guard sent || isFullscreen, let current = self?.dockWatcher?.desktopSelection(on: display) else { return false }
             return !current.orderedSpaceIDs.contains(identifier)
         }) { [weak self] _, confirmed in
             guard let self, !self.isQuitting else { return }
@@ -9186,7 +9250,7 @@ final class OnboardingPrimaryButton: NSButton {
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
             } else {
-                self.restoreMenuAfterDesktopRemoval(restoreMenu)
+                self.restoreMenuAfterDesktopRemoval(restoreMenu || reopensMenu)
                 self.scheduleContinuousDeleteIfNeeded()
             }
         }
@@ -9783,7 +9847,7 @@ final class OnboardingPrimaryButton: NSButton {
         quitButton.bezelStyle = .automatic
         quitButton.controlSize = .large
         quitButton.translatesAutoresizingMaskIntoConstraints = false
-        quitButton.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        quitButton.widthAnchor.constraint(equalToConstant: OnboardingPageLayout.footerButtonWidth).isActive = true
         quitButton.keyEquivalent = "\u{1b}"
         if #available(macOS 26.0, *) {
             quitButton.borderShape = .capsule
@@ -9791,7 +9855,7 @@ final class OnboardingPrimaryButton: NSButton {
 
         continueButton.controlSize = .large
         continueButton.translatesAutoresizingMaskIntoConstraints = false
-        continueButton.widthAnchor.constraint(equalToConstant: 88).isActive = true
+        continueButton.widthAnchor.constraint(equalToConstant: OnboardingPageLayout.footerButtonWidth).isActive = true
         continueButton.keyEquivalent = ""
 
         let buttonStack = NSStackView(views: [quitButton, continueButton])
@@ -9814,7 +9878,7 @@ final class OnboardingPrimaryButton: NSButton {
         bottomControlsRow.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             bottomControlsRow.heightAnchor.constraint(equalToConstant: 32),
-            launchAtLoginContainer.widthAnchor.constraint(equalToConstant: 250),
+            launchAtLoginContainer.widthAnchor.constraint(equalToConstant: 220),
             launchAtLoginContainer.heightAnchor.constraint(equalToConstant: 26),
             bottomControlsSpacer.widthAnchor.constraint(greaterThanOrEqualToConstant: 14)
         ])
@@ -9922,6 +9986,7 @@ final class OnboardingPrimaryButton: NSButton {
         keyboardSettingsView.isHidden = true
         keyboardSettingsView.alphaValue = 0
         contentView.addSubview(keyboardSettingsView)
+        permissionSetupFooterRow = bottomControlsRow
         permissionSetupKeyboardSettingsView = keyboardSettingsView
         onboardingCurrentStep = 1
 
@@ -10209,6 +10274,15 @@ final class OnboardingPrimaryButton: NSButton {
             applyDefaults: !UserDefaults.standard.bool(forKey: Self.permissionSetupCompletedKey)
         )
         permissionSetupExtrasView?.refresh()
+        // Back and Get Started go where Quit and Continue are, measured while
+        // both pages are laid out, since the welcome page's footer can move.
+        if let footer = permissionSetupFooterRow, let contentView = step2.superview {
+            NSLayoutConstraint.activate(permissionSetupKeyboardPageConstraints)
+            contentView.layoutSubtreeIfNeeded()
+            let footerBottom = footer.convert(footer.bounds, to: nil).minY
+            let pageBottom = step2.convert(step2.bounds, to: nil).minY
+            step2.footerBottomInset = max(0, footerBottom - pageBottom)
+        }
         slideOnboardingPage(from: step1, to: step2, incomingConstraints: permissionSetupKeyboardPageConstraints,
                             forward: true) { [weak self] in
             self?.resizePermissionSetupWindow(for: 2)
@@ -11599,6 +11673,9 @@ extension AppDelegate: NSMenuDelegate {
                     NSApp.activate(ignoringOtherApps: true)
                 }
             }
+        }
+        if menu === dockSettingsMenu {
+            arrangeDockIconClickRows()
         }
         if menu === blacklistMenu {
             rebuildBlacklistMenu()

@@ -462,6 +462,11 @@ final class MissionControlWindowClose {
         buttonRect = Self.closeButtonRect(in: hovered.bounds)
         let primaryTop = NSScreen.screens.first?.frame.maxY ?? 0
         panel?.setFrame(Self.appKitRect(from: buttonRect, primaryTop: primaryTop), display: true, animate: false)
+        // A full-screen desktop closing while the badge is hidden leaves it on
+        // only one desktop, where Mission Control may not be.
+        if let panel, !panel.isVisible, DockAwayRestoreWindowToEverySpace(CGWindowID(panel.windowNumber)) {
+            report("Panel restored to every desktop")
+        }
         panel?.orderFrontRegardless()
         report("Panel shown for window \(hovered.id); visible=\(panel?.isVisible == true)")
     }
