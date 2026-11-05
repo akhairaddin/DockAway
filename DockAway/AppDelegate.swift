@@ -3470,7 +3470,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     private var inactiveStatusTitle: String {
         if dockSettingsRestartInProgress {
-            return dockRestartReason == .preferences ? "DockAway: Applying Settings" : "DockAway: Restarting Dock"
+            return dockRestartReason == .preferences ? "DockAway: Applying" : "DockAway: Restarting Dock"
         }
         return permissionRecoveryRequired
             && dockAwayEnabled
@@ -4605,8 +4605,8 @@ final class OnboardingPrimaryButton: NSButton {
         let restoreDockDefaultsRowView = DockSettingResetControlsRowView(
             title: "Restore Default macOS Dock Settings",
             iconPointSize: 15,
-            prompt: "Restore defaults?",
-            promptAccessibilityLabel: "Restore default macOS Dock settings?",
+            prompt: "Restore Defaults?",
+            promptAccessibilityLabel: "Restore Default macOS Dock Settings?",
             confirmTitle: "Restore",
             successTitle: "Dock Settings Reset to Default",
             highlightInset: 8,
@@ -7653,7 +7653,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func selectDockPosition(rawValue: Int) {
         guard let position = DockPosition(rawValue: rawValue) else { return }
-        applyDockPreferenceChanges([
+        let applied = applyDockPreferenceChanges([
             DockPreferenceChange(
                 key: Self.dockOrientationKey,
                 value: position == .bottom
@@ -7661,6 +7661,9 @@ final class OnboardingPrimaryButton: NSButton {
                     : position.preferenceValue as NSString
             )
         ])
+        // Refused, as while the Dock is restarting: put the pill back where
+        // the Dock really is.
+        if !applied { refreshDockSettingsMenu() }
     }
 
     private func normalizedDockSliderPercentage(_ value: Double) -> Double {

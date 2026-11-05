@@ -86,9 +86,37 @@ final class DockSettingHelpButton: MenuSymbolButton {
         endHover()
     }
 
-    func beginHover() {
-        guard isEnabled else { return }
+    /// How long the pointer has to rest on the button before its help shows.
+    private static let hoverDelay = 0.7
+    /// Until when hovering shows no help, as just after a drag elsewhere in
+    /// the menu, when the pointer comes to rest wherever the drag ended.
+    private static var hoverHeldOffUntil: CFTimeInterval = 0
+
+    /// Holds hover help off for a moment. A drag that ends near a button
+    /// shouldn't open its help.
+    static func holdOffHover(for duration: TimeInterval = 1.0) {
+        hoverHeldOffUntil = max(hoverHeldOffUntil, CACurrentMediaTime() + duration)
+    }
+
+    /// What the pointer is hovering to show this help: the button, or a whole row.
+    private weak var hoverRegion: NSView?
+
+    func beginHover(over region: NSView? = nil) {
+        hoverRegion = region ?? self
+        // Not while a button is held (a drag passing over it), nor just after
+        // a drag. A hover macOS queued during the drag arrives only after it.
+        guard isEnabled,
+              NSEvent.pressedMouseButtons == 0,
+              CACurrentMediaTime() >= Self.hoverHeldOffUntil else { return }
         schedulePopover()
+    }
+
+    /// Whether the pointer is really on what it hovered now, with no button held.
+    private var pointerRestsOnButton: Bool {
+        guard let region = hoverRegion, let window = region.window,
+              NSEvent.pressedMouseButtons == 0 else { return false }
+        let point = region.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        return region.bounds.insetBy(dx: -2, dy: -2).contains(point)
     }
 
     func endHover() {
@@ -146,10 +174,13 @@ final class DockSettingHelpButton: MenuSymbolButton {
     private func schedulePopover() {
         hoverWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
-            self?.showPopover()
+            // Only if the pointer is still resting on it after the delay.
+            guard let self, self.pointerRestsOnButton,
+                  CACurrentMediaTime() >= Self.hoverHeldOffUntil else { return }
+            self.showPopover()
         }
         hoverWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.hoverDelay, execute: workItem)
     }
 
     private func showPopover() {
@@ -994,7 +1025,7 @@ final class DockAwayMenuRowView: NSView {
             }
         }
         hovered = true
-        if controlEnabled { helpButton?.beginHover() }
+        if controlEnabled { helpButton?.beginHover(over: self) }
         needsDisplay = true
     }
 
