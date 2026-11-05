@@ -1570,66 +1570,6 @@ private final class BlacklistGroupSeparatorView: NSView {
 }
 
 
-private final class DockPositionRowView: NSView {
-    // One control, so it reads as a single choice rather than three checkboxes.
-    private let segmentedControl = NSSegmentedControl()
-    private let changeHandler: (Int) -> Void
-
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: 28)
-    }
-
-    init(
-        options: [(title: String, tag: Int)],
-        selectedTag: Int,
-        changeHandler: @escaping (Int) -> Void
-    ) {
-        self.changeHandler = changeHandler
-        super.init(frame: NSRect(x: 0, y: 0, width: 232, height: 28))
-        autoresizingMask = [.width]
-
-        segmentedControl.segmentCount = options.count
-        for (index, option) in options.enumerated() {
-            segmentedControl.setLabel(option.title, forSegment: index)
-            segmentedControl.setTag(option.tag, forSegment: index)
-        }
-        segmentedControl.trackingMode = .selectOne
-        segmentedControl.segmentDistribution = .fillEqually
-        segmentedControl.controlSize = .regular
-        segmentedControl.focusRingType = .none
-        segmentedControl.target = self
-        segmentedControl.action = #selector(selectPosition(_:))
-        segmentedControl.setAccessibilityLabel("Dock Position")
-        segmentedControl.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(segmentedControl)
-
-        // Spans the same width as the sliders below it.
-        NSLayoutConstraint.activate([
-            segmentedControl.centerYAnchor.constraint(equalTo: centerYAnchor),
-            segmentedControl.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
-            segmentedControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10.5)
-        ])
-
-        setSelectedTag(selectedTag)
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    func setSelectedTag(_ selectedTag: Int) {
-        segmentedControl.selectSegment(withTag: selectedTag)
-    }
-
-    func setControlsEnabled(_ enabled: Bool) {
-        segmentedControl.isEnabled = enabled
-    }
-
-    @objc private func selectPosition(_ sender: NSSegmentedControl) {
-        changeHandler(sender.selectedTag())
-    }
-}
-
 private final class DockSettingSectionHeaderView: NSView {
     init(
         title: String,
@@ -2940,6 +2880,7 @@ final class OnboardingPrimaryButton: NSButton {
     private var updateMenuItem: NSMenuItem!
     private var updateFrequencyMenu: NSMenu!
     private var checkForUpdatesAtLaunchItem: NSMenuItem!
+    private weak var autoUpdateRowView: DockSettingPersistenceRowView?
     private var desktopIndicatorAppearanceMenu: NSMenu?
     private var desktopIndicatorPreviewContext: String?
     private var availableUpdateVersion: String?
@@ -4894,6 +4835,23 @@ final class OnboardingPrimaryButton: NSButton {
         checkForUpdatesAtLaunchRowView.toolTip = checkForUpdatesAtLaunchItem.toolTip
         checkForUpdatesAtLaunchItem.view = checkForUpdatesAtLaunchRowView
         updateFrequencyMenu.addItem(checkForUpdatesAtLaunchItem)
+
+        // The same setting as the checkbox in Sparkle's update window.
+        let autoUpdateItem = NSMenuItem()
+        autoUpdateItem.tag = -2
+        autoUpdateItem.toolTip = "Download and install new DockAway versions automatically when they're found"
+        let autoUpdateRowView = DockSettingPersistenceRowView(
+            title: "Auto Update",
+            isOn: updaterController?.updater.automaticallyDownloadsUpdates ?? false,
+            width: 170,
+            leadingInset: 20
+        ) { [weak self] enabled in
+            self?.setAutoUpdate(enabled)
+        }
+        autoUpdateRowView.toolTip = autoUpdateItem.toolTip
+        autoUpdateItem.view = autoUpdateRowView
+        updateFrequencyMenu.addItem(autoUpdateItem)
+        self.autoUpdateRowView = autoUpdateRowView
         updateFrequencyMenu.addItem(wideMenuSeparator(width: 170, leadingInset: 20, trailingInset: 14))
         self.checkForUpdatesAtLaunchItem = checkForUpdatesAtLaunchItem
 
@@ -7990,6 +7948,7 @@ final class OnboardingPrimaryButton: NSButton {
         let updater = updaterController.updater
         let automaticChecksEnabled = updater.automaticallyChecksForUpdates
         let currentInterval = updater.updateCheckInterval
+        autoUpdateRowView?.setOn(updater.automaticallyDownloadsUpdates)
 
         for item in updateFrequencyMenu.items {
             guard !item.isSeparatorItem, !(item.view is WideMenuSeparatorView) else { continue }
@@ -8017,6 +7976,11 @@ final class OnboardingPrimaryButton: NSButton {
         refreshUpdateFrequencyMenu()
     }
 
+    private func setAutoUpdate(_ enabled: Bool) {
+        updaterController?.updater.automaticallyDownloadsUpdates = enabled
+        refreshUpdateFrequencyMenu()
+    }
+
     private func setCheckForUpdatesAtLaunch(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: Self.checkForUpdatesAtLaunchKey)
         refreshUpdateFrequencyMenu()
@@ -8028,8 +7992,10 @@ final class OnboardingPrimaryButton: NSButton {
         }
 
         let updater = updaterController.updater
-        if updater.automaticallyChecksForUpdates {
-            // Preserve Sparkle's automatic-download/install preference.
+        if updater.automaticallyChecksForUpdates || updater.automaticallyDownloadsUpdates {
+            // Preserve Sparkle's automatic-download/install preference. With
+            // "Auto Update" on, a launch check installs what it finds even
+            // when scheduled checks are off.
             updater.checkForUpdatesInBackground()
         } else {
             // "Manual Only" disables Sparkle's background driver, so probe the
@@ -11821,6 +11787,8 @@ extension AppDelegate: NSMenuDelegate {
         if menu === statusItem.menu {
             // Catches approval or removal in System Settings > Login Items.
             refreshLaunchAtLoginRows()
+            // "Auto Update" can also change in Sparkle's update window.
+            refreshUpdateFrequencyMenu()
         }
         // Native switches use the system accent while their application is active.
         // Match a native settings panel without replacing or recoloring the control.
