@@ -1,14 +1,25 @@
 import AppKit
 
-/// Explains why the black menu bar needs Full Disk Access when a wallpaper app
-/// keeps the wallpaper in its own private folder, and what DockAway does with
-/// that access, before sending people to System Settings.
+/// Explains why the black menu bar needs to read the wallpaper and what
+/// DockAway does with it: before macOS asks about the wallpaper's folder, or
+/// before sending people to System Settings when it can't read it.
 enum WallpaperAccessExplanation {
     static let title = "Allow DockAway to Read Your Wallpaper"
     static let menuTitle = "Allow Wallpaper Access"
 
+    /// The button that goes on to allow it.
+    static func allowButtonTitle(for blocked: MenuBarBlackoutBlockedWallpaper) -> String {
+        if blocked.awaitingPermission { return "Continue" }
+        return blocked.askingLocation != nil && !blocked.isInAppFolder ? "Open Files & Folders" : "Open Full Disk Access"
+    }
+
     /// What's wrong, in a sentence or two.
     static func summary(for blocked: MenuBarBlackoutBlockedWallpaper) -> String {
+        if let location = blocked.askingLocation, !blocked.isInAppFolder {
+            return blocked.awaitingPermission
+                ? "Your wallpaper is \(location.whereItIs). Next, macOS will ask whether DockAway can open files there."
+                : "Your wallpaper is \(location.whereItIs), and DockAway isn't allowed to open files there."
+        }
         guard blocked.isInAppFolder else {
             return "Your wallpaper is in a folder macOS keeps private, so DockAway can't read it."
         }
@@ -18,12 +29,26 @@ enum WallpaperAccessExplanation {
 
     /// Why DockAway needs it, what it does with it, and how to allow it.
     static func sections(for blocked: MenuBarBlackoutBlockedWallpaper) -> [(heading: String, body: String)] {
+        let why = ("Why DockAway Needs It",
+                   "macOS picks the menu bar's text color from the top of your wallpaper. To keep the text white over the black, DockAway briefly uses a copy of your wallpaper with a black band at the top. Without reading your wallpaper, it can't make that copy, so on a light wallpaper the menu bar stays as it is rather than hide black text on black.")
+        if let location = blocked.askingLocation, !blocked.isInAppFolder {
+            let does = ("What DockAway Does With It",
+                        "• DockAway opens only the wallpaper macOS says is on your desktop, not your other files there.\n• Its copy stays on your Mac, in DockAway's own folder, and your wallpaper comes back as soon as no window fills the screen.\n• DockAway never uploads your files. It only goes online to check for updates.")
+            let setting = "\"\(location.settingName)\""
+            if blocked.awaitingPermission {
+                return [why, does,
+                        ("What Happens Next",
+                         "Click Continue, then Allow when macOS asks about \(location.whatMacOSAsksAbout). You can change this later in System Settings, under Privacy & Security, then Files & Folders.\n\nIf you'd rather not, the black menu bar still works whenever the menu bar text is white already.")]
+            }
+            return [why, does,
+                    ("How to Allow It",
+                     "Click Open Files & Folders, find DockAway, and turn on \(setting). macOS may ask to reopen DockAway afterward.\n\nYou can turn it off again whenever you like. The black menu bar keeps working with wallpapers DockAway can read.")]
+        }
         let stillWorks = blocked.isInAppFolder
             ? "The black menu bar keeps working with wallpapers that aren't in an app's private folder."
             : "The black menu bar keeps working with wallpapers DockAway can read."
         return [
-            ("Why DockAway Needs It",
-             "macOS picks the menu bar's text color from the top of your wallpaper. To keep the text white over the black, DockAway briefly uses a copy of your wallpaper with a black band at the top. Without reading your wallpaper, it can't make that copy, so on a light wallpaper the menu bar stays as it is rather than hide black text on black."),
+            why,
             ("What DockAway Does With It",
              "Full Disk Access is broad: it lets an app read files anywhere on your Mac, and macOS has no narrower setting for another app's folder.\n• DockAway asks for it only to read the wallpaper macOS says is on your desktop.\n• Its copy stays on your Mac, in DockAway's own folder, and your wallpaper comes back as soon as no window fills the screen.\n• DockAway never uploads your files. It only goes online to check for updates."),
             ("How to Allow It",
@@ -34,7 +59,15 @@ enum WallpaperAccessExplanation {
     /// The menu row's help, shown when hovering over it.
     static func menuHelp(for blocked: MenuBarBlackoutBlockedWallpaper?) -> String {
         let summary = blocked.map(summary(for:)) ?? "macOS keeps DockAway from reading your current wallpaper."
-        return "\(summary) Until it can, the menu bar can't turn black over a light wallpaper.\n\n• Click to see why DockAway needs Full Disk Access to read it, what it does with that access, and how to turn it on.\n• This goes away once DockAway can read your wallpaper."
+        let click: String
+        if let blocked, blocked.askingLocation != nil, !blocked.isInAppFolder {
+            click = blocked.awaitingPermission
+                ? "Click to see why DockAway needs to read it, what it does with it, and to let macOS ask."
+                : "Click to see why DockAway needs to read it, what it does with it, and how to turn it on."
+        } else {
+            click = "Click to see why DockAway needs Full Disk Access to read it, what it does with that access, and how to turn it on."
+        }
+        return "\(summary) Until it can, the menu bar can't turn black over a light wallpaper.\n\n• \(click)\n• This goes away once DockAway can read your wallpaper."
     }
 
     /// The sections, left-aligned and wider than an alert's own text, so the
@@ -90,16 +123,25 @@ enum WallpaperAccessExplanation {
 @MainActor
 final class WallpaperAccessPrompt: NSObject {
     private var alert: NSAlert?
+    private var shown: MenuBarBlackoutBlockedWallpaper?
     private var previousApplication: NSRunningApplication?
-    private var openSettings: (() -> Void)?
+    private var allow: (() -> Void)?
 
     var isShowing: Bool { alert?.window.isVisible == true }
+    /// The case showing.
+    var showing: MenuBarBlackoutBlockedWallpaper? { isShowing ? shown : nil }
+    /// Called after it closes, however it closed.
+    var onClose: () -> Void = {}
 
     /// Shows the explanation, or brings it forward if it's showing. Not Now
     /// goes back to the app that was in front before.
     func show(for blocked: MenuBarBlackoutBlockedWallpaper, returningTo previous: NSRunningApplication?,
-              openSettings: @escaping () -> Void) {
-        self.openSettings = openSettings
+              allow: @escaping () -> Void) {
+        // A different case, such as macOS saying no after Continue, replaces
+        // the one showing.
+        if shown != blocked, alert?.window.isVisible == true { close() }
+        shown = blocked
+        self.allow = allow
         if let window = alert?.window, window.isVisible {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
@@ -110,9 +152,9 @@ final class WallpaperAccessPrompt: NSObject {
         alert.messageText = WallpaperAccessExplanation.title
         alert.informativeText = WallpaperAccessExplanation.summary(for: blocked)
         alert.accessoryView = WallpaperAccessExplanation.detailsView(for: blocked)
-        let open = alert.addButton(withTitle: "Open Full Disk Access")
+        let open = alert.addButton(withTitle: WallpaperAccessExplanation.allowButtonTitle(for: blocked))
         open.target = self
-        open.action = #selector(openFullDiskAccess)
+        open.action = #selector(allowAccess)
         let later = alert.addButton(withTitle: "Not Now")
         later.keyEquivalent = "\u{1b}"
         later.target = self
@@ -130,9 +172,14 @@ final class WallpaperAccessPrompt: NSObject {
         window.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func openFullDiskAccess() {
+    /// Goes back to the app that was in front, as Not Now does, since
+    /// whatever comes next, macOS asking or System Settings, shows over it.
+    @objc private func allowAccess() {
+        let allow = self.allow
+        let previous = previousApplication
         close()
-        openSettings?()
+        if let previous, !previous.isTerminated { previous.activate(options: []) }
+        allow?()
     }
 
     @objc private func notNow() {
@@ -143,7 +190,11 @@ final class WallpaperAccessPrompt: NSObject {
 
     private func close() {
         alert?.window.orderOut(nil)
+        let wasShowing = alert != nil
         alert = nil
+        shown = nil
+        allow = nil
         previousApplication = nil
+        if wasShowing { DispatchQueue.main.async { [weak self] in self?.onClose() } }
     }
 }

@@ -692,6 +692,7 @@ private final class DockAwayStatusView: NSView {
         active: Bool,
         status: String,
         desktopStatus: String? = nil,
+        activeTitle: String = "DockAway: Active",
         inactiveTitle: String = "DockAway: Paused",
         inactiveDetail: String = "App: ?",
         inactiveActionTitle: String = "Resume DockAway",
@@ -702,7 +703,7 @@ private final class DockAwayStatusView: NSView {
     ) {
         let title = warning
             ? warningTitle
-            : active ? "DockAway: Active" : inactiveTitle
+            : active ? activeTitle : inactiveTitle
         let isOnDesktop = status == "Desktop"
         // Without DockAway watching, which desktop is showing isn't known.
         let unknownDesktop = "Desktop: ? of ?"
@@ -2771,6 +2772,8 @@ final class OnboardingPrimaryButton: NSButton {
     private static let automaticPermissionRelaunchAttemptedKey =
         "AutomaticPermissionRelaunchAttempted"
     private static let permissionRelaunchWasPausedKey = "PermissionRelaunchWasPaused"
+    /// "Pause DockAway" lasts through a quit and relaunch until Resume.
+    private static let dockAwayPausedKey = "dockAwayPaused"
     private static let dockPreferencesDomain = "com.apple.dock" as CFString
     private static let dockOrientationKey = "orientation"
     private static let dockAnimationDurationKey = "autohide-time-modifier"
@@ -2941,6 +2944,13 @@ final class OnboardingPrimaryButton: NSButton {
     private var desktopIndicatorPreviewContext: String?
     private var availableUpdateVersion: String?
     private var blacklistMenu: NSMenu!
+    private weak var pauseAutoHideRowView: DockSettingToggleRowView?
+    private static let autoHidePausedKey = "autoHidePaused"
+    /// "Pause Auto-Hide" keeps the Dock shown while the rest of DockAway runs.
+    /// Unlike "Pause DockAway", it's saved, so it lasts until turned off.
+    private var autoHidePaused: Bool {
+        UserDefaults.standard.bool(forKey: Self.autoHidePausedKey)
+    }
     private weak var blacklistClearActionView: DockSettingResetControlsRowView?
     private var currentBlacklistBundleIdentifier: String?
     private weak var hoverActivationBlacklistMenu: NSMenu?
@@ -2973,6 +2983,7 @@ final class OnboardingPrimaryButton: NSButton {
                 && self.permissionMonitor.snapshot?.allGranted == true
                 && self.accessibilityAccessGranted && self.inputMonitoringAccessGranted
                 && self.automaticSuspensionReasons.isEmpty
+                && self.dockAwayEnabled
         }, canRestart: { [weak self] in
             self?.dockSettingsCanRestartDock == true
         }, restart: { [weak self] in
@@ -2992,6 +3003,8 @@ final class OnboardingPrimaryButton: NSButton {
     private let desktopSwitcher = DesktopSwitcher()
     private var desktopCreationInProgress = false
     private var statusMenuIsOpen = false
+    /// The app a wallpaper explanation offered as the menu closes goes back to.
+    private var wallpaperAccessReturnApplication: NSRunningApplication?
     private var settingsMenuPreviousApplication: NSRunningApplication?
     private var desktopTilesView: DesktopDisplaySectionsView?
     private var desktopDisplaySections: [DesktopDisplaySection] = []
@@ -3236,15 +3249,23 @@ final class OnboardingPrimaryButton: NSButton {
             dockAwayEnabled = false
             UserDefaults.standard.removeObject(forKey: Self.permissionRelaunchWasPausedKey)
         }
+        if UserDefaults.standard.bool(forKey: Self.dockAwayPausedKey) {
+            dockAwayEnabled = false
+        }
+        screenshotClipboardManager.isPaused = !dockAwayEnabled
         mutedVolumeMenuBarController.recoverPreviousSession()
         mutedVolumeMenuBarController.onDisabled = { [weak self] in
             self?.mutedVolumeMenuBarRow?.setOn(false)
         }
-        mutedVolumeMenuBarController.setEnabled(UserDefaults.standard.bool(forKey: MutedVolumeMenuBarController.preferenceKey))
+        if dockAwayEnabled {
+            mutedVolumeMenuBarController.setEnabled(UserDefaults.standard.bool(forKey: MutedVolumeMenuBarController.preferenceKey))
+        }
         fullscreenVideoKeyboardLightController.recoverPreviousSession()
-        fullscreenVideoKeyboardLightController.setEnabled(
-            UserDefaults.standard.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey)
-        )
+        if dockAwayEnabled {
+            fullscreenVideoKeyboardLightController.setEnabled(
+                UserDefaults.standard.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey)
+            )
+        }
         menuBarBlackoutController.isSuspended = { [weak self] in
             self?.dockWatcher?.isMissionControlActive == true
         }
@@ -3276,9 +3297,15 @@ final class OnboardingPrimaryButton: NSButton {
         menuBarBlackoutController.wallpaperAccessNeeded = { [weak self] blocked in
             self?.offerWallpaperAccess(blocked)
         }
+        menuBarBlackoutController.wallpaperPermissionNeeded = { [weak self] blocked in
+            self?.offerWallpaperAccess(blocked)
+        }
+        wallpaperAccessPrompt.onClose = { [weak self] in
+            self?.menuBarBlackoutController.offerHeldBackExplanations()
+        }
         menuBarBlackoutController.recoverPreviousSession()
         menuBarBlackoutController.setEnabled(
-            UserDefaults.standard.bool(forKey: MenuBarBlackoutController.preferenceKey)
+            UserDefaults.standard.bool(forKey: MenuBarBlackoutController.preferenceKey) && dockAwayEnabled
         )
         NSApp.setActivationPolicy(.accessory)
 
@@ -3357,6 +3384,7 @@ final class OnboardingPrimaryButton: NSButton {
         accessibilityPermissionMissing = true
         inputMonitoringPermissionMissing = !inputMonitoringAccessGranted
         setupMenuBar()
+        updateStatusItemPausedLook()
         setupOpenShortcutHotKey()
         finderDeleteKeyController.isSuppressed = { [weak self] in
             self?.statusMenuIsOpen == true
@@ -3377,7 +3405,7 @@ final class OnboardingPrimaryButton: NSButton {
         teleportManager.onWindowMoveTransitionStarted = { [weak self] in
             self?.dockWatcher?.protectWindowMoveTransition()
         }
-        teleportManager.start()
+        if dockAwayEnabled { teleportManager.start() }
         self.cursorTeleportManager = teleportManager
         dockIconClickMinimizeController.onWillHideApplication = { [weak self] in
             self?.cursorTeleportManager?.suppressNextApplicationActivationTeleport()
@@ -3393,6 +3421,7 @@ final class OnboardingPrimaryButton: NSButton {
         hoverActivationController.isSuppressed = { [weak self] in
             guard let self else { return true }
             return self.statusMenuIsOpen
+                || !self.dockAwayEnabled
                 || !self.automaticSuspensionReasons.isEmpty
                 || self.dockWatcher?.isMissionControlActive == true
         }
@@ -3492,6 +3521,10 @@ final class OnboardingPrimaryButton: NSButton {
             return "Display asleep"
         }
         return "App: ?"
+    }
+
+    private var activeStatusTitle: String {
+        autoHidePaused ? "DockAway: Auto-Hide Paused" : "DockAway: Active"
     }
 
     private var inactiveStatusTitle: String {
@@ -3609,13 +3642,13 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     @objc private func screenDidLock(_ notification: Notification) {
-        lockscreenSoundPlayer.playIfEnabled(.lock)
+        if dockAwayEnabled { lockscreenSoundPlayer.playIfEnabled(.lock) }
         suspendMonitoring(for: .screenLocked)
     }
 
     @objc private func screenDidUnlock(_ notification: Notification) {
         clearAutomaticSuspension(.screenLocked)
-        lockscreenSoundPlayer.playIfEnabled(.unlock)
+        if dockAwayEnabled { lockscreenSoundPlayer.playIfEnabled(.unlock) }
     }
 
     private func suspendMonitoring(for reason: AutomaticSuspensionReason) {
@@ -3686,6 +3719,7 @@ final class OnboardingPrimaryButton: NSButton {
         if dockWatcher == nil {
             dockWatcher = DockWatcher()
         }
+        dockWatcher.autoHidePaused = autoHidePaused
         dockWatcher.start()
         startMultitouchPreHide()
         applyStatusIcon(dockVisible: isDockCurrentlyVisible())
@@ -4273,6 +4307,7 @@ final class OnboardingPrimaryButton: NSButton {
 
                 guard
                     self.hideOnFourFingerTouch,
+                    !self.autoHidePaused,
                     let watcher = self.dockWatcher
                 else { return }
 
@@ -4459,6 +4494,7 @@ final class OnboardingPrimaryButton: NSButton {
             active: statusAppearsActive,
             status: activeStatusText,
             desktopStatus: activeDesktopStatusText,
+            activeTitle: activeStatusTitle,
             inactiveTitle: inactiveStatusTitle,
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
@@ -6181,7 +6217,7 @@ final class OnboardingPrimaryButton: NSButton {
             indicatorSize: 16,
             helpHeading: menuBarBlackoutTitle,
             helpTextProvider: {
-                "Turns the menu bar black while a window fills the screen, so it blends into the window instead of showing your wallpaper.\n\n• Works on each display with its own menu bar.\n• To keep the menu bar text white on lighter wallpapers, DockAway uses a copy of your wallpaper with a black band at the top while the window fills the screen, then puts your wallpaper back.\n• Dynamic and aerial wallpapers can't be copied, so their menu bar text keeps the color macOS picks.\n• Some wallpaper apps keep their wallpapers in their own private folder, which DockAway can only read with Full Disk Access. The first time that keeps the menu bar from turning black, DockAway explains why, and Allow Wallpaper Access appears below this option.\n• Full screen apps are unaffected, since macOS hides the menu bar there."
+                "Turns the menu bar black while a window fills the screen, so it blends into the window instead of showing your wallpaper.\n\n• Works on each display with its own menu bar.\n• To keep the menu bar text white on lighter wallpapers, DockAway uses a copy of your wallpaper with a black band at the top while the window fills the screen, then puts your wallpaper back.\n• Dynamic and aerial wallpapers can't be copied, so their menu bar text keeps the color macOS picks.\n• If your wallpaper is in a place macOS asks about, such as your Downloads folder, DockAway explains why it needs to read it before macOS asks.\n• Some wallpaper apps keep their wallpapers in their own private folder, which DockAway can only read with Full Disk Access. The first time that keeps the menu bar from turning black, DockAway explains why.\n• Until DockAway can read your wallpaper, \"Allow Wallpaper Access\" appears below this option.\n• Full screen apps are unaffected, since macOS hides the menu bar there."
             }
         ) { [weak self] enabled in
             self?.setMenuBarBlackoutEnabled(enabled)
@@ -6533,15 +6569,22 @@ final class OnboardingPrimaryButton: NSButton {
     // methods, so each stays in sync with the other.
 
     private func setMutedSoundIconEnabled(_ enabled: Bool) {
-        let accepted = mutedVolumeMenuBarController.setEnabled(enabled)
+        // Checked and saved now, but while paused it waits for Resume.
+        let accepted = enabled && !dockAwayEnabled
+            ? mutedVolumeMenuBarController.saveEnabledWithoutStarting()
+            : mutedVolumeMenuBarController.setEnabled(enabled)
         mutedVolumeMenuBarRow?.setOn(enabled && accepted)
         extrasDidChange()
         guard !accepted else { return }
         let alert = NSAlert()
         alert.messageText = "Set Sound to Show When Active"
-        alert.informativeText = "In System Settings, open Menu Bar (or Control Center on older macOS versions) and set Sound to Show When Active. Then enable this option again."
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        alert.informativeText = "Click Continue to open Menu Bar in System Settings (Control Center on macOS 15), then set Sound to \"Show When Active\". Then turn this option on again."
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Not Now").keyEquivalent = "\u{1b}"
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        // Called Menu Bar on macOS 26 and later, and Control Center before.
+        openSystemSettingsPane("com.apple.ControlCenter-Settings.extension")
     }
 
     private func setLockscreenSoundEnabled(_ event: LockscreenSoundPlayer.Event, _ enabled: Bool) {
@@ -6555,6 +6598,7 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func setKeyboardLightOffForVideo(_ enabled: Bool) {
         fullscreenVideoKeyboardLightController.setEnabledFromMenu(enabled)
+        if !dockAwayEnabled { fullscreenVideoKeyboardLightController.stop() }
         fullscreenVideoKeyboardLightRowView?.setOn(enabled)
         refreshKeyboardLightTimeoutMenu()
         extrasDidChange()
@@ -6598,6 +6642,7 @@ final class OnboardingPrimaryButton: NSButton {
             UserDefaults.standard.bool(forKey: ForceClickMiddleClickController.preferenceKey)
                 && accessibilityAccessGranted
                 && inputMonitoringAccessGranted
+                && dockAwayEnabled
         )
     }
 
@@ -6611,7 +6656,7 @@ final class OnboardingPrimaryButton: NSButton {
     private func setMenuBarBlackoutEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: MenuBarBlackoutController.preferenceKey)
         menuBarBlackoutRowView?.setOn(enabled)
-        menuBarBlackoutController.setEnabled(enabled)
+        menuBarBlackoutController.setEnabled(enabled && dockAwayEnabled)
         refreshMenuBarBlackoutAccessRow()
         extrasDidChange()
     }
@@ -6633,21 +6678,29 @@ final class OnboardingPrimaryButton: NSButton {
         }
     }
 
-    /// The first time a wallpaper app's private folder keeps the menu bar
-    /// from turning black, DockAway explains why by itself, once for each app.
-    /// After that it's in the menu, under Black Menu Bar.
+    /// The first time the wallpaper keeps the menu bar from turning black,
+    /// or is in a folder macOS hasn't asked about yet, DockAway explains why by
+    /// itself, once for each case. After that it's in the menu, under Black
+    /// Menu Bar. With the menu open, it waits for the menu to close.
     private func offerWallpaperAccess(_ blocked: MenuBarBlackoutBlockedWallpaper) {
         let explained = UserDefaults.standard.stringArray(forKey: Self.wallpaperAccessExplainedKey) ?? []
-        guard !explained.contains(Self.wallpaperAccessExplanationKey(for: blocked)), !statusMenuIsOpen,
-              !wallpaperAccessPrompt.isShowing else { return }
+        guard !explained.contains(Self.wallpaperAccessExplanationKey(for: blocked)) else { return }
+        // Offered again once the menu or the explanation showing closes. Only
+        // the same case replaces the one showing, which just brings it forward.
+        guard !statusMenuIsOpen,
+              !wallpaperAccessPrompt.isShowing || wallpaperAccessPrompt.showing == blocked else { return }
         markWallpaperAccessExplained(blocked)
-        presentWallpaperAccess(blocked, returningTo: NSWorkspace.shared.frontmostApplication)
+        presentWallpaperAccess(blocked, returningTo: wallpaperAccessReturnApplication
+                                   ?? NSWorkspace.shared.frontmostApplication)
     }
 
     private static let wallpaperAccessExplainedKey = "menuBarBlackoutWallpaperAccessExplained"
 
     private static func wallpaperAccessExplanationKey(for blocked: MenuBarBlackoutBlockedWallpaper) -> String {
-        blocked.appFolder ?? "elsewhere"
+        if let location = blocked.askingLocation, !blocked.isInAppFolder {
+            return (blocked.awaitingPermission ? "ask:" : "turnedDown:") + location.rawValue
+        }
+        return blocked.appFolder ?? "elsewhere"
     }
 
     private func markWallpaperAccessExplained(_ blocked: MenuBarBlackoutBlockedWallpaper) {
@@ -6660,9 +6713,17 @@ final class OnboardingPrimaryButton: NSButton {
 
     private func presentWallpaperAccess(_ blocked: MenuBarBlackoutBlockedWallpaper,
                                         returningTo previous: NSRunningApplication?) {
-        dockAwayDebugLog("Menu bar blackout: explaining Full Disk Access for the wallpaper")
+        dockAwayDebugLog("Menu bar blackout: explaining wallpaper access (\(Self.wallpaperAccessExplanationKey(for: blocked)))")
         wallpaperAccessPrompt.show(for: blocked, returningTo: previous) { [weak self] in
-            self?.openSystemSettingsPane("com.apple.preference.security?Privacy_AllFiles")
+            guard let self else { return }
+            if blocked.awaitingPermission, let location = blocked.askingLocation {
+                self.menuBarBlackoutController.allowAsking(for: location)
+                self.refreshMenuBarBlackoutAccessRow()
+            } else if blocked.askingLocation != nil, !blocked.isInAppFolder {
+                self.openSystemSettingsPane("com.apple.preference.security?Privacy_FilesAndFolders")
+            } else {
+                self.openSystemSettingsPane("com.apple.preference.security?Privacy_AllFiles")
+            }
         }
     }
 
@@ -6825,6 +6886,7 @@ final class OnboardingPrimaryButton: NSButton {
         chromiumWebAppPlacementController.setEnabled(
             ChromiumWebAppPlacementController.isEnabled
                 && accessibilityAccessGranted
+                && dockAwayEnabled
         )
     }
 
@@ -6833,6 +6895,7 @@ final class OnboardingPrimaryButton: NSButton {
             UserDefaults.standard.bool(forKey: GreenButtonFillController.preferenceKey)
                 && accessibilityAccessGranted
                 && inputMonitoringAccessGranted
+                && dockAwayEnabled
         )
     }
 
@@ -6843,6 +6906,7 @@ final class OnboardingPrimaryButton: NSButton {
             )
                 && accessibilityAccessGranted
                 && inputMonitoringAccessGranted
+                && dockAwayEnabled
         )
     }
 
@@ -6850,7 +6914,7 @@ final class OnboardingPrimaryButton: NSButton {
         quickLookCopyOrientationManager.setEnabled(
             UserDefaults.standard.bool(
                 forKey: QuickLookCopyOrientationManager.preferenceKey
-            )
+            ) && dockAwayEnabled
         )
     }
 
@@ -6858,6 +6922,7 @@ final class OnboardingPrimaryButton: NSButton {
         hoverActivationController.setEnabled(
             HoverActivationController.isEnabled
                 && accessibilityAccessGranted
+                && dockAwayEnabled
         )
         refreshHoverActivationMenu()
     }
@@ -6974,7 +7039,7 @@ final class OnboardingPrimaryButton: NSButton {
         dockIconClickHideRowView?.setOn(hideEnabled)
         dockIconClickCycleRowView?.setOn(cycleEnabled)
         updateDockIconClickRoles(cycle: cycleEnabled, hide: hideEnabled, minimize: minimizeEnabled)
-        dockIconClickMinimizeController.setMode(hasRequiredPermissions ? mode : .disabled)
+        dockIconClickMinimizeController.setMode(hasRequiredPermissions && dockAwayEnabled ? mode : .disabled)
     }
 
     // MARK: - Desktop Indicator Appearance
@@ -7903,6 +7968,7 @@ final class OnboardingPrimaryButton: NSButton {
         updateMenuItem.onStateImage = menuIcon(from: icon)
         if let row = updateMenuItem.view as? DockAwayMenuRowView {
             row.update(title: title, icon: icon)
+            row.iconColor = updateIsAvailable ? .systemGreen : nil
             row.dimmedTitleRange = dimmedRange
             if let accessibilityTitle { row.setAccessibilityLabel(accessibilityTitle) }
             // The menu widens to show the whole title while an update waits,
@@ -8325,10 +8391,47 @@ final class OnboardingPrimaryButton: NSButton {
         dockWatcher?.resetState()
     }
 
+    private func setAutoHidePaused(_ paused: Bool) {
+        pauseAutoHideRowView?.setOn(paused)
+        guard paused != autoHidePaused else { return }
+        UserDefaults.standard.set(paused, forKey: Self.autoHidePausedKey)
+        // The Dock part of a four-finger touch starts over after the switch.
+        fourFingersDown = false
+        fourFingerStartedWithKnownState = false
+        fourFingerStartedInMissionControl = false
+        dockWatcher?.autoHidePaused = paused
+        if paused, !monitoringShouldRun, !isDockCurrentlyVisible() {
+            // With DockAway paused too, nothing else would bring the Dock back.
+            restoreDockState()
+        }
+        dockAwayDebugLog(paused ? "⏸ Auto-hide paused" : "▶️ Auto-hide resumed")
+        updateDockAwayMenuState()
+    }
+
     private func rebuildBlacklistMenu() {
         guard let blacklistMenu else { return }
 
         blacklistMenu.removeAllItems()
+
+        let pauseItem = NSMenuItem()
+        pauseItem.title = "Pause Auto-Hide"
+        let pauseRow = DockSettingToggleRowView(
+            title: "Pause Auto-Hide",
+            isOn: autoHidePaused,
+            leadingInset: 18,
+            trailingInset: 12,
+            helpHeading: "Pause Auto-Hide",
+            helpTextProvider: {
+                "Keeps the Dock shown, and DockAway stops hiding it until you turn this off. Everything else DockAway does keeps working.\n\n• It stays paused after DockAway restarts.\n• \"Pause DockAway\" pauses everything instead."
+            }
+        ) { [weak self] paused in
+            self?.setAutoHidePaused(paused)
+        }
+        pauseRow.autoresizingMask = [.width]
+        pauseItem.view = pauseRow
+        pauseAutoHideRowView = pauseRow
+        blacklistMenu.addItem(pauseItem)
+        blacklistMenu.addItem(.separator())
 
         let ignoredIdentifiers = ignoredWindowBundleIdentifiers
         var applicationsByIdentifier = [String: BlacklistApplication]()
@@ -8677,19 +8780,76 @@ final class OnboardingPrimaryButton: NSButton {
 
         if dockAwayEnabled {
             dockAwayEnabled = false
+            UserDefaults.standard.set(true, forKey: Self.dockAwayPausedKey)
             fourFingersDown = false
             fourFingerStartedInMissionControl = false
             dockWatcher?.stop()
             multitouch.stop()
+            applyPauseStateToFeatures()
             updateDockAwayMenuState()
             restoreDockState()
             applyStatusIcon(dockVisible: isDockCurrentlyVisible())
-            dockAwayDebugLog("🔴 DockAway inactive")
+            dockAwayDebugLog("🔴 DockAway paused")
         } else {
             dockAwayEnabled = true
+            UserDefaults.standard.removeObject(forKey: Self.dockAwayPausedKey)
+            applyPauseStateToFeatures()
             requestAccessibilityPermission(userInitiated: true)
+            startupDockRestart.requestIfReady()
             updateDockAwayMenuState()
+            dockAwayDebugLog("🟢 DockAway resumed")
         }
+    }
+
+    /// Starts or stops everything besides the Dock watcher and swipe detection
+    /// for "Pause DockAway". Saved settings stay as they are, so Resume brings
+    /// back exactly what they say.
+    private func applyPauseStateToFeatures() {
+        let running = dockAwayEnabled
+        let defaults = UserDefaults.standard
+        updateStatusItemPausedLook()
+
+        if !running {
+            // Nothing stays mid-swipe after the swipe detection stops.
+            trackpadFingerCount = 0
+            desktopSwipeContactsActive = false
+            desktopChangeTooltip.desktopGestureContactsChanged(0)
+            menuBarBlackoutController.desktopGestureContactsChanged(0)
+            desktopChangeTooltip.dismiss()
+        }
+
+        refreshDockIconClickMinimizeController()
+        refreshHoverActivationController()
+        refreshChromiumWebAppPlacementController()
+        refreshForceClickMiddleClickController()
+        refreshFinderDeleteKeyController()
+        refreshGreenButtonFillController()
+        refreshQuickLookCopyOrientationManager()
+        running ? cursorTeleportManager?.start() : cursorTeleportManager?.stop()
+        screenshotClipboardManager.isPaused = !running
+
+        menuBarBlackoutController.setEnabled(
+            running && defaults.bool(forKey: MenuBarBlackoutController.preferenceKey)
+        )
+        refreshMenuBarBlackoutAccessRow()
+
+        if running {
+            if defaults.bool(forKey: MutedVolumeMenuBarController.preferenceKey) {
+                let accepted = mutedVolumeMenuBarController.setEnabled(true)
+                mutedVolumeMenuBarRow?.setOn(accepted)
+            }
+            if defaults.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey) {
+                fullscreenVideoKeyboardLightController.setEnabled(true)
+            }
+        } else {
+            mutedVolumeMenuBarController.stop()
+            fullscreenVideoKeyboardLightController.stop()
+        }
+    }
+
+    /// The menu bar icon dims while DockAway is paused.
+    private func updateStatusItemPausedLook() {
+        statusItem?.button?.appearsDisabled = !dockAwayEnabled
     }
 
     private func updateDockAwayMenuState() {
@@ -8698,6 +8858,7 @@ final class OnboardingPrimaryButton: NSButton {
             active: statusAppearsActive,
             status: activeStatusText,
             desktopStatus: desktopMenuStatus,
+            activeTitle: activeStatusTitle,
             inactiveTitle: inactiveStatusTitle,
             inactiveDetail: dockAwayEnabled
                 ? automaticSuspensionDetail
@@ -11789,6 +11950,14 @@ extension AppDelegate: NSMenuDelegate {
             DispatchQueue.main.async { [weak self] in self?.menuBarAppearanceDidChange() }
             let previousApplication = settingsMenuPreviousApplication
             settingsMenuPreviousApplication = nil
+            // A wallpaper explanation held back while the menu was open, ahead
+            // of putting the previous app back, which it replaces.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.statusMenuIsOpen else { return }
+                self.wallpaperAccessReturnApplication = previousApplication
+                self.menuBarBlackoutController.offerHeldBackExplanations()
+                self.wallpaperAccessReturnApplication = nil
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.statusMenuIsOpen, !self.desktopSwitcher.isSwitching,
                       NSApp.isActive,

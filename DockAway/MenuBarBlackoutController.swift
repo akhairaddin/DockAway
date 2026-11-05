@@ -180,6 +180,21 @@ enum MenuBarBlackoutDecision {
             || path.hasPrefix("/System/Library/Wallpapers/.default/")
     }
 
+    /// Where macOS asks before any app opens a file there: Desktop, Documents
+    /// or Downloads in the home folder, iCloud Drive, or a removable or network
+    /// disk. Nil elsewhere.
+    nonisolated static func askingLocation(of path: String, home: String, volumeIsRemovable: Bool = false,
+                                           volumeIsNetwork: Bool = false) -> MenuBarBlackoutAskingLocation? {
+        for location in [MenuBarBlackoutAskingLocation.desktop, .documents, .downloads, .iCloudDrive] {
+            guard let folder = location.homeFolder else { continue }
+            let prefix = (home as NSString).appendingPathComponent(folder) + "/"
+            if path.hasPrefix(prefix), path.count > prefix.count { return location }
+        }
+        guard path.hasPrefix("/Volumes/") else { return nil }
+        if volumeIsNetwork { return .networkVolumes }
+        return volumeIsRemovable ? .removableVolumes : nil
+    }
+
     /// The app whose private folder holds a file: the folder's name under
     /// ~/Library/Containers, which is the app's bundle identifier, or under
     /// ~/Library/Group Containers. Nil anywhere else.
@@ -196,12 +211,68 @@ enum MenuBarBlackoutDecision {
     }
 }
 
-/// A wallpaper macOS won't let DockAway read without Full Disk Access.
+/// A place macOS asks about before an app opens a file there, by its
+/// setting in Privacy & Security, Files & Folders.
+enum MenuBarBlackoutAskingLocation: String, CaseIterable, Equatable, Sendable {
+    case desktop = "Desktop Folder"
+    case documents = "Documents Folder"
+    case downloads = "Downloads Folder"
+    case iCloudDrive = "iCloud Drive"
+    case removableVolumes = "Removable Volumes"
+    case networkVolumes = "Network Volumes"
+
+    /// Its setting's name in Files & Folders.
+    var settingName: String { rawValue }
+
+    /// Its folder in the home folder, for those that are one.
+    var homeFolder: String? {
+        switch self {
+        case .desktop: "Desktop"
+        case .documents: "Documents"
+        case .downloads: "Downloads"
+        case .iCloudDrive: "Library/Mobile Documents"
+        case .removableVolumes, .networkVolumes: nil
+        }
+    }
+
+    /// Where the wallpaper is, to follow "Your wallpaper is".
+    var whereItIs: String {
+        switch self {
+        case .desktop: "in your Desktop folder"
+        case .documents: "in your Documents folder"
+        case .downloads: "in your Downloads folder"
+        case .iCloudDrive: "in iCloud Drive"
+        case .removableVolumes: "on a removable disk"
+        case .networkVolumes: "on a network disk"
+        }
+    }
+
+    /// What macOS asks about, to follow "when macOS asks about".
+    var whatMacOSAsksAbout: String {
+        switch self {
+        case .desktop: "your Desktop folder"
+        case .documents: "your Documents folder"
+        case .downloads: "your Downloads folder"
+        case .iCloudDrive: "iCloud Drive"
+        case .removableVolumes: "removable disks"
+        case .networkVolumes: "network disks"
+        }
+    }
+}
+
+/// A wallpaper DockAway can't read yet: one in another app's private folder,
+/// which needs Full Disk Access, or one in a place macOS asks about, such as
+/// Downloads.
 struct MenuBarBlackoutBlockedWallpaper: Equatable {
     /// The app that keeps it in its private folder, when that's known.
     let appName: String?
     /// That folder's name, or nil if it's in another place macOS protects.
     let appFolder: String?
+    /// Where it is, when that's a place macOS asks about.
+    var askingLocation: MenuBarBlackoutAskingLocation? = nil
+    /// macOS hasn't asked about that place yet. DockAway explains first,
+    /// then lets macOS ask.
+    var awaitingPermission = false
 
     var isInAppFolder: Bool { appFolder != nil }
 }
@@ -275,6 +346,10 @@ final class MenuBarBlackoutController {
     /// macOS won't let DockAway read the wallpaper. Called at each check
     /// while that lasts.
     var wallpaperAccessNeeded: (MenuBarBlackoutBlockedWallpaper) -> Void = { _ in }
+    /// The wallpaper is in a place macOS asks about, such as Downloads, and
+    /// DockAway hasn't let it ask yet. Called before DockAway opens it, so the
+    /// reason can come first, and again at each check until it's answered.
+    var wallpaperPermissionNeeded: (MenuBarBlackoutBlockedWallpaper) -> Void = { _ in }
 
     private(set) var isEnabled = false
     private var timer: Timer?
@@ -341,6 +416,27 @@ final class MenuBarBlackoutController {
     private var preparedWallpapers: [String: WallpaperCopies] = [:]
     /// Wallpapers whose copies are being made in the background.
     private var preparingWallpapers = Set<String>()
+    /// Places DockAway has let macOS ask about, after explaining why.
+    private var locationsAllowedToAsk = MenuBarBlackoutController.loadLocationsAllowedToAsk()
+    private static let locationsAllowedToAskKey = "menuBarBlackoutWallpaperLocationsAsked"
+    /// Places just allowed, so if macOS says no anyway, as it does when it
+    /// asked once before, the way to turn it on follows straight away.
+    private var locationsJustAllowed = Set<MenuBarBlackoutAskingLocation>()
+    /// Places macOS said no to after Continue, until they can be read.
+    private var locationsTurnedDown = Set<MenuBarBlackoutAskingLocation>()
+
+    private static func loadLocationsAllowedToAsk() -> Set<MenuBarBlackoutAskingLocation> {
+        let defaults = UserDefaults.standard
+        if let saved = defaults.stringArray(forKey: locationsAllowedToAskKey) {
+            return Set(saved.compactMap(MenuBarBlackoutAskingLocation.init(rawValue:)))
+        }
+        // Before 2.1.5, the black menu bar opened the wallpaper wherever it
+        // was, so with it on, macOS has asked already wherever it would.
+        let asked: [MenuBarBlackoutAskingLocation] = defaults.bool(forKey: preferenceKey)
+            ? MenuBarBlackoutAskingLocation.allCases : []
+        defaults.set(asked.map(\.rawValue), forKey: locationsAllowedToAskKey)
+        return Set(asked)
+    }
     /// Whether each filled display's menu bar text will be white behind the
     /// black. Without that it stays as it is, rather than black on black.
     private var textWillBeWhite: [CGDirectDisplayID: Bool] = [:]
@@ -663,6 +759,10 @@ final class MenuBarBlackoutController {
             if checkWallpapers, let inputs = wallpaperInputs(for: screen), !isBandedCopy(inputs.url) {
                 // Ready before a window fills this desktop, so the swap is instant.
                 prepareWallpaper(inputs)
+                // Until it's answered, in case it couldn't show last time.
+                if case .awaitingPermission? = preparedWallpapers[inputs.key] {
+                    wallpaperPermissionNeeded(blockedWallpaper(at: inputs.url, awaitingPermission: true))
+                }
             }
             var filled = filling[display.id] != nil
             // Just arrived on a desktop, its window can be missing from the
@@ -954,9 +1054,10 @@ final class MenuBarBlackoutController {
         }
         let current = inputs.url, options = inputs.options
         // Full Disk Access may have been turned on since macOS last said no.
+        // It stays blocked while it's checked again, in the background.
         if case .blocked(let checkedAt)? = preparedWallpapers[inputs.key],
            now - checkedAt >= Self.blockedRetryInterval {
-            preparedWallpapers[inputs.key] = nil
+            prepareWallpaper(inputs, recheckingBlocked: true)
         }
         let copies: (banded: URL, plain: URL)
         switch preparedWallpapers[inputs.key] {
@@ -965,7 +1066,17 @@ final class MenuBarBlackoutController {
             // wallpaper follows as soon as the copy is ready, unless macOS
             // won't let DockAway read the wallpaper at all.
             prepareWallpaper(inputs)
-            if case .blocked? = preparedWallpapers[inputs.key] { return textIsWhiteWithoutWallpaper(inputs, on: display) }
+            switch preparedWallpapers[inputs.key] {
+            case .blocked?: return textIsWhiteWithoutWallpaper(inputs, on: display)
+            // Its explanation is up already, offered as it was held back.
+            case .awaitingPermission?: return menuBarTextIsWhite(display)
+            default: break
+            }
+            // macOS may be asking about it now, which can take a while, so the
+            // black waits unless the text is white already.
+            if preparingWallpapers.contains(inputs.key), Self.askingLocation(of: inputs.url) != nil {
+                return menuBarTextIsWhite(display)
+            }
             return true
         case .alreadyDark?:
             return true
@@ -973,6 +1084,8 @@ final class MenuBarBlackoutController {
             return menuBarTextIsWhite(display)
         case .blocked?:
             return textIsWhiteWithoutWallpaper(inputs, on: display)
+        case .awaitingPermission?:
+            return menuBarTextIsWhite(display)
         case .copies(let banded, let plain)?:
             guard FileManager.default.fileExists(atPath: banded.path) else {
                 preparedWallpapers[inputs.key] = nil
@@ -1027,6 +1140,9 @@ final class MenuBarBlackoutController {
         /// macOS won't let DockAway read it, as when it's in another app's
         /// private folder, as of this time.
         case blocked(at: TimeInterval)
+        /// In a folder macOS hasn't asked about yet, so it isn't opened
+        /// until DockAway has said why.
+        case awaitingPermission
     }
 
     /// How often a wallpaper macOS wouldn't let DockAway read is tried again,
@@ -1046,21 +1162,75 @@ final class MenuBarBlackoutController {
 
     /// The wallpaper showing on a display, when macOS won't let DockAway read
     /// it, so the menu can explain why the menu bar isn't turning black.
+    /// One waiting for macOS to ask comes first, since a click sorts it out.
     var blockedWallpaper: MenuBarBlackoutBlockedWallpaper? {
         guard isEnabled else { return nil }
+        var blocked: MenuBarBlackoutBlockedWallpaper?
         for screen in NSScreen.screens {
-            guard let inputs = wallpaperInputs(for: screen), case .blocked? = preparedWallpapers[inputs.key]
-            else { continue }
-            return blockedWallpaper(at: inputs.url)
+            guard let inputs = wallpaperInputs(for: screen) else { continue }
+            switch preparedWallpapers[inputs.key] {
+            case .blocked?: blocked = blocked ?? blockedWallpaper(at: inputs.url)
+            case .awaitingPermission?: return blockedWallpaper(at: inputs.url, awaitingPermission: true)
+            default: continue
+            }
         }
-        return nil
+        return blocked
     }
 
-    private func blockedWallpaper(at url: URL) -> MenuBarBlackoutBlockedWallpaper {
+    /// Offers again an explanation that couldn't show, as while DockAway's
+    /// menu or another explanation was open: one for a wallpaper waiting for
+    /// macOS to ask, or for one macOS just said no to after Continue.
+    func offerHeldBackExplanations() {
+        guard isEnabled else { return }
+        for screen in NSScreen.screens {
+            guard let inputs = wallpaperInputs(for: screen) else { continue }
+            switch preparedWallpapers[inputs.key] {
+            case .awaitingPermission?:
+                wallpaperPermissionNeeded(blockedWallpaper(at: inputs.url, awaitingPermission: true))
+            case .blocked?:
+                if let location = Self.askingLocation(of: inputs.url), locationsTurnedDown.contains(location) {
+                    wallpaperAccessNeeded(blockedWallpaper(at: inputs.url))
+                }
+            default:
+                continue
+            }
+        }
+    }
+
+    private func blockedWallpaper(at url: URL, awaitingPermission: Bool = false) -> MenuBarBlackoutBlockedWallpaper {
         let folder = MenuBarBlackoutDecision.appFolderIdentifier(of: url.path, home: NSHomeDirectory())
         let app = folder.flatMap { workspace.urlForApplication(withBundleIdentifier: $0) }
-        return MenuBarBlackoutBlockedWallpaper(appName: app?.deletingPathExtension().lastPathComponent,
-                                               appFolder: folder)
+        return MenuBarBlackoutBlockedWallpaper(
+            appName: app?.deletingPathExtension().lastPathComponent, appFolder: folder,
+            askingLocation: Self.askingLocation(of: url), awaitingPermission: awaitingPermission)
+    }
+
+    /// Where a file is, when that's a place macOS asks about. Reading a disk's
+    /// own details doesn't make macOS ask.
+    nonisolated private static func askingLocation(of url: URL) -> MenuBarBlackoutAskingLocation? {
+        var removable = false, network = false
+        if url.path.hasPrefix("/Volumes/"),
+           let volume = try? url.resourceValues(forKeys: [.volumeIsRemovableKey, .volumeIsEjectableKey,
+                                                          .volumeIsLocalKey]) {
+            removable = volume.volumeIsRemovable == true || volume.volumeIsEjectable == true
+            network = volume.volumeIsLocal == false
+        }
+        return MenuBarBlackoutDecision.askingLocation(of: url.path, home: NSHomeDirectory(),
+                                                      volumeIsRemovable: removable, volumeIsNetwork: network)
+    }
+
+    /// After DockAway has explained why, opens the wallpaper in a place macOS
+    /// asks about, so macOS asks. DockAway keeps working while it waits.
+    func allowAsking(for location: MenuBarBlackoutAskingLocation) {
+        locationsAllowedToAsk.insert(location)
+        locationsJustAllowed.insert(location)
+        UserDefaults.standard.set(locationsAllowedToAsk.map(\.rawValue).sorted(), forKey: Self.locationsAllowedToAskKey)
+        for (key, state) in preparedWallpapers {
+            if case .awaitingPermission = state { preparedWallpapers[key] = nil }
+        }
+        lastWallpaperCheck.removeAll()
+        guard isEnabled else { return }
+        evaluate(checkWallpapers: true)
     }
 
     /// Without reading the wallpaper, the black only shows if the menu bar
@@ -1119,9 +1289,9 @@ final class MenuBarBlackoutController {
 
     /// Makes a wallpaper's copies in the background, ahead of a window filling
     /// the screen where possible, so neither the swap nor the fade waits on it.
-    private func prepareWallpaper(_ inputs: WallpaperInputs) {
+    private func prepareWallpaper(_ inputs: WallpaperInputs, recheckingBlocked: Bool = false) {
         let key = inputs.key
-        guard preparedWallpapers[key] == nil, !preparingWallpapers.contains(key) else { return }
+        guard preparedWallpapers[key] == nil || recheckingBlocked, !preparingWallpapers.contains(key) else { return }
         let directory = Self.copiesDirectory
         let banded = directory.appendingPathComponent("\(key)-band.jpg")
         let plain = directory.appendingPathComponent("\(key)-plain.jpg")
@@ -1129,9 +1299,13 @@ final class MenuBarBlackoutController {
             preparedWallpapers[key] = .copies(banded: banded, plain: plain)
             return
         }
-        if Self.readingIsBlocked(inputs.url) {
-            preparedWallpapers[key] = .blocked(at: ProcessInfo.processInfo.systemUptime)
-            dockAwayDebugLog("Menu bar blackout: macOS won't let DockAway read the wallpaper; it needs Full Disk Access")
+        // Opening a file in a place such as Downloads makes macOS ask first,
+        // so DockAway says why before it does.
+        let askingLocation = Self.askingLocation(of: inputs.url)
+        if let askingLocation, !locationsAllowedToAsk.contains(askingLocation) {
+            preparedWallpapers[key] = .awaitingPermission
+            dockAwayDebugLog("Menu bar blackout: the wallpaper is \(askingLocation.whereItIs); explaining before macOS asks")
+            wallpaperPermissionNeeded(blockedWallpaper(at: inputs.url, awaitingPermission: true))
             return
         }
         preparingWallpapers.insert(key)
@@ -1147,20 +1321,48 @@ final class MenuBarBlackoutController {
             [$0.redComponent, $0.greenComponent, $0.blueComponent, $0.alphaComponent]
         }
         let controller = self
+        let wallpaperURL = inputs.url
         DispatchQueue.global(qos: .utility).async {
+            // Off the main thread: while macOS asks about a folder, opening a
+            // file in it waits for the answer.
+            if Self.readingIsBlocked(url) {
+                let blocked = WallpaperCopies.blocked(at: ProcessInfo.processInfo.systemUptime)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { controller.finishPreparing(key, blocked, url: wallpaperURL) }
+                }
+                return
+            }
             let result = Self.renderCopies(of: url, scaling: scaling, allowClipping: allowClipping, fill: fill,
                                            pixelSize: pixelSize, bandHeight: bandHeight,
                                            cornerRadius: cornerRadius, windowShape: windowShape,
                                            banded: banded, plain: plain, directory: directory)
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { controller.finishPreparing(key, result) }
+                MainActor.assumeIsolated { controller.finishPreparing(key, result, url: wallpaperURL) }
             }
         }
     }
 
-    private func finishPreparing(_ key: String, _ result: WallpaperCopies) {
+    private func finishPreparing(_ key: String, _ result: WallpaperCopies, url: URL) {
         preparingWallpapers.remove(key)
+        let wasBlocked: Bool
+        if case .blocked? = preparedWallpapers[key] { wasBlocked = true } else { wasBlocked = false }
         preparedWallpapers[key] = result
+        let askingLocation = Self.askingLocation(of: url)
+        if case .blocked = result {
+            if !wasBlocked {
+                dockAwayDebugLog("Menu bar blackout: macOS won't let DockAway read the wallpaper")
+            }
+            // Turned down just now, or before: how to turn it on comes next.
+            if let askingLocation, locationsJustAllowed.remove(askingLocation) != nil {
+                locationsTurnedDown.insert(askingLocation)
+                if isEnabled { wallpaperAccessNeeded(blockedWallpaper(at: url)) }
+            }
+            // Nothing new to show until it can be read.
+            if wasBlocked { return }
+        } else if let askingLocation {
+            locationsJustAllowed.remove(askingLocation)
+            locationsTurnedDown.remove(askingLocation)
+        }
         pruneCopies()
         // A filled display waiting on this copy swaps at the next check.
         lastWallpaperCheck.removeAll()

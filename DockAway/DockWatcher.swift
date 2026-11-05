@@ -421,6 +421,46 @@ final class DockWatcher {
     var isMissionControlActive: Bool {
         missionControlIsActive
     }
+    /// "Pause Auto-Hide": DockAway shows the Dock once and then leaves it
+    /// alone. Everything else here, such as the app name in the menu, desktop
+    /// tracking and Mission Control, keeps running.
+    var autoHidePaused = false {
+        didSet {
+            guard autoHidePaused != oldValue else { return }
+            if autoHidePaused {
+                cancelDockDisplayHandoff()
+                clearHiddenHold()
+                clearVisibleHold()
+                cancelTransientDecisionWork()
+                pointerOnlyEmptyDisplayID = nil
+                pausedShowPending = true
+                guard isRunning else { return }
+                evaluateFrontmostApp(quiet: false)
+            } else {
+                pausedShowPending = false
+                // Decide afresh for the display under the pointer, which may
+                // have changed while DockAway left the Dock alone.
+                cancelDockDisplayHandoff()
+                pointerOnlyEmptyDisplayID = nil
+                cachedDockDisplayID = nil
+                dockDisplayCacheValidUntil = .distantPast
+                lastCommandedDockVisibility = nil
+                guard isRunning else { return }
+                lastPointerDisplayID = displayIDUnderPointer()
+                guard let app = NSWorkspace.shared.frontmostApplication else { return }
+                evaluate(
+                    app: app,
+                    quiet: false,
+                    pointerDisplayChanged: true,
+                    applicationActivated: true,
+                    finderActivated: app.bundleIdentifier == "com.apple.finder"
+                )
+            }
+        }
+    }
+    /// Until the Dock is confirmed shown once after auto-hide pauses, every
+    /// evaluation tries again.
+    private var pausedShowPending = false
     var onAccessibilityEvent: ((pid_t, AXUIElement, String) -> Void)?
     private var desktopTransitionPhase: DesktopTransitionPhase = .idle
     private var desktopTransitionGeneration = 0
@@ -629,6 +669,10 @@ final class DockWatcher {
         RunLoop.main.add(timer, forMode: .common)
         safetyTimer = timer
 
+        if autoHidePaused {
+            pausedShowPending = true
+            showDockForPausedAutoHide()
+        }
         dockAwayDebugLog("✅ DockStatus started")
     }
 
@@ -1674,7 +1718,7 @@ final class DockWatcher {
         if launchWindowCorrection?.processIdentifier == app.processIdentifier { return }
         cancelLaunchWindowCorrection()
         let displayID = displayIDUnderPointer()
-        guard isRunning, !isDesktopTransitionProtected,
+        guard isRunning, !autoHidePaused, !isDesktopTransitionProtected,
               app.activationPolicy == .regular,
               app.bundleIdentifier != "com.apple.finder",
               !isProcessBlacklisted(app.processIdentifier),
@@ -1977,6 +2021,12 @@ final class DockWatcher {
         // so the menu keeps naming the app that was in use.
         let appText: String? = windowState == .empty ? "Desktop"
             : app.processIdentifier == getpid() ? nil : label
+
+        if autoHidePaused {
+            showDockForPausedAutoHide()
+            postStatus(appText, displayID: activeDisplayID)
+            return
+        }
 
         if suppressUnsafeDisplayShow,
            let handoffExpectedState,
@@ -2832,7 +2882,7 @@ final class DockWatcher {
         movingToNextSpace: Bool,
         maximum: TimeInterval = 5.0
     ) -> Bool {
-        guard !missionControlNeedsBootstrap else { return false }
+        guard !autoHidePaused, !missionControlNeedsBootstrap else { return false }
         let sourceDisplayID = displayIDUnderPointer()
 
         // If visible hold is already latched for this swipe, keep holding unless
@@ -2897,7 +2947,7 @@ final class DockWatcher {
     func beginVisibleHoldForMissionControlExitIfNeeded(
         maximum: TimeInterval = 5.0
     ) -> Bool {
-        guard !missionControlNeedsBootstrap else { return false }
+        guard !autoHidePaused, !missionControlNeedsBootstrap else { return false }
         let destinationDisplayID = displayIDUnderPointer()
         guard
             isRunning,
@@ -2954,7 +3004,7 @@ final class DockWatcher {
         missionControlWasActiveAtContact: Bool,
         maximum: TimeInterval = 5.0
     ) -> Bool {
-        guard isRunning, !missionControlNeedsBootstrap else { return false }
+        guard isRunning, !autoHidePaused, !missionControlNeedsBootstrap else { return false }
 
         cancelDockDisplayHandoff()
 
@@ -3274,6 +3324,7 @@ final class DockWatcher {
     private func setDockVisible(_ shouldShow: Bool) {
         guard
             isRunning,
+            !autoHidePaused,
             !isWindowMovementSettling,
             (NSApp.delegate as? AppDelegate)?.isQuitting != true
         else { return }
@@ -3369,6 +3420,30 @@ final class DockWatcher {
             lastCommandedDockVisibility = visible
             postDockVisibility(visible)
         }
+    }
+
+    /// Brings a hidden Dock back when auto-hide is paused, the one Dock
+    /// change DockAway makes until it resumes.
+    private func showDockForPausedAutoHide() {
+        guard
+            isRunning,
+            autoHidePaused,
+            pausedShowPending,
+            (NSApp.delegate as? AppDelegate)?.isQuitting != true
+        else { return }
+        let shown = dockIsActuallyShown()
+        reconcileLastDockCommand(with: shown)
+        // A command still landing is left to finish; the next check decides.
+        if lastCommandedDockVisibility != nil,
+           Date().timeIntervalSince(lastToggleTime) < dockCommandSettleTimeout {
+            return
+        }
+        if shown {
+            pausedShowPending = false
+            return
+        }
+        guard Date().timeIntervalSince(lastToggleTime) >= toggleDebounce else { return }
+        sendDockToggle(towardVisible: true, reason: "Auto-hide paused →")
     }
 
     private func scheduleDebounceReevaluation(after delay: TimeInterval) {

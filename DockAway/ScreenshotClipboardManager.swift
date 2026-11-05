@@ -34,12 +34,12 @@ final class ScreenshotClipboardManager {
         }
         set {
             UserDefaults.standard.set(newValue, forKey: Self.preferenceKey)
-            if newValue {
+            if isActive {
                 startMonitoring()
             } else {
                 stopMonitoring()
             }
-            thumbnailSuppression.update(clipboardEnabled: newValue)
+            thumbnailSuppression.update(clipboardEnabled: isActive)
         }
     }
 
@@ -49,13 +49,26 @@ final class ScreenshotClipboardManager {
         get { thumbnailSuppression.isRequested }
         set {
             thumbnailSuppression.isRequested = newValue
-            thumbnailSuppression.update(clipboardEnabled: isEnabled)
+            thumbnailSuppression.update(clipboardEnabled: isActive)
         }
     }
 
+    /// "Pause DockAway": stops copying and gives macOS its thumbnail back,
+    /// without changing either saved setting.
+    var isPaused = false {
+        didSet {
+            guard isPaused != oldValue else { return }
+            if isActive { startMonitoring() } else { stopMonitoring() }
+            thumbnailSuppression.update(clipboardEnabled: isActive)
+        }
+    }
+
+    /// Turned on and not paused.
+    private var isActive: Bool { isEnabled && !isPaused }
+
     /// Re-applies Copy Instantly, noticing if the user turned the thumbnail back on.
     func updateThumbnailSuppression() {
-        thumbnailSuppression.update(clipboardEnabled: isEnabled)
+        thumbnailSuppression.update(clipboardEnabled: isActive)
     }
 
     /// Returns the thumbnail to the user's own setting, for when DockAway quits.
@@ -67,7 +80,7 @@ final class ScreenshotClipboardManager {
 
     func startMonitoring() {
         stopMonitoring()
-        guard isEnabled else { return }
+        guard isActive else { return }
 
         let folderURL = Self.currentScreenshotDirectoryURL()
         let path = folderURL.path
@@ -124,7 +137,7 @@ final class ScreenshotClipboardManager {
     }
 
     func validateWatchedDirectory() {
-        guard isEnabled else { return }
+        guard isActive else { return }
         let currentURL = Self.currentScreenshotDirectoryURL()
         if currentURL != watchedDirectoryURL {
             startMonitoring()
@@ -148,7 +161,7 @@ final class ScreenshotClipboardManager {
         healthCheckTimer?.invalidate()
         let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.isEnabled else { return }
+                guard let self, self.isActive else { return }
                 self.validateWatchedDirectory()
                 self.updateThumbnailSuppression()
                 self.checkForNewScreenshots()
@@ -159,7 +172,7 @@ final class ScreenshotClipboardManager {
     }
 
     func checkForNewScreenshots() {
-        guard isEnabled, let folderURL = watchedDirectoryURL else {
+        guard isActive, let folderURL = watchedDirectoryURL else {
             captureAnchorMouseLocation = nil
             return
         }
@@ -323,7 +336,7 @@ final class ScreenshotClipboardManager {
     }
 
     private func verifyAndCopyScreenshot(at url: URL, fileIdentifier: String, captureDate: Date, attempt: Int) {
-        guard isEnabled, !isOlderThanCopiedCapture(captureDate) else { return }
+        guard isActive, !isOlderThanCopiedCapture(captureDate) else { return }
 
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
            CGImageSourceGetStatus(source) == .statusComplete {
@@ -348,7 +361,7 @@ final class ScreenshotClipboardManager {
     /// clipboard. `completion` runs on the main thread once that's done or skipped.
     func copyScreenshotToClipboard(from url: URL, fileIdentifier: String, captureDate: Date? = nil,
                                    completion: (() -> Void)? = nil) {
-        guard isEnabled, !processedFileIdentifiers.contains(fileIdentifier),
+        guard isActive, !processedFileIdentifiers.contains(fileIdentifier),
               !isOlderThanCopiedCapture(captureDate) else {
             completion?()
             return
@@ -365,7 +378,7 @@ final class ScreenshotClipboardManager {
                     self.processedFileIdentifiers.remove(fileIdentifier)
                     return
                 }
-                guard self.isEnabled, !self.isOlderThanCopiedCapture(captureDate) else { return }
+                guard self.isActive, !self.isOlderThanCopiedCapture(captureDate) else { return }
 
                 let item = NSPasteboardItem()
                 for (type, data) in representations {

@@ -1,7 +1,37 @@
 import Cocoa
 import QuartzCore
 
-final class DockSettingHelpButton: NSButton {
+/// A borderless symbol button that draws its own symbol in `contentTintColor`.
+/// On macOS 14, AppKit draws a borderless button's tinted symbol black in
+/// dark menus, so the "?" and preview buttons were hard to read there.
+class MenuSymbolButton: NSButton {
+    override var contentTintColor: NSColor? {
+        didSet { if oldValue != contentTintColor { needsDisplay = true } }
+    }
+    override var isEnabled: Bool {
+        didSet { if oldValue != isEnabled { needsDisplay = true } }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let image else { return }
+        var color = contentTintColor ?? .secondaryLabelColor
+        if !isEnabled { color = color.withAlphaComponent(0.5) }
+        let palette = NSImage.SymbolConfiguration(paletteColors: [color])
+        let symbol = image.withSymbolConfiguration(image.symbolConfiguration.applying(palette)) ?? image
+        let size = symbol.size
+        guard size.width > 0, size.height > 0 else { return }
+        let scale = min(1, bounds.width / size.width, bounds.height / size.height)
+        let drawSize = NSSize(width: size.width * scale, height: size.height * scale)
+        symbol.draw(in: NSRect(
+            x: bounds.midX - drawSize.width / 2,
+            y: bounds.midY - drawSize.height / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        ))
+    }
+}
+
+final class DockSettingHelpButton: MenuSymbolButton {
     var heading: String
     var textProvider: () -> String
     private var helpPopover: NSPopover?
@@ -320,7 +350,7 @@ final class DockSettingPersistenceRowView: NSView {
         }
 
         if previewHandler != nil {
-            let button = NSButton()
+            let button = MenuSymbolButton()
             button.isBordered = false
             button.imagePosition = .imageOnly
             button.image = NSImage(systemSymbolName: "play.circle", accessibilityDescription: previewAccessibilityLabel)?
@@ -714,6 +744,12 @@ final class DockAwayMenuRowView: NSView {
         didSet { needsDisplay = true }
     }
 
+    /// Colors the icon, such as green for an available update. While the row
+    /// is highlighted or dimmed, the icon follows the title's color instead.
+    var iconColor: NSColor? {
+        didSet { needsDisplay = true }
+    }
+
     var customToolTip: String? {
         didSet { toolTip = customToolTip }
     }
@@ -893,7 +929,8 @@ final class DockAwayMenuRowView: NSView {
         text.draw(in: NSRect(x: textX, y: (bounds.height - textHeight) / 2, width: textWidth, height: textHeight))
 
         if let icon {
-            let config = NSImage.SymbolConfiguration(paletteColors: [color])
+            let tint = !highlighted && controlEnabled ? (iconColor ?? color) : color
+            let config = NSImage.SymbolConfiguration(paletteColors: [tint])
             let drawnIcon = icon.withSymbolConfiguration(config) ?? icon
             let iconRect = NSRect(x: leadingInset, y: (bounds.height - 16) / 2, width: 16, height: 16)
             drawnIcon.draw(in: iconRect)

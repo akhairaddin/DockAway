@@ -43,6 +43,17 @@ final class MutedVolumeMenuBarController {
         UserDefaults.standard.removeObject(forKey: Self.ownershipKey)
     }
 
+    /// Checks and saves turning the option on without starting it, for while
+    /// DockAway is paused. Resume starts it with setEnabled(true).
+    func saveEnabledWithoutStarting() -> Bool {
+        guard Self.readMode() == 2 else {
+            UserDefaults.standard.set(false, forKey: Self.preferenceKey)
+            return false
+        }
+        UserDefaults.standard.set(true, forKey: Self.preferenceKey)
+        return true
+    }
+
     @discardableResult
     func setEnabled(_ enabled: Bool) -> Bool {
         if !enabled {
