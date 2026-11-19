@@ -830,10 +830,10 @@ final class DesktopWallpaperThumbnails {
         return canRead(url) ? url : nil
     }
 
-    /// A very slight blur, about a point once the picture is in its box.
+    /// A slight blur, about a point and a half once the picture is in its box.
     private nonisolated static func blurred(_ image: CGImage) -> CGImage? {
         let source = CIImage(cgImage: image)
-        let blurred = source.clampedToExtent().applyingGaussianBlur(sigma: 1.6).cropped(to: source.extent)
+        let blurred = source.clampedToExtent().applyingGaussianBlur(sigma: 2.4).cropped(to: source.extent)
         return CIContext(options: [.cacheIntermediates: false]).createCGImage(blurred, from: source.extent)
     }
 
@@ -1219,11 +1219,6 @@ final class DesktopTileButton: NSButton {
                                width: size.width * scale, height: size.height * scale)
             NSGraphicsContext.current?.imageInterpolation = .high
             wallpaper.draw(in: drawn, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-            if !icons.isEmpty {
-                // Dimmed a little too, so the icons stand out from it.
-                NSColor.black.withAlphaComponent(0.15).setFill()
-                bounds.fill(using: .sourceOver)
-            }
             NSGraphicsContext.restoreGraphicsState()
         } else if icons.isEmpty, !representsFullscreenSpace {
             // A desktop with no apps gets a faint fill, so its box still
