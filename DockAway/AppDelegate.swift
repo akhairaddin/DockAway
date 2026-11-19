@@ -5253,6 +5253,25 @@ final class OnboardingPrimaryButton: NSButton {
         managerPointerRow.autoresizingMask = [.width]
         managerPointerItem.view = managerPointerRow
 
+        let boxWallpaperTitle = "Show Wallpaper in Desktop Boxes"
+        let boxWallpaperItem = NSMenuItem(title: boxWallpaperTitle, action: nil, keyEquivalent: "")
+        let boxWallpaperRow = DockSettingPersistenceRowView(
+            title: boxWallpaperTitle,
+            isOn: DesktopWallpaperThumbnails.isEnabled,
+            width: settingsRowWidth,
+            leadingInset: 12, trailingInset: 7, titleLeadingAdjustment: 2,
+            indicatorSize: 14,
+            helpHeading: boxWallpaperTitle,
+            helpTextProvider: {
+                "Shows each desktop's own wallpaper in its box in Desktop Manager, slightly blurred behind app icons, so empty desktops are easy to spot.\n\n• Reads your wallpapers only where DockAway can already read them, so it never asks for access.\n• While it's off, DockAway doesn't look at your wallpapers for the boxes at all."
+            }
+        ) { enabled in
+            UserDefaults.standard.set(enabled, forKey: DesktopWallpaperThumbnails.preferenceKey)
+            NotificationCenter.default.post(name: DesktopWallpaperThumbnails.didChangeNotification, object: nil)
+        }
+        boxWallpaperRow.autoresizingMask = [.width]
+        boxWallpaperItem.view = boxWallpaperRow
+
         let keyboardNavItem = NSMenuItem(title: "Keyboard Navigation", action: nil, keyEquivalent: "")
         keyboardNavItem.view = SubmenuLabelView.keyboardNavigation()
         keyboardNavItem.state = .on
@@ -5413,6 +5432,7 @@ final class OnboardingPrimaryButton: NSButton {
 
         keyboardNavItem.submenu = keyboardNavMenu
         dockAwaySettingsMenu.addItem(keyboardNavItem)
+        dockAwaySettingsMenu.addItem(boxWallpaperItem)
         dockAwaySettingsMenu.addItem(managerPointerItem)
         dockAwaySettingsMenu.addItem(wideMenuSeparator(width: settingsRowWidth, leadingInset: 14, trailingInset: 14))
 

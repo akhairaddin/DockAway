@@ -632,6 +632,10 @@ final class DesktopWallpaperPreview {
 final class DesktopWallpaperThumbnails {
     static let shared = DesktopWallpaperThumbnails()
     static let didChangeNotification = Notification.Name("DesktopWallpaperThumbnailsDidChange")
+    /// "Show Wallpaper in Desktop Boxes", off by default. While it's off,
+    /// no wallpaper or record of them is read.
+    static let preferenceKey = "showWallpaperInDesktopBoxes"
+    static var isEnabled: Bool { UserDefaults.standard.bool(forKey: preferenceKey) }
     /// Whether DockAway may read a wallpaper file without macOS stopping to
     /// ask, set by the app delegate. Until then, nothing is read.
     var canRead: (URL) -> Bool = { _ in false }
@@ -656,6 +660,7 @@ final class DesktopWallpaperThumbnails {
     /// The picture for one desktop's box: that desktop's own wallpaper.
     func image(forSpace spaceID: UInt64, on displayID: CGDirectDisplayID,
                currentSpaceID: UInt64) -> DesktopWallpaperPreview? {
+        guard Self.isEnabled else { return nil }
         let now = ProcessInfo.processInfo.systemUptime
         let url: URL?
         if let recent = recentURLs[spaceID], now - recent.at < 1 {
