@@ -614,6 +614,239 @@ private final class DesktopDragPreview: NSImageView {
 
 /// A desktop box's measurements. Its app icons sit in its corners, and its
 /// corners are shaped like theirs and run parallel to them.
+/// Small pictures of each desktop's own wallpaper for its box, made in
+/// the background. Only from places DockAway may read without macOS
+/// stopping to ask; anywhere else, the boxes go without.
+@MainActor
+/// A desktop's wallpaper for its box, plain and slightly blurred: the
+/// blurred one sits behind app icons so they stand out from it.
+final class DesktopWallpaperPreview {
+    let plain: NSImage
+    let blurred: NSImage
+    init(plain: NSImage, blurred: NSImage) {
+        self.plain = plain
+        self.blurred = blurred
+    }
+}
+
+final class DesktopWallpaperThumbnails {
+    static let shared = DesktopWallpaperThumbnails()
+    static let didChangeNotification = Notification.Name("DesktopWallpaperThumbnailsDidChange")
+    /// Whether DockAway may read a wallpaper file without macOS stopping to
+    /// ask, set by the app delegate. Until then, nothing is read.
+    var canRead: (URL) -> Bool = { _ in false }
+
+    private struct Thumbnail: @unchecked Sendable { let image: CGImage?; let blurred: CGImage? }
+    /// macOS's record of every desktop's wallpaper, as read from disk.
+    private struct Store: @unchecked Sendable { let root: [String: Any]? }
+
+    /// By file and its modification date, so an edited wallpaper is redrawn.
+    private var thumbnails: [String: DesktopWallpaperPreview] = [:]
+    private var loading = Set<String>()
+    private var failed = Set<String>()
+    /// Each box asks as the row refreshes, so one lookup serves a moment.
+    private var recentURLs: [UInt64: (url: URL?, at: TimeInterval)] = [:]
+    private var spaceUUIDs: (byID: [UInt64: String], at: TimeInterval) = ([:], -1)
+    private var store: [String: Any]?
+    private var storeModified: Date?
+    private var storeLoading = false
+    private var storeRead = false
+    private var storeCheckedAt: TimeInterval = -1
+
+    /// The picture for one desktop's box: that desktop's own wallpaper.
+    func image(forSpace spaceID: UInt64, on displayID: CGDirectDisplayID,
+               currentSpaceID: UInt64) -> DesktopWallpaperPreview? {
+        let now = ProcessInfo.processInfo.systemUptime
+        let url: URL?
+        if let recent = recentURLs[spaceID], now - recent.at < 1 {
+            url = recent.url
+        } else {
+            url = wallpaperURL(forSpace: spaceID, on: displayID, currentSpaceID: currentSpaceID, now: now)
+                .flatMap { self.readable($0) }
+            recentURLs[spaceID] = (url, now)
+        }
+        guard let url else { return nil }
+        let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate?.timeIntervalSince1970 ?? 0
+        let key = "\(url.path)|\(modified)"
+        if let image = thumbnails[key] { return image }
+        guard !loading.contains(key), !failed.contains(key) else { return nil }
+        loading.insert(key)
+        DispatchQueue.global(qos: .utility).async {
+            let image = Self.thumbnail(at: url)
+            let thumbnail = Thumbnail(image: image, blurred: image.flatMap(Self.blurred))
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let provider = DesktopWallpaperThumbnails.shared
+                    provider.loading.remove(key)
+                    guard let image = thumbnail.image, let blurred = thumbnail.blurred else {
+                        provider.failed.insert(key)
+                        return
+                    }
+                    if provider.thumbnails.count >= 16 { provider.thumbnails.removeAll() }
+                    provider.thumbnails[key] = DesktopWallpaperPreview(
+                        plain: NSImage(cgImage: image, size: .zero),
+                        blurred: NSImage(cgImage: blurred, size: .zero))
+                    NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// The desktop showing now is asked about directly; the others come
+    /// from macOS's record of each desktop's wallpaper.
+    private func wallpaperURL(forSpace spaceID: UInt64, on displayID: CGDirectDisplayID,
+                              currentSpaceID: UInt64, now: TimeInterval) -> URL? {
+        let currentURL = {
+            NSScreen.screens.first {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
+            }.flatMap { NSWorkspace.shared.desktopImageURL(for: $0) }
+        }
+        if spaceID == currentSpaceID { return currentURL() }
+        refreshStoreIfChanged(now: now)
+        guard let store,
+              let unmanagedDisplayUUID = CGDisplayCreateUUIDFromDisplayID(displayID) else { return nil }
+        let displayUUID = CFUUIDCreateString(nil, unmanagedDisplayUUID.takeRetainedValue()) as String
+        guard let choice = Self.choice(in: store, space: uuid(ofSpace: spaceID, now: now), display: displayUUID)
+        else { return nil }
+        // The same choice as the desktop showing now, such as one of macOS's
+        // own wallpapers that the record names without a file: the same
+        // picture macOS gives for this desktop.
+        if let current = Self.choice(in: store, space: uuid(ofSpace: currentSpaceID, now: now), display: displayUUID),
+           (choice as NSDictionary).isEqual(to: current) {
+            return currentURL()
+        }
+        return Self.imageURL(of: choice)
+    }
+
+    /// The wallpaper chosen for a desktop: the most specific choice wins,
+    /// this desktop on this display, then this desktop, then the display's
+    /// own, then every desktop's.
+    private static func choice(in store: [String: Any], space spaceUUID: String?,
+                               display displayUUID: String) -> [String: Any]? {
+        let space = spaceUUID.flatMap { (store["Spaces"] as? [String: Any])?[$0] as? [String: Any] }
+        let candidates: [Any?] = [
+            (space?["Displays"] as? [String: Any])?[displayUUID],
+            space?["Default"],
+            (store["Displays"] as? [String: Any])?[displayUUID],
+            store["AllSpacesAndDisplays"],
+            store["SystemDefault"]
+        ]
+        for candidate in candidates {
+            guard let entry = candidate as? [String: Any],
+                  let desktop = entry["Desktop"] as? [String: Any],
+                  let content = desktop["Content"] as? [String: Any],
+                  let first = (content["Choices"] as? [[String: Any]])?.first else { continue }
+            return first
+        }
+        return nil
+    }
+
+    /// A picture wallpaper's file. Other kinds, such as aerials, have none.
+    private static func imageURL(of choice: [String: Any]) -> URL? {
+        guard choice["Provider"] as? String == "com.apple.wallpaper.choice.image",
+              let data = choice["Configuration"] as? Data,
+              let configuration = try? PropertyListSerialization.propertyList(from: data, format: nil)
+                as? [String: Any],
+              let relative = (configuration["url"] as? [String: Any])?["relative"] as? String,
+              let url = URL(string: relative), url.isFileURL else { return nil }
+        return url
+    }
+
+    private static var storeURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("com.apple.wallpaper/Store/Index.plist")
+    }
+
+    /// Reads the record again, in the background, once it has changed.
+    private func refreshStoreIfChanged(now: TimeInterval) {
+        guard now - storeCheckedAt >= 1, !storeLoading else { return }
+        storeCheckedAt = now
+        let url = Self.storeURL
+        let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        // Read once per change, even if it can't be read, so a missing
+        // record isn't tried again every second.
+        guard modified != storeModified || !storeRead else { return }
+        storeLoading = true
+        DispatchQueue.global(qos: .utility).async {
+            let root = (try? Data(contentsOf: url)).flatMap {
+                try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any]
+            }
+            let loaded = Store(root: root)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let provider = DesktopWallpaperThumbnails.shared
+                    provider.storeLoading = false
+                    provider.storeRead = true
+                    provider.storeModified = modified
+                    provider.store = loaded.root
+                    provider.recentURLs.removeAll()
+                    guard loaded.root != nil else { return }
+                    NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+                }
+            }
+        }
+    }
+
+    private func uuid(ofSpace spaceID: UInt64, now: TimeInterval) -> String? {
+        if now - spaceUUIDs.at >= 1 || spaceUUIDs.byID[spaceID] == nil {
+            spaceUUIDs = (Self.currentSpaceUUIDs(), now)
+        }
+        return spaceUUIDs.byID[spaceID]
+    }
+
+    private static func currentSpaceUUIDs() -> [UInt64: String] {
+        typealias MainConnection = @convention(c) () -> Int32
+        typealias CopySpaces = @convention(c) (Int32) -> Unmanaged<CFArray>?
+        let handle = UnsafeMutableRawPointer(bitPattern: -2)
+        guard let main = dlsym(handle, "SLSMainConnectionID") ?? dlsym(handle, "CGSMainConnectionID"),
+              let copy = dlsym(handle, "SLSCopyManagedDisplaySpaces") ?? dlsym(handle, "CGSCopyManagedDisplaySpaces"),
+              let displays = unsafeBitCast(copy, to: CopySpaces.self)(unsafeBitCast(main, to: MainConnection.self)())?
+                .takeRetainedValue() as? [[String: Any]] else { return [:] }
+        var uuids: [UInt64: String] = [:]
+        for display in displays {
+            for space in display["Spaces"] as? [[String: Any]] ?? [] {
+                guard let uuid = space["uuid"] as? String, !uuid.isEmpty,
+                      let id = (space["id64"] as? NSNumber) ?? (space["ManagedSpaceID"] as? NSNumber) else { continue }
+                uuids[id.uint64Value] = uuid
+            }
+        }
+        return uuids
+    }
+
+    /// The file to read for a wallpaper, if DockAway may read it without
+    /// macOS stopping to ask.
+    private func readable(_ wallpaper: URL) -> URL? {
+        guard wallpaper.isFileURL else { return nil }
+        var url = wallpaper
+        // "Black Out Menu Bar for Filled Screens" puts up a copy with a black
+        // band; its plain twin is the same picture without it.
+        if url.path.contains("/DockAway/Menu Bar Wallpapers/"), url.lastPathComponent.hasSuffix("-band.jpg") {
+            let name = url.lastPathComponent.replacingOccurrences(of: "-band.jpg", with: "-plain.jpg")
+            url = url.deletingLastPathComponent().appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        }
+        return canRead(url) ? url : nil
+    }
+
+    /// A very slight blur, about a point once the picture is in its box.
+    private nonisolated static func blurred(_ image: CGImage) -> CGImage? {
+        let source = CIImage(cgImage: image)
+        let blurred = source.clampedToExtent().applyingGaussianBlur(sigma: 1.6).cropped(to: source.extent)
+        return CIContext(options: [.cacheIntermediates: false]).createCGImage(blurred, from: source.extent)
+    }
+
+    private nonisolated static func thumbnail(at url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 192
+        ] as CFDictionary)
+    }
+}
+
 enum DesktopBoxMetrics {
     /// The visible squircle of a macOS app icon within its image.
     static let iconBodyFraction: CGFloat = 824.0 / 1024.0
@@ -729,6 +962,10 @@ final class DesktopTileButton: NSButton {
     var isDropTarget = false { didSet { needsDisplay = true } }
     var applicationIcons: [DesktopApplicationIcon] = [] {
         didSet { needsDisplay = true }
+    }
+    /// The display's wallpaper, drawn behind the icons.
+    var wallpaper: DesktopWallpaperPreview? {
+        didSet { if wallpaper !== oldValue { needsDisplay = true } }
     }
     var isTileHovered = false {
         didSet {
@@ -968,6 +1205,34 @@ final class DesktopTileButton: NSButton {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let icons = applicationIcons
+        if let preview = wallpaper, !representsFullscreenSpace,
+           case let wallpaper = icons.isEmpty ? preview.plain : preview.blurred,
+           wallpaper.size.width > 0, wallpaper.size.height > 0 {
+            // A tiny desktop: the wallpaper fills the box, cropped like the
+            // screen's own, with the apps on top of it.
+            NSGraphicsContext.saveGraphicsState()
+            DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: 1, dy: 1),
+                                         radius: DesktopBoxMetrics.cornerRadius - 1).addClip()
+            let size = wallpaper.size
+            let scale = max(bounds.width / size.width, bounds.height / size.height)
+            let drawn = NSRect(x: bounds.midX - size.width * scale / 2, y: bounds.midY - size.height * scale / 2,
+                               width: size.width * scale, height: size.height * scale)
+            NSGraphicsContext.current?.imageInterpolation = .high
+            wallpaper.draw(in: drawn, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            if !icons.isEmpty {
+                // Dimmed a little too, so the icons stand out from it.
+                NSColor.black.withAlphaComponent(0.15).setFill()
+                bounds.fill(using: .sourceOver)
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        } else if icons.isEmpty, !representsFullscreenSpace {
+            // A desktop with no apps gets a faint fill, so its box still
+            // reads as a desktop rather than an empty outline.
+            let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            NSColor.labelColor.withAlphaComponent(isDark ? 0.1 : 0.06).setFill()
+            DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: 1, dy: 1),
+                                         radius: DesktopBoxMetrics.cornerRadius - 1).fill()
+        }
         for (index, rect) in Self.iconFrames(count: icons.count, in: bounds).enumerated() {
             if icons.count > 6 && index == 5 {
                 let text = "+\(icons.count - 5)" as NSString
@@ -2240,6 +2505,8 @@ final class DesktopTilesView: NSView {
         addSubview(dragPreview)
         NotificationCenter.default.addObserver(self, selector: #selector(refreshAccentColors),
             name: NSColor.systemColorsDidChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshAccentColors),
+            name: DesktopWallpaperThumbnails.didChangeNotification, object: nil)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -2941,6 +3208,7 @@ final class DesktopTilesView: NSView {
         replica.showsFullscreenOutline = button.showsFullscreenOutline
         replica.contentTintColor = button.contentTintColor
         replica.applicationIcons = button.applicationIcons
+        replica.wallpaper = button.wallpaper
         replica.setAccessibilityElement(false)
         host.addSubview(replica)
         return host
@@ -3109,6 +3377,9 @@ final class DesktopTilesView: NSView {
             && isCurrentOnFullscreen
             && isCurrentOnActiveDisplay
 
+        button.wallpaper = snapshot.flatMap {
+            DesktopWallpaperThumbnails.shared.image(forSpace: spaceID, on: $0.displayID, currentSpaceID: $0.currentID)
+        }
         button.representsFullscreenSpace = representsFullscreenSpace
         let showsGreen = (representsFullscreenSpace || isAssociatedFullscreen)
             && DesktopBoxFullscreenPreference.greenOutlineEnabled

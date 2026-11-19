@@ -134,6 +134,70 @@ private final class DesktopChangeAppIconButton: NSButton {
     // The pill never becomes active, so the first click counts.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// Dragging the icon away offers a close button under the pill, which
+    /// the pill handles. Without these, the icon is a plain button.
+    var onDragBegan: ((NSPoint) -> Void)?
+    var onDragMoved: ((NSPoint) -> Void)?
+    var onDragEnded: ((NSPoint) -> Void)?
+    /// The closed hand shows, or goes away again after a click.
+    var onGrabChanged: ((Bool) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window, onDragBegan != nil else {
+            super.mouseDown(with: event)
+            return
+        }
+        let start = NSEvent.mouseLocation
+        var dragging = false
+        // Allowed now, so the hand can show the moment it's needed: allowed
+        // only at that moment, the first change can be lost.
+        BackgroundCursor.allow(true)
+        // However the press ends, DockAway stops setting the pointer while
+        // it's in the background.
+        defer { BackgroundCursor.allow(false) }
+        // Like a desktop in the Desktop Manager, the hand closes as soon as
+        // the icon moves, or once it's held still for a moment.
+        let grabTime = Date(timeIntervalSinceNow: 0.15)
+        var grabbing = false
+        func grab() {
+            guard !grabbing else { return }
+            grabbing = true
+            onGrabChanged?(true)
+        }
+        while true {
+            let wake = Date(timeIntervalSinceNow: 0.1)
+            let next = window.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp],
+                until: grabbing ? wake : min(wake, grabTime),
+                inMode: .eventTracking,
+                dequeue: true
+            )
+            if !grabbing, Date() >= grabTime { grab() }
+            // Whatever is under the pointer may put the arrow back.
+            if grabbing { NSCursor.closedHand.set() }
+            let point = NSEvent.mouseLocation
+            // A release can go missing; never hold on once the button is up.
+            if next?.type == .leftMouseUp || (next == nil && NSEvent.pressedMouseButtons & 1 == 0) {
+                if dragging {
+                    onDragEnded?(point)
+                } else {
+                    // Held but not dragged, it's still a click.
+                    if grabbing { onGrabChanged?(false) }
+                    BackgroundCursor.allow(false)
+                    sendAction(action, to: target)
+                }
+                return
+            }
+            guard next?.type == .leftMouseDragged else { continue }
+            if point != start { grab() }
+            if !dragging, hypot(point.x - start.x, point.y - start.y) >= 4 {
+                dragging = true
+                onDragBegan?(start)
+            }
+            if dragging { onDragMoved?(point) }
+        }
+    }
+
     override func layout() {
         super.layout()
         applyScale(animated: false)
@@ -158,6 +222,137 @@ private final class DesktopChangeAppIconButton: NSButton {
         grow.duration = 0.14
         grow.timingFunction = CAMediaTimingFunction(name: .easeOut)
         layer.add(grow, forKey: "hoverScale")
+    }
+}
+
+/// Lets DockAway change the pointer while another app is in front, which
+/// macOS otherwise ignores, through the window server's private
+/// "SetsCursorInBackground" connection property. Looked up at run time; if
+/// it's missing the pointer just stays an arrow.
+@MainActor
+enum BackgroundCursor {
+    private typealias MainConnection = @convention(c) () -> Int32
+    private typealias SetProperty = @convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32
+
+    private static let functions: (MainConnection, SetProperty)? = {
+        let defaultHandle = UnsafeMutableRawPointer(bitPattern: -2)
+        guard let connection = dlsym(defaultHandle, "CGSMainConnectionID"),
+              let setProperty = dlsym(defaultHandle, "CGSSetConnectionProperty") else { return nil }
+        return (unsafeBitCast(connection, to: MainConnection.self),
+                unsafeBitCast(setProperty, to: SetProperty.self))
+    }()
+
+    static func allow(_ allowed: Bool) {
+        guard let (mainConnection, setProperty) = functions else { return }
+        let connection = mainConnection()
+        _ = setProperty(connection, connection, "SetsCursorInBackground" as CFString,
+                        (allowed ? kCFBooleanTrue : kCFBooleanFalse) as CFTypeRef)
+    }
+}
+
+/// The round close button under the pill while an app icon is dragged.
+/// Dropping the icon on it quits that app. On macOS 26 and later it's the
+/// same clear Liquid Glass as the pill, tinted red while an icon is over it.
+@MainActor
+private final class DesktopChangeCloseTargetView: NSView {
+    /// The glass, on macOS 26 and later.
+    private var glass: NSView?
+    /// The red fill used before macOS 26 instead of a glass tint.
+    private let fill = NSView()
+    private let symbol = NSImageView()
+    var isHighlighted = false {
+        didSet {
+            guard isHighlighted != oldValue else { return }
+            updateHighlight(animated: true)
+        }
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        let diameter = frame.width
+        symbol.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)
+        symbol.symbolConfiguration = .init(pointSize: 12, weight: .bold)
+        symbol.imageScaling = .scaleNone
+        symbol.frame = bounds
+        symbol.autoresizingMask = [.width, .height]
+
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView(frame: bounds)
+            glass.style = .clear
+            glass.cornerRadius = diameter / 2
+            let content = NSView(frame: bounds)
+            content.addSubview(symbol)
+            glass.contentView = content
+            glass.autoresizingMask = [.width, .height]
+            addSubview(glass)
+            self.glass = glass
+        } else {
+            let material = NSVisualEffectView(frame: bounds)
+            material.material = .popover
+            material.blendingMode = .behindWindow
+            material.state = .active
+            material.maskImage = NSImage(size: bounds.size, flipped: false) { rect in
+                NSColor.black.setFill()
+                NSBezierPath(ovalIn: rect).fill()
+                return true
+            }
+            material.autoresizingMask = [.width, .height]
+            addSubview(material)
+
+            fill.frame = bounds
+            fill.autoresizingMask = [.width, .height]
+            fill.wantsLayer = true
+            fill.layer?.cornerRadius = diameter / 2
+            fill.layer?.backgroundColor = NSColor.systemRed.cgColor
+            fill.alphaValue = 0
+            addSubview(fill)
+            addSubview(symbol)
+        }
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Quit App")
+        updateHighlight(animated: false)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    private var maskedSize: NSSize = .zero
+
+    /// The button grows and shrinks with its window, so its circle follows.
+    override func layout() {
+        super.layout()
+        let radius = bounds.height / 2
+        if #available(macOS 26.0, *), let glass = glass as? NSGlassEffectView, glass.cornerRadius != radius {
+            glass.cornerRadius = radius
+        }
+        fill.layer?.cornerRadius = radius
+        if let material = subviews.first as? NSVisualEffectView, bounds.size != maskedSize, bounds.width > 0 {
+            maskedSize = bounds.size
+            material.maskImage = NSImage(size: bounds.size, flipped: false) { rect in
+                NSColor.black.setFill()
+                NSBezierPath(ovalIn: rect).fill()
+                return true
+            }
+        }
+    }
+
+    private func updateHighlight(animated: Bool) {
+        symbol.contentTintColor = isHighlighted ? .white : .labelColor
+        symbol.symbolConfiguration = .init(pointSize: isHighlighted ? 14 : 10, weight: .bold)
+        if #available(macOS 26.0, *), let glass = glass as? NSGlassEffectView {
+            glass.tintColor = isHighlighted ? NSColor.systemRed.withAlphaComponent(0.85) : nil
+            return
+        }
+        let alpha: CGFloat = isHighlighted ? 0.9 : 0
+        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            fill.alphaValue = alpha
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            fill.animator().alphaValue = alpha
+        }
     }
 }
 
@@ -344,7 +539,7 @@ final class DesktopChangeTooltip: NSObject {
     private weak var appIconStrip: NSStackView?
     private weak var pillSurface: NSView?
     private var displayedAppIcons: [DesktopChangeAppIcon] = []
-    private let appIconSize: CGFloat = 18
+    private let appIconSize: CGFloat = 20
     private var canRemainVisible: (@MainActor () -> Bool)?
     private var dismissalDeadline: TimeInterval = 0
     /// A window being built ahead of the first desktop change.
@@ -358,6 +553,7 @@ final class DesktopChangeTooltip: NSObject {
     /// The pill eases in, settling this far down into place.
     private static let revealDrop: CGFloat = 5
     private static let revealDuration: TimeInterval = 0.25
+    private static let exitDuration: TimeInterval = 0.4
     func resetPanel() {
         dismiss(animated: false)
         activePanel = nil
@@ -464,6 +660,7 @@ final class DesktopChangeTooltip: NSObject {
     }
 
     func dismiss(animated: Bool = false) {
+        cancelIconDrag()
         stopFollowingPointer()
         generation += 1
         let closingGeneration = generation
@@ -479,9 +676,24 @@ final class DesktopChangeTooltip: NSObject {
         // Keep the window and native glass alive for the next presentation.
         // A late fade completion must never hide a newly refreshed capsule.
         if animated && panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            // The reverse of the reveal: a soft fade as the pill drifts back
+            // up toward the menu bar. A desktop change meanwhile brings it
+            // back from wherever it is.
+            if let view = panel.contentView {
+                let start = panel.frame
+                let scale = panel.backingScaleFactor
+                resizeAnimation = EasedAnimation(view: view, duration: Self.exitDuration,
+                                                 curve: easeInOutCubic) { [weak panel] progress, _ in
+                    guard let panel else { return }
+                    let y = ((start.minY + Self.revealDrop * progress) * scale).rounded() / scale
+                    panel.setFrame(NSRect(x: start.minX, y: y, width: start.width, height: start.height),
+                                   display: true)
+                }
+            }
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                context.duration = Self.exitDuration
+                // Eases in and out like a sine, with no sudden start or stop.
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.37, 0, 0.63, 1)
                 panel.animator().alphaValue = 0
             } completionHandler: { [weak self, weak panel] in
                 Task { @MainActor in
@@ -523,7 +735,13 @@ final class DesktopChangeTooltip: NSObject {
         // name. The app icons fit within this width, so they never resize the pill.
         let labelWidth = max(iconWidth + spacingAfterIcon + titleWidth, subtitleWidth)
         let calculated = leadingPadding + labelWidth + trailingPadding
-        return max(160, min(380, calculated))
+        // With app icons, the narrowest pill still holds a full row of them.
+        let fullIconRow = CGFloat(Self.maximumAppIcons) * appIconSize
+            + CGFloat(Self.maximumAppIcons - 1) * Self.appIconSpacing
+        let minimumWidth = showsIconRow
+            ? max(160, leadingPadding + fullIconRow + trailingPadding)
+            : 160
+        return max(minimumWidth, min(380, calculated))
     }
 
     private func panelFrame(for width: CGFloat, destination: DesktopChangeDestination) -> NSRect {
@@ -598,7 +816,7 @@ final class DesktopChangeTooltip: NSObject {
             let now = ProcessInfo.processInfo.systemUptime
             let ready = self.canRemainVisible?() != false
             // It also stays while the pointer rests on it, to pick an app.
-            if !ready || self.gestureContactsActive || self.pointerIsOverPill {
+            if !ready || self.gestureContactsActive || self.pointerIsOverPill || self.isDraggingIcon {
                 self.dismissalDeadline = now + self.readingDuration
             }
             if now >= self.dismissalDeadline {
@@ -619,6 +837,9 @@ final class DesktopChangeTooltip: NSObject {
                 appIconStrip = nil
                 displayedAppIcons = []
                 setIconRowCount(1)
+            } else {
+                // Caught fading out: it glides back down from where it drifted.
+                presentationActive = true
             }
             updateContent(destination, requestsIcons: wasVisible)
             presentationActive = true
@@ -956,7 +1177,7 @@ final class DesktopChangeTooltip: NSObject {
     /// beneath can't be clicked through it; only its icons act on them.
     /// Anywhere else, clicks go through as if it weren't there.
     private func followPointer() {
-        guard let panel = activePanel, presentationActive, panel.isVisible else { return }
+        guard !isDraggingIcon, let panel = activePanel, presentationActive, panel.isVisible else { return }
         let pointer = NSEvent.mouseLocation
         let overPill = pointerIsOverPill
         let hovered = !overPill ? nil : iconButtons.first { button in
@@ -981,6 +1202,430 @@ final class DesktopChangeTooltip: NSObject {
         let processIdentifier = sender.processIdentifier
         dismiss(animated: true)
         onAppIconClick?(processIdentifier)
+    }
+
+    // MARK: - Dragging an app to quit it
+
+    private var isDraggingIcon = false
+    private weak var draggedIconButton: DesktopChangeAppIconButton?
+    private var dragImagePanel: DesktopTooltipAnchorPanel?
+    private var dragGrabOffset: NSPoint = .zero
+    private var closeTargetPanel: DesktopTooltipAnchorPanel?
+    private weak var closeTargetView: DesktopChangeCloseTargetView?
+    /// The close button is small until an icon is dragged onto it.
+    private static let closeTargetDiameter: CGFloat = 24
+    private static let closeTargetHighlightedDiameter: CGFloat = 34
+    /// Where the close button rests, centered under the pill.
+    private var closeTargetCenter: NSPoint = .zero
+    /// The close button leans a little toward the dragged icon: this share
+    /// of the distance, never more than the maximum.
+    private static let closeTargetFollow: CGFloat = 0.015
+    private static let closeTargetMaxLean: CGFloat = 3
+    /// How quickly it catches up with where it's heading, in seconds: its
+    /// position, and its size, which is quicker.
+    private static let closeTargetSmoothing: TimeInterval = 0.09
+    private static let closeTargetSizeSmoothing: TimeInterval = 0.04
+    /// How far up, under the pill, it slides out from and back into.
+    private static let closeTargetSlide: CGFloat = 14
+    private var closeTargetLink: CADisplayLink?
+    private var closeTargetLastTick: CFTimeInterval = 0
+    private var closeTargetLean: NSPoint = .zero
+    private var closeTargetGoalLean: NSPoint = .zero
+    private var closeTargetDiameterNow: CGFloat = 0
+    private var closeTargetGoalDiameter: CGFloat = 0
+    /// Out or on its way out, as opposed to fading away.
+    private var closeTargetShowing = false
+    private static let closeTargetGap: CGFloat = 10
+    private static let dragImageSize: CGFloat = 28
+
+    private var reducesMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    private func makeOverlayPanel(level: NSWindow.Level) -> DesktopTooltipAnchorPanel {
+        let panel = DesktopTooltipAnchorPanel(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isReleasedWhenClosed = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = true
+        panel.level = level
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        return panel
+    }
+
+    private func screenFrame(of view: NSView) -> NSRect? {
+        guard let window = view.window, window.isVisible, !view.isHiddenOrHasHiddenAncestor else { return nil }
+        return window.convertToScreen(view.convert(view.bounds, to: nil))
+    }
+
+    private func dragImageFrame(at point: NSPoint) -> NSRect {
+        let size = Self.dragImageSize
+        return NSRect(x: point.x - dragGrabOffset.x - size / 2,
+                      y: point.y - dragGrabOffset.y - size / 2,
+                      width: size, height: size)
+    }
+
+    private func iconDragBegan(_ button: DesktopChangeAppIconButton, at start: NSPoint) {
+        guard presentationActive, let iconFrame = screenFrame(of: button) else { return }
+        isDraggingIcon = true
+        iconSnapped = false
+        iconSnapBlend = 0
+        lastDragPoint = start
+        draggedIconButton = button
+        iconButtons.forEach { $0.isHovered = false }
+        button.alphaValue = 0.3
+        // Held at the same spot it was grabbed, scaled to the larger icon.
+        let grow = Self.dragImageSize / max(iconFrame.width, 1)
+        dragGrabOffset = NSPoint(x: (start.x - iconFrame.midX) * grow, y: (start.y - iconFrame.midY) * grow)
+
+        let panel = dragImagePanel ?? makeOverlayPanel(level: NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1))
+        dragImagePanel = panel
+        let imageView = NSImageView(frame: NSRect(x: 0, y: 0, width: Self.dragImageSize, height: Self.dragImageSize))
+        imageView.image = button.image
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        panel.contentView = imageView
+        panel.setFrame(dragImageFrame(at: start), display: true)
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+        showCloseTarget()
+        BackgroundCursor.allow(true)
+        NSCursor.closedHand.set()
+    }
+
+    /// Near the close button, the dragged icon snaps onto it, in a quick
+    /// ease, and stays until it's pulled a little further away than that.
+    private static let closeTargetSnapDistance: CGFloat = 9
+    private static let closeTargetUnsnapDistance: CGFloat = 14
+    /// How quickly the icon eases onto and off the button, in seconds.
+    private static let closeTargetSnapSmoothing: TimeInterval = 0.03
+    private var iconSnapped = false
+    /// How far the icon is drawn toward the button, from 0 under the pointer
+    /// to 1 on it, eased toward whether it's snapped.
+    private var iconSnapBlend: CGFloat = 0
+    private var lastDragPoint: NSPoint = .zero
+
+    /// Updates whether the dragged icon is snapped to the close button.
+    private func updateIconSnap(at point: NSPoint) {
+        let frame = dragImageFrame(at: point)
+        guard let panel = closeTargetPanel, panel.isVisible, let view = closeTargetView else {
+            iconSnapped = false
+            return
+        }
+        let target = panel.convertToScreen(view.frame)
+        let distance = hypot(target.midX - frame.midX, target.midY - frame.midY)
+        iconSnapped = distance < (iconSnapped ? Self.closeTargetUnsnapDistance : Self.closeTargetSnapDistance)
+    }
+
+    /// Draws the dragged icon between the pointer and the close button, by
+    /// how far it has eased onto the button.
+    private func placeDraggedIcon() {
+        guard let dragPanel = dragImagePanel else { return }
+        var frame = dragImageFrame(at: lastDragPoint)
+        if iconSnapBlend > 0, let panel = closeTargetPanel, panel.isVisible, let view = closeTargetView {
+            let target = panel.convertToScreen(view.frame)
+            frame.origin.x += (target.midX - frame.midX) * iconSnapBlend
+            frame.origin.y += (target.midY - frame.midY) * iconSnapBlend
+        }
+        if dragPanel.frame != frame { dragPanel.setFrame(frame, display: true) }
+    }
+
+    private func iconDragMoved(to point: NSPoint) {
+        guard isDraggingIcon, dragImagePanel != nil else { return }
+        lastDragPoint = point
+        updateIconSnap(at: point)
+        if reducesMotion { iconSnapBlend = iconSnapped ? 1 : 0 }
+        placeDraggedIcon()
+        // Set on every move: whatever the pointer passes over may reset it.
+        NSCursor.closedHand.set()
+        // On the button exactly when it's snapped to it.
+        let over = iconSnapped
+        setCloseTargetGoal(pointer: point, highlighted: over)
+        if let target = closeTargetView, target.isHighlighted != over {
+            target.isHighlighted = over
+            if over {
+                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            }
+        }
+    }
+
+    private func iconDragEnded(_ button: DesktopChangeAppIconButton, at point: NSPoint) {
+        guard isDraggingIcon else {
+            // The drag never started, as when the pill was refreshing or
+            // going away: put back the arrow and take away the close button
+            // the held icon brought out.
+            NSCursor.arrow.set()
+            BackgroundCursor.allow(false)
+            if closeTargetShowing { hideCloseTarget() }
+            return
+        }
+        isDraggingIcon = false
+        draggedIconButton = nil
+        NSCursor.arrow.set()
+        BackgroundCursor.allow(false)
+        updateIconSnap(at: point)
+        let dropped = iconSnapped
+        iconSnapped = false
+        iconSnapBlend = 0
+        hideCloseTarget()
+        dismissalDeadline = ProcessInfo.processInfo.systemUptime + readingDuration
+        guard let panel = dragImagePanel else {
+            button.alphaValue = 1
+            return
+        }
+        if dropped, quitApp(button.processIdentifier) {
+            // Gone from the pill right away; the app may still ask to save.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = reducesMotion ? 0 : 0.15
+                panel.animator().alphaValue = 0
+            } completionHandler: {
+                MainActor.assumeIsolated { panel.orderOut(nil) }
+            }
+            return
+        }
+        // Back into its place in the pill.
+        guard let home = screenFrame(of: button), !reducesMotion else {
+            panel.orderOut(nil)
+            button.alphaValue = 1
+            followPointer()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.2
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().setFrame(home, display: true)
+        } completionHandler: { [weak self, weak button] in
+            MainActor.assumeIsolated {
+                guard self?.isDraggingIcon != true else { return }
+                panel.orderOut(nil)
+                button?.alphaValue = 1
+                self?.followPointer()
+            }
+        }
+    }
+
+    /// Ends a drag at once, as when the pill goes away mid-drag.
+    private func cancelIconDrag() {
+        guard isDraggingIcon || dragImagePanel?.isVisible == true || closeTargetPanel?.isVisible == true else { return }
+        if isDraggingIcon {
+            NSCursor.arrow.set()
+            BackgroundCursor.allow(false)
+        }
+        isDraggingIcon = false
+        draggedIconButton?.alphaValue = 1
+        draggedIconButton = nil
+        dragImagePanel?.orderOut(nil)
+        closeTargetPanel?.orderOut(nil)
+        closeTargetShowing = false
+        stopCloseTargetLink()
+    }
+
+    private func showCloseTarget() {
+        guard !closeTargetShowing, let pill = activePanel else { return }
+        closeTargetShowing = true
+        let pillFrame = pill.frame.insetBy(dx: Self.glassOverflowInset, dy: Self.glassOverflowInset)
+        let diameter = Self.closeTargetDiameter
+        // Centered under the pill, with room above it to grow.
+        closeTargetCenter = NSPoint(
+            x: pillFrame.midX.rounded(),
+            y: (pillFrame.minY - Self.closeTargetGap - Self.closeTargetHighlightedDiameter / 2).rounded())
+        // It slides down out from under the pill.
+        closeTargetLean = reducesMotion ? .zero : NSPoint(x: 0, y: Self.closeTargetSlide)
+        closeTargetGoalLean = .zero
+        closeTargetDiameterNow = diameter
+        closeTargetGoalDiameter = diameter
+        // The window stays one size, with room for the button fully grown and
+        // leaning. Only the button inside moves and resizes, which is smooth;
+        // resizing the window each frame snaps to whole points and stutters.
+        let canvas = Self.closeTargetCanvas
+        let panelFrame = NSRect(x: closeTargetCenter.x - canvas / 2, y: closeTargetCenter.y - canvas / 2,
+                                width: canvas, height: canvas)
+        let panel: DesktopTooltipAnchorPanel
+        if let existing = closeTargetPanel {
+            panel = existing
+        } else {
+            panel = makeOverlayPanel(level: .statusBar)
+            let container = NSView(frame: NSRect(x: 0, y: 0, width: canvas, height: canvas))
+            let view = DesktopChangeCloseTargetView(frame: NSRect(x: 0, y: 0, width: diameter, height: diameter))
+            container.addSubview(view)
+            panel.contentView = container
+            closeTargetView = view
+            closeTargetPanel = panel
+        }
+        closeTargetView?.isHighlighted = false
+        panel.setFrame(panelFrame, display: false)
+        closeTargetView?.frame = closeTargetFrame(diameter: diameter)
+        panel.alphaValue = reducesMotion ? 1 : 0
+        // Beneath the pill, so it comes out from behind it.
+        panel.order(.below, relativeTo: pill.windowNumber)
+        if !panel.isVisible { panel.orderFrontRegardless() }
+        startCloseTargetLink()
+        guard !reducesMotion else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+        }
+    }
+
+    /// The close button's window: room for it fully grown, leaning either way.
+    private static let closeTargetCanvas: CGFloat = closeTargetHighlightedDiameter + 2 * closeTargetMaxLean + 4
+
+    /// The button's frame inside its window, which is centered on its rest spot.
+    private func closeTargetFrame(diameter: CGFloat) -> NSRect {
+        let middle = Self.closeTargetCanvas / 2
+        return NSRect(x: middle + closeTargetLean.x - diameter / 2,
+                      y: middle + closeTargetLean.y - diameter / 2,
+                      width: diameter, height: diameter)
+    }
+
+    /// Where the close button heads: grown while an icon is over it, and
+    /// leaning a little toward the pointer. Without motion, it stays put.
+    private func setCloseTargetGoal(pointer: NSPoint, highlighted: Bool) {
+        closeTargetGoalDiameter = highlighted ? Self.closeTargetHighlightedDiameter : Self.closeTargetDiameter
+        guard !reducesMotion else {
+            closeTargetGoalLean = .zero
+            return
+        }
+        let dx = pointer.x - closeTargetCenter.x
+        let dy = pointer.y - closeTargetCenter.y
+        let distance = hypot(dx, dy)
+        let lean = min(distance * Self.closeTargetFollow, Self.closeTargetMaxLean)
+        closeTargetGoalLean = distance > 0
+            ? NSPoint(x: dx / distance * lean, y: dy / distance * lean)
+            : .zero
+    }
+
+    private func startCloseTargetLink() {
+        guard closeTargetLink == nil, let view = closeTargetView else { return }
+        closeTargetLastTick = CACurrentMediaTime()
+        let link = view.displayLink(target: self, selector: #selector(closeTargetTick(_:)))
+        link.add(to: .main, forMode: .common)
+        closeTargetLink = link
+    }
+
+    private func stopCloseTargetLink() {
+        closeTargetLink?.invalidate()
+        closeTargetLink = nil
+    }
+
+    /// Eases the close button's size and lean toward their goals, each frame.
+    @objc private func closeTargetTick(_ link: CADisplayLink) {
+        guard let panel = closeTargetPanel, panel.isVisible else {
+            stopCloseTargetLink()
+            return
+        }
+        let now = CACurrentMediaTime()
+        let dt = min(max(now - closeTargetLastTick, 1.0 / 240), 1.0 / 20)
+        closeTargetLastTick = now
+        let step = reducesMotion ? 1 : CGFloat(1 - exp(-dt / Self.closeTargetSmoothing))
+        let sizeStep = reducesMotion ? 1 : CGFloat(1 - exp(-dt / Self.closeTargetSizeSmoothing))
+        closeTargetDiameterNow += (closeTargetGoalDiameter - closeTargetDiameterNow) * sizeStep
+        closeTargetLean.x += (closeTargetGoalLean.x - closeTargetLean.x) * step
+        closeTargetLean.y += (closeTargetGoalLean.y - closeTargetLean.y) * step
+        let frame = closeTargetFrame(diameter: closeTargetDiameterNow)
+        if let view = closeTargetView, view.frame != frame { view.frame = frame }
+        if isDraggingIcon {
+            let snapStep = reducesMotion ? 1 : CGFloat(1 - exp(-dt / Self.closeTargetSnapSmoothing))
+            let goal: CGFloat = iconSnapped ? 1 : 0
+            iconSnapBlend += (goal - iconSnapBlend) * snapStep
+            if abs(goal - iconSnapBlend) < 0.002 { iconSnapBlend = goal }
+            placeDraggedIcon()
+        }
+    }
+
+    private func hideCloseTarget() {
+        closeTargetShowing = false
+        guard let panel = closeTargetPanel, panel.isVisible else { return }
+        // Back up under the pill as it fades.
+        closeTargetGoalLean = NSPoint(x: 0, y: Self.closeTargetSlide)
+        closeTargetGoalDiameter = Self.closeTargetDiameter
+        guard !reducesMotion else {
+            panel.orderOut(nil)
+            stopCloseTargetLink()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            panel.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard self?.closeTargetShowing != true else { return }
+                panel.orderOut(nil)
+                self?.stopCloseTargetLink()
+            }
+        }
+    }
+
+    /// Asks the app to quit, as Quit in its menu would, and drops it from
+    /// the pill. Never DockAway itself.
+    @discardableResult
+    private func quitApp(_ processIdentifier: pid_t) -> Bool {
+        guard processIdentifier != getpid(),
+              let app = NSRunningApplication(processIdentifier: processIdentifier),
+              !app.isTerminated,
+              app.terminate() else { return false }
+        removeAppIcon(processIdentifier)
+        return true
+    }
+
+    /// Takes a quit app out of the pill. In a single row, its slot closes up
+    /// and the icons beside it slide into its place. Otherwise, as when an
+    /// icon would move up from a second row or out of the overflow count, the
+    /// row is redrawn with a cross-fade.
+    private func removeAppIcon(_ processIdentifier: pid_t) {
+        let remaining = displayedAppIcons.filter { $0.processIdentifier != processIdentifier }
+        guard let strip = appIconStrip,
+              strip.arrangedSubviews.count == 1,
+              let row = strip.arrangedSubviews.first as? NSStackView,
+              !row.arrangedSubviews.contains(where: { $0 is NSTextField }),
+              let button = row.arrangedSubviews.first(where: {
+                  ($0 as? DesktopChangeAppIconButton)?.processIdentifier == processIdentifier
+              }),
+              !remaining.isEmpty else {
+            setAppIcons(remaining, crossFade: true)
+            return
+        }
+        // The app in front is set apart by a line; it goes too, unless
+        // another app follows it in front.
+        var collapsing: [NSView] = [button]
+        let index = row.arrangedSubviews.firstIndex(of: button)!
+        if index + 1 < row.arrangedSubviews.count,
+           row.arrangedSubviews[index + 1] is DesktopChangeAppIconSeparator {
+            collapsing.append(row.arrangedSubviews[index + 1])
+        }
+        if remaining.count == 1, let separator = row.arrangedSubviews.first(where: { $0 is DesktopChangeAppIconSeparator }) {
+            collapsing.append(separator)
+        }
+        // The pill already shows the rest, so a refresh with the same apps
+        // leaves this row alone.
+        displayedAppIcons = remaining
+        let finish = {
+            for view in collapsing {
+                row.removeArrangedSubview(view)
+                view.removeFromSuperview()
+            }
+        }
+        guard !reducesMotion else {
+            finish()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            for view in collapsing {
+                view.animator().alphaValue = 0
+                view.isHidden = true
+            }
+            row.layoutSubtreeIfNeeded()
+        } completionHandler: {
+            MainActor.assumeIsolated { finish() }
+        }
     }
 
     private static func fadingViews(in strip: NSStackView) -> [NSView] {
@@ -1020,6 +1665,37 @@ final class DesktopChangeTooltip: NSObject {
                 let view = DesktopChangeAppIconButton(icon: icon)
                 view.target = self
                 view.action = #selector(appIconClicked(_:))
+                view.onDragBegan = { [weak self, weak view] start in
+                    guard let self, let view else { return }
+                    self.iconDragBegan(view, at: start)
+                }
+                view.onDragMoved = { [weak self] point in self?.iconDragMoved(to: point) }
+                // The close button comes out as soon as the hand closes.
+                view.onGrabChanged = { [weak self] grabbing in
+                    if grabbing {
+                        // AppKit skips setting a cursor it thinks is already
+                        // showing, so the arrow first makes it a real change.
+                        NSCursor.arrow.set()
+                        NSCursor.closedHand.set()
+                    } else {
+                        NSCursor.arrow.set()
+                    }
+                    if grabbing {
+                        self?.showCloseTarget()
+                    } else {
+                        self?.hideCloseTarget()
+                    }
+                }
+                view.onDragEnded = { [weak self, weak view] point in
+                    guard let self, let view else { return }
+                    self.iconDragEnded(view, at: point)
+                }
+                let processIdentifier = icon.processIdentifier
+                view.setAccessibilityCustomActions([
+                    NSAccessibilityCustomAction(name: "Quit \(icon.name)") { [weak self] in
+                        self?.quitApp(processIdentifier) ?? false
+                    }
+                ])
                 view.translatesAutoresizingMaskIntoConstraints = false
                 NSLayoutConstraint.activate([
                     view.widthAnchor.constraint(equalToConstant: size),

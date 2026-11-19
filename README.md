@@ -19,14 +19,14 @@ A native macOS menu-bar utility that shows the Dock on empty desktops and hides 
 ## Features
 
 - **Automatic Dock visibility:** Reacts to app switches, window changes, and desktop swipes on the display under your pointer. Predictive hiding helps the Dock get out of the way as you open an app.
-- **Desktop indicators:** Customize desktop numbers in the menu bar and optionally show a brief **Desktop Change Popup**, which can list the apps on the desktop you arrive on, the app in front first.
+- **Desktop indicators:** Customize desktop numbers in the menu bar and optionally show a brief **Desktop Change Popup**, which can list the apps on the desktop you arrive on, the app in front first. Drag an app's icon out of the popup to quit it.
 - **Window navigation:** Optional activate-on-hover, cursor teleportation between displays, and active-desktop placement for Finder and Chromium web apps.
 - **Fill Window with Green Button:** Bring a window forward and toggle between filling the available display area and its remembered size. Without a saved size, restore to a centered smaller window. Option-click enters fullscreen.
 - **Black Out Menu Bar for Filled Screens:** While a window fills the screen, the menu bar and a thin frame down the window's sides turn black so the window blends in, with the menu bar text staying white on any still-image wallpaper.
 - **Middle Click with Force Click:** Press harder on the trackpad to middle click, so you can open links in new tabs or close tabs without a mouse.
-- **Mission Control:** Optional automatic desktop-strip expansion and hovered-window actions for closing, minimizing, or quitting. Ability to use keyboard shortcuts to close or minimize apps.
+- **Mission Control:** Optional automatic desktop-strip expansion, desktop close buttons that appear as soon as your pointer reaches the strip, and hovered-window actions for closing, minimizing, or quitting. Ability to use keyboard shortcuts to close or minimize apps.
 - **Dock controls:** Drag the position pill between Left, Bottom and Right, and adjust animation speed, reveal delay, and which settings persist after quitting. Optional Dock-icon actions minimize or hide an app's windows and restore them on another click, or cycle through its windows.
-- **Extras and appearance:** Optional screenshot copying with or without the floating thumbnail, Delete moving selected Finder items to the Trash, upright Quick Look image copies, lock/unlock sounds, a mute-aware volume icon, and turning the keyboard light off during full-screen video. Appearance follows macOS.
+- **Extras and appearance:** Optional screenshot copying with or without the floating thumbnail, Delete moving selected Finder items to the Trash (or deleting them right away inside the Trash), upright Quick Look image copies, lock/unlock sounds, a mute-aware volume icon with guided setup, a classic rainbow Apple logo in the menu bar, and turning the keyboard light off during full-screen video. Appearance follows macOS.
 - **Everyday essentials:** Pause DockAway to stop everything it does at once, until you resume. Launch at Login, scheduled update checks or **Auto Update** through Sparkle, and signed, Apple-notarized official releases.
 
 ### Dock behavior and Auto-Hide Blacklist
@@ -38,10 +38,10 @@ Use **Auto-Hide Blacklist → Choose Application…** for apps that aren't runni
 ## A Whole Desktop Manager, In Your Menubar.
 
 <p align="center">
-  <img src="DockAway/Assets.xcassets/DesktopManagerPreview.imageset/desktop-manager-preview.png" alt="DockAway Desktop Manager showing app icons, numbered desktops, and add buttons grouped across two displays" width="380">
+  <img src="DockAway/docs/desktop-manager-preview.png" alt="DockAway Desktop Manager showing app icons over each desktop's wallpaper, numbered desktops, and add buttons grouped across two displays" width="380">
 </p>
 
-See your desktops and their app icons, grouped by display. Switch to, create, close, drag desktops to reorder them or even move them between monitors. Fullscreen apps get their own named tiles, and the layout adapts to the number of desktops and apps. Incredibly handy when you have 2+ Displays and you're juggling between desktops.
+See your desktops and their app icons, grouped by display, each box showing that desktop's own wallpaper. Switch to, create, close, drag desktops to reorder them or even move them between monitors. Fullscreen apps get their own named tiles, and the layout adapts to the number of desktops and apps. Incredibly handy when you have 2+ Displays and you're juggling between desktops.
 
 Open the menu with **Option+Up** or **Option+Shift+W**, then navigate with **arrow keys or WASD**. Right- and left-hand profiles have customizable select and close bindings. Closing while **+** is selected first moves the highlight back to a desktop; a second press closes it. Escape dismisses the menu.
 
@@ -57,7 +57,7 @@ If permissions are later revoked, DockAway pauses and shows **Permission Require
 
 ## Privacy
 
-No accounts, ads, analytics, or telemetry. Window and gesture processing stays on your Mac. DockAway uses application identities, window metadata, Accessibility events, and trackpad contacts and pressure to manage the Dock, windows, and clicks. Keyboard features handle configured shortcuts; DockAway does not keep a keystroke or gesture history. Preferences are stored locally. Optional screenshot copying places captured images on your clipboard while retaining their saved files. To keep menu bar text white, the black menu bar briefly uses a copy of your wallpaper with a black band at the top, kept in DockAway's own folder, and puts yours back as soon as no window fills the screen. With access to a wallpaper's folder, DockAway reads only the wallpaper macOS reports for your desktop.
+No accounts, ads, analytics, or telemetry. Window and gesture processing stays on your Mac. DockAway uses application identities, window metadata, Accessibility events, and trackpad contacts and pressure to manage the Dock, windows, and clicks. Keyboard features handle configured shortcuts; DockAway does not keep a keystroke or gesture history. Preferences are stored locally. Optional screenshot copying places captured images on your clipboard while retaining their saved files. To keep menu bar text white, the black menu bar briefly uses a copy of your wallpaper with a black band at the top, kept in DockAway's own folder, and puts yours back as soon as no window fills the screen. With access to a wallpaper's folder, DockAway reads only the wallpaper macOS reports for your desktop. Desktop Manager shows each desktop's wallpaper only where DockAway can already read it, so it never asks for more access.
 
 Sparkle checks GitHub-hosted update information and downloads releases. GitHub may receive ordinary connection information such as your IP address. For manual-only checks, open **DockAway Settings → Update Frequency**, select **Manual Only**, and turn off **Check at Launch**.
 

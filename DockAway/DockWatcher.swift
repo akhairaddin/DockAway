@@ -413,6 +413,7 @@ final class DockWatcher {
     private var dockAccessibilityObservation: DockWatcherAXObservation?
     private let missionControlProbe = MissionControlProbe()
     private let missionControlAutoExpand = MissionControlAutoExpand()
+    private let missionControlDesktopCloseButtons = MissionControlDesktopCloseButtons()
     private let missionControlWindowClose = MissionControlWindowClose()
     private var missionControlTrackpadContacts = 0
     private var missionControlNeedsBootstrap = true
@@ -743,6 +744,7 @@ final class DockWatcher {
         missionControlIsActive = false
         missionControlAutoExpand.cancel()
         missionControlWindowClose.stop()
+        missionControlDesktopCloseButtons.stop()
         missionControlTrackpadContacts = 0
         desktopTransitionPhase = .idle
         desktopTransitionGeneration += 1
@@ -1242,6 +1244,15 @@ final class DockWatcher {
         return bundleIdentifier
     }
 
+    private static func isAppExtensionProcess(_ processIdentifier: pid_t) -> Bool {
+        guard processIdentifier > 0 else { return false }
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        guard proc_pidpath(processIdentifier, &path, UInt32(path.count)) > 0 else {
+            return false
+        }
+        return String(cString: path).contains(".appex/Contents/MacOS/")
+    }
+
     private func isProcessBlacklisted(_ processIdentifier: pid_t) -> Bool {
         guard processIdentifier > 0, !cachedIgnoredBundleIdentifiers.isEmpty else {
             return false
@@ -1565,6 +1576,7 @@ final class DockWatcher {
 
         missionControlIsActive = isActive
         missionControlWindowClose.setActive(isActive)
+        missionControlDesktopCloseButtons.setActive(isActive)
         if isActive && missionControlTrackpadContacts < 3 {
             scheduleMissionControlExpansion()
         } else {
@@ -2168,9 +2180,16 @@ final class DockWatcher {
 
             let overlap = windowRect.intersection(displayBounds)
             if overlap.width >= 50, overlap.height >= 50 {
+                let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+                // An app extension draws inside its host app's window, so the
+                // host's own window already counts. macOS leaves the
+                // extension's window "on screen" when the host is minimized
+                // (System Settings' Wallpaper pane), which would keep the
+                // Dock hidden on an empty desktop.
+                if let ownerPID, Self.isAppExtensionProcess(ownerPID) { continue }
+
                 let candidateState: DisplayWindowState
-                if let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                   isProcessBlacklisted(ownerPID) {
+                if let ownerPID, isProcessBlacklisted(ownerPID) {
                     candidateState = .blacklisted
                 } else {
                     candidateState = .occupied

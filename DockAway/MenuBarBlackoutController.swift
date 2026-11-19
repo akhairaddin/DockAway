@@ -353,6 +353,7 @@ final class MenuBarBlackoutController {
 
     private(set) var isEnabled = false
     private var timer: Timer?
+    private var windowPollInFlight = false
     private var observers: [NSObjectProtocol] = []
     private var overlays: [CGDirectDisplayID: MenuBarBlackoutOverlay] = [:]
     /// Displays whose black is waiting for their put-back wallpaper to show.
@@ -470,6 +471,7 @@ final class MenuBarBlackoutController {
         isEnabled = false
         timer?.invalidate()
         timer = nil
+        windowPollInFlight = false
         filledSince.removeAll()
         lastWallpaperCheck.removeAll()
         swappedWhileFilled.removeAll()
@@ -523,12 +525,49 @@ final class MenuBarBlackoutController {
         })
         observeLockAndSleep()
         let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.evaluate(checkWallpapers: false) }
+            MainActor.assumeIsolated {
+                // Notifications still bring changes at once while scrolling.
+                guard !ScrollActivity.isScrolling else { return }
+                self?.pollInBackground()
+            }
         }
         timer.tolerance = 0.05
-        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .default)
         self.timer = timer
         evaluate(checkWallpapers: true)
+    }
+
+    /// Asks the window server for the window list off the main thread during
+    /// periodic polling, with at most one request in flight at a time, so a
+    /// busy WindowServer (such as while scrolling on slower or virtualized
+    /// graphics) never blocks the main run loop.
+    private func pollInBackground() {
+        guard isEnabled, !windowPollInFlight, !ScrollActivity.isScrolling else { return }
+        if shouldBeAway {
+            if !isAway { stepAway() }
+            return
+        }
+        if isSuspended() || desktopGestureActive || isSwitchingDesktops()
+            || ProcessInfo.processInfo.systemUptime < desktopSwitchSettlesAt {
+            evaluate(checkWallpapers: false)
+            return
+        }
+        windowPollInFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let rawWindows = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements],
+                kCGNullWindowID
+            ) as? [[String: Any]] ?? []
+            let windows = Self.windows(from: rawWindows)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.windowPollInFlight = false
+                    guard self.isEnabled, !ScrollActivity.isScrolling else { return }
+                    self.evaluate(checkWallpapers: false, polledWindows: windows)
+                }
+            }
+        }
     }
 
     private func observeSpacesForLeftovers() {
@@ -561,6 +600,7 @@ final class MenuBarBlackoutController {
                                                      queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.screenLockedNotified = locked
+                    self?.refreshSessionState(force: true)
                     self?.evaluate(checkWallpapers: true)
                 }
             })
@@ -576,6 +616,7 @@ final class MenuBarBlackoutController {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     if let asleep { self.displaysAsleep = asleep }
+                    self.refreshSessionState(force: true)
                     self.evaluate(checkWallpapers: true)
                 }
             })
@@ -585,9 +626,39 @@ final class MenuBarBlackoutController {
     /// Whether the screen is locked, asleep, or switched to another user.
     private var shouldBeAway: Bool {
         if screenLockedNotified || displaysAsleep { return true }
-        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
-        return session["CGSSessionScreenIsLocked"] as? Bool == true
-            || session[kCGSessionOnConsoleKey as String] as? Bool == false
+        refreshSessionState()
+        return sessionAway
+    }
+
+    /// The lock and session state as the window server last reported it.
+    /// The notifications above usually say first; this covers one missed.
+    private var sessionAway = false
+    private var sessionCheckInFlight = false
+    private var lastSessionCheck: TimeInterval = -.infinity
+
+    /// Asks the window server in the background, at most every 2 seconds.
+    /// Asked on the main thread at every check, it stalled DockAway whenever
+    /// the window server was busy, such as while scrolling in a virtual
+    /// machine, until input piled up and DockAway stopped responding.
+    private func refreshSessionState(now: TimeInterval = ProcessInfo.processInfo.systemUptime,
+                                     force: Bool = false) {
+        guard !sessionCheckInFlight, force || now - lastSessionCheck >= 2 else { return }
+        sessionCheckInFlight = true
+        lastSessionCheck = now
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+            let away = session?["CGSSessionScreenIsLocked"] as? Bool == true
+                || session?[kCGSessionOnConsoleKey as String] as? Bool == false
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.sessionCheckInFlight = false
+                    guard away != self.sessionAway else { return }
+                    self.sessionAway = away
+                    self.evaluate(checkWallpapers: true)
+                }
+            }
+        }
     }
 
     /// Puts the original wallpapers back and takes the black away at once,
@@ -618,6 +689,10 @@ final class MenuBarBlackoutController {
         desktopGestureActive = active
         dockAwayDebugLog("Menu bar blackout: \(active ? "swipe started" : "fingers lifted")")
         if active {
+            // macOS pictures the black on the desktop sliding in as the swipe
+            // begins, so a sweep caught partway would arrive cut off and then
+            // jump to its full width as the swipe lands.
+            for overlay in overlays.values { overlay.finishSweep() }
             lookAheadForSwipe()
         } else {
             // Wait for macOS to report where the swipe landed.
@@ -703,7 +778,10 @@ final class MenuBarBlackoutController {
         }
     }
 
-    private func evaluate(checkWallpapers requestedWallpaperCheck: Bool) {
+    private func evaluate(
+        checkWallpapers requestedWallpaperCheck: Bool,
+        polledWindows: [MenuBarBlackoutWindow]? = nil
+    ) {
         guard isEnabled else { return }
         if shouldBeAway {
             if !isAway { stepAway() }
@@ -726,7 +804,7 @@ final class MenuBarBlackoutController {
         }
         let settledDesktop = desktopJustChanged
         desktopJustChanged = false
-        let windows = currentWindows()
+        let windows = polledWindows ?? currentWindows()
         let filling = MenuBarBlackoutDecision.fillingWindows(displays, windows: windows, excluding: getpid())
         // A full-screen window, on its own desktop or covering the display in
         // place, such as a video, hides the menu bar itself. The black and its
@@ -835,9 +913,7 @@ final class MenuBarBlackoutController {
                                   now: TimeInterval) -> Bool {
         let ownPID = getpid()
         let menuBarLevel = Int(CGWindowLevelForKey(.mainMenuWindow))
-        let allWindows = Self.windows(from: CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
-                                      as? [[String: Any]] ?? [])
-        let menuBarsOffScreen = allWindows.contains { window in
+        let menuBarsOffScreen = windows.contains { window in
             window.layer == menuBarLevel && !displays.contains { $0.frame.intersects(window.bounds) }
         }
         let sliding = menuBarsOffScreen || displays.contains { display in
@@ -901,7 +977,7 @@ final class MenuBarBlackoutController {
                                                       kCGNullWindowID) as? [[String: Any]] ?? [])
     }
 
-    private static func windows(from list: [[String: Any]]) -> [MenuBarBlackoutWindow] {
+    nonisolated private static func windows(from list: [[String: Any]]) -> [MenuBarBlackoutWindow] {
         list.compactMap { info in
             guard let boundsInfo = info[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsInfo) else { return nil }
@@ -1551,6 +1627,22 @@ final class MenuBarBlackoutOverlay {
 
     private var frameView: MenuBarBlackoutFrameView? { frame.contentView as? MenuBarBlackoutFrameView }
 
+    /// Ends a sweep that's under way at once, where it was heading: fully
+    /// open, or hidden.
+    func finishSweep() {
+        guard let frameView, frameView.isSweeping else { return }
+        if isShown {
+            frameView.setRevealed(true)
+        } else {
+            fadeGeneration += 1
+            fadeOutWaiting = false
+            frameView.setRevealed(false)
+            windows.forEach { $0.orderOut(nil) }
+        }
+        // Onto the screen before macOS pictures the desktops.
+        CATransaction.flush()
+    }
+
     /// Starts a sweep out that's waiting, without waiting any longer.
     func fadeOutIfWaiting() {
         guard fadeOutWaiting, !isShown else { return }
@@ -1850,6 +1942,9 @@ private final class MenuBarBlackoutFrameView: NSView {
     }
 
     /// Opens the black out of the notch, or closes it back into the notch.
+    /// Whether the black is sweeping in or out right now.
+    var isSweeping: Bool { wipeMask.animation(forKey: "wipe") != nil }
+
     func setRevealed(_ revealed: Bool, duration: TimeInterval? = nil, completion: (() -> Void)? = nil) {
         wipeGeneration += 1
         let generation = wipeGeneration

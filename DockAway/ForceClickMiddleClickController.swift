@@ -143,6 +143,9 @@ final class ForceClickMiddleClickController {
     private static let pressureEventType: UInt32 = 34
     private static let quickLookEventType: UInt32 = 33
 
+    /// How long after a replayed press its release follows.
+    private static let releaseGap: TimeInterval = 0.05
+
     private var eventTap: EventTap?
     private var tracker = ForceClickMiddleClickTracker()
     private var heldPress: CGEvent?
@@ -199,7 +202,7 @@ final class ForceClickMiddleClickController {
                 return false
             }
         case CGEventType.leftMouseDown.rawValue:
-            if isSuppressed() { return false }
+            if isSuppressed() || Self.landsOnHostedUI(event) { return false }
             action = tracker.mouseDown(fingersOnTrackpad: fingersOnTrackpad(),
                                        now: ProcessInfo.processInfo.systemUptime)
             if action == .swallow {
@@ -216,6 +219,21 @@ final class ForceClickMiddleClickController {
         return perform(action, current: event)
     }
 
+    /// Whether a press lands on System Settings, or on a window an
+    /// out-of-process helper draws for an app, such as a settings page's
+    /// pop-up menu or sheet, or an Open or Save dialog. Holding a press there
+    /// and sending it on afterward could leave the helper's menu or sheet
+    /// stuck, so System Settings stopped responding; those presses go
+    /// through untouched.
+    private static func landsOnHostedUI(_ event: CGEvent) -> Bool {
+        let windowID = CGWindowID(truncatingIfNeeded: event.getIntegerValueField(.mouseEventWindowUnderMousePointer))
+        guard windowID != 0,
+              let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]])?.first,
+              let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+              let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        return app.bundleIdentifier == "com.apple.systempreferences" || app.activationPolicy == .prohibited
+    }
+
     private func perform(_ action: ForceClickMiddleClickTracker.Action, current: CGEvent) -> Bool {
         switch action {
         case .pass:
@@ -227,7 +245,16 @@ final class ForceClickMiddleClickController {
             return false
         case .replayHeldThenCurrent:
             replayHeldPress()
-            if let copy = current.copy() { post(copy) }
+            guard let copy = current.copy() else { return true }
+            if current.type == .leftMouseUp {
+                // A release right on the heels of its press reads to some
+                // apps as no click at all, so it follows a moment later.
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.releaseGap) { [weak self] in
+                    self?.post(copy)
+                }
+            } else {
+                post(copy)
+            }
             return true
         case .middleClick:
             postMiddleClick(at: heldPress?.location ?? current.location)

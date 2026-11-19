@@ -2059,6 +2059,242 @@ private func laterEmphasizedText(
     return attributedText
 }
 
+/// Walks through setting Sound to Show When Active for "Show Sound Icon When
+/// Muted". After Continue opens System Settings, the explanation becomes a
+/// checklist that ticks itself off once Sound is set, then the option turns
+/// on by itself. It floats beside System Settings rather than blocking it.
+@MainActor
+private final class MutedSoundSetupPrompt: NSObject {
+    private var panel: NSPanel?
+    private var row: PermissionSetupRowView?
+    private var timer: Timer?
+    private var completed = false
+    private var openSettings: () -> Void = {}
+    private var onReady: () -> Void = {}
+    var isShowing: Bool { panel?.isVisible == true }
+
+    /// Shows the explanation, or brings it forward if it's showing.
+    func show(openSettings: @escaping () -> Void, onReady: @escaping () -> Void) {
+        self.openSettings = openSettings
+        self.onReady = onReady
+        if let panel, panel.isVisible {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            return
+        }
+        present(
+            title: "Set Sound to Show When Active",
+            message: "DockAway shows the Sound icon while you’re muted by switching macOS’s own Sound icon, which needs Sound set to \"Show When Active\" in System Settings.\n\nClick Continue to open the right page. DockAway checks for you and turns this option on as soon as it’s set.",
+            accessory: nil,
+            buttons: [("Not Now", #selector(cancel), "\u{1b}"), ("Continue", #selector(continueToSettings), "\r")],
+            beside: false
+        )
+    }
+
+    /// Opens System Settings and turns the explanation into a checklist.
+    @objc private func continueToSettings() {
+        let row = PermissionSetupRowView(
+            title: "Sound: Show When Active",
+            detail: "Lets DockAway show the Sound icon while you’re muted.",
+            grantedTitle: "Set",
+            actionTitle: "Open",
+            requestAction: { [weak self] in self?.openSettings() }
+        )
+        self.row = row
+        present(
+            title: "Checking Your Sound Setting",
+            message: "In System Settings, find Sound under Menu Bar (Control Center on macOS 15) and choose \"Show When Active\".",
+            accessory: row,
+            buttons: [("Cancel", #selector(cancel), "\u{1b}")],
+            beside: true
+        )
+        openSettings()
+        startChecking()
+    }
+
+    @objc private func cancel() {
+        close()
+    }
+
+    /// An alert of DockAway's own, built like macOS's: a real alert's window
+    /// can't be dragged unless it blocks the app, and this one waits beside
+    /// System Settings, so it moves from anywhere on its background instead.
+    private func makePanel() -> NSPanel {
+        let panel = PermissionSetupPanel(contentRect: NSRect(x: 0, y: 0, width: 260, height: 200),
+                                         styleMask: [.borderless], backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isMovableByWindowBackground = true
+        panel.isReleasedWhenClosed = false
+        // An accessory app has no Dock icon to bring it back with, so it
+        // stays up when System Settings comes forward, on whichever desktop.
+        panel.hidesOnDeactivate = false
+        panel.level = .floating
+        panel.collectionBehavior = [.moveToActiveSpace]
+        return panel
+    }
+
+    /// The alert's background: glass on macOS 26 and later, like macOS's own
+    /// alerts, and the blurred material before that, or a solid color in a
+    /// virtual machine, where the blur is too much for its graphics.
+    private static func makeBackground(holding content: NSView, size: NSSize) -> NSView {
+        let radius: CGFloat = 26
+        let frame = NSRect(origin: .zero, size: size)
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView(frame: frame)
+            glass.style = .regular
+            glass.cornerRadius = radius
+            glass.contentView = content
+            return glass
+        }
+        let background: NSView
+        if PermissionSetupPanel.isVirtualMachine {
+            background = OnboardingSolidBackgroundView(frame: frame, cornerRadius: radius)
+        } else {
+            let effect = NSVisualEffectView(frame: frame)
+            effect.material = .popover
+            effect.blendingMode = .behindWindow
+            effect.state = .active
+            effect.maskImage = PermissionSetupPanel.roundedMask(radius: radius)
+            background = effect
+        }
+        content.frame = frame
+        content.autoresizingMask = [.width, .height]
+        background.addSubview(content)
+        return background
+    }
+
+    private func present(title: String, message: String, accessory: NSView?,
+                         buttons: [(String, Selector, String)], beside: Bool) {
+        let panel = self.panel ?? makePanel()
+        self.panel = panel
+        // As wide as macOS's alerts, a little wider with the checklist.
+        let width: CGFloat = accessory == nil ? 260 : 400
+        let inset: CGFloat = 20
+        let textWidth = width - 2 * inset
+
+        let icon = NSImageView(image: NSApp.applicationIconImage)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 64).isActive = true
+
+        let titleLabel = NSTextField(wrappingLabelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .bold)
+        titleLabel.textColor = .labelColor
+        titleLabel.preferredMaxLayoutWidth = textWidth
+        let messageLabel = NSTextField(wrappingLabelWithString: message)
+        messageLabel.font = .systemFont(ofSize: 13)
+        messageLabel.textColor = .labelColor
+        messageLabel.preferredMaxLayoutWidth = textWidth
+
+        var views: [NSView] = [icon, titleLabel, messageLabel]
+        if let accessory {
+            accessory.translatesAutoresizingMaskIntoConstraints = false
+            accessory.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
+            views.append(accessory)
+        }
+        // Buttons share the width, the main one on the right, as in macOS's alerts.
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.distribution = .fillEqually
+        buttonRow.spacing = 8
+        for (title, action, key) in buttons {
+            let button = NSButton(title: title, target: self, action: action)
+            button.bezelStyle = .push
+            button.controlSize = .large
+            button.keyEquivalent = key
+            // The main button in the accent color, as in macOS's alerts.
+            if key == "\r" {
+                if #available(macOS 26.0, *) {
+                    button.tintProminence = .primary
+                } else {
+                    button.bezelColor = .controlAccentColor
+                }
+            }
+            buttonRow.addArrangedSubview(button)
+        }
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+        buttonRow.widthAnchor.constraint(equalToConstant: textWidth).isActive = true
+        views.append(buttonRow)
+
+        let stack = NSStackView(views: views)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.setCustomSpacing(16, after: icon)
+        stack.setCustomSpacing(8, after: titleLabel)
+        stack.setCustomSpacing(18, after: views[views.count - 2])
+        stack.edgeInsets = NSEdgeInsets(top: inset + 4, left: inset, bottom: inset, right: inset)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            stack.widthAnchor.constraint(equalToConstant: width)
+        ])
+        let size = NSSize(width: width, height: ceil(content.fittingSize.height))
+        let wasVisible = panel.isVisible
+        let oldTop = NSPoint(x: panel.frame.minX, y: panel.frame.maxY)
+        panel.contentView = Self.makeBackground(holding: content, size: size)
+        panel.setContentSize(size)
+
+        if beside, let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame {
+            // Beside System Settings rather than over it.
+            panel.setFrameTopLeftPoint(NSPoint(x: visible.maxX - size.width - 40, y: visible.maxY - 80))
+        } else if wasVisible {
+            panel.setFrameTopLeftPoint(oldTop)
+        } else {
+            panel.center()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    /// Reading the setting is a quick local lookup, so twice a second keeps
+    /// the check feeling immediate.
+    private func startChecking() {
+        timer?.invalidate()
+        completed = false
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.check() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+        check()
+    }
+
+    private func check() {
+        guard !completed, let row else { return }
+        let ready = MutedVolumeMenuBarController.readMode() == 2
+        row.setGranted(ready)
+        guard ready else { return }
+        completed = true
+        timer?.invalidate()
+        timer = nil
+        // Long enough to see the check land.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            guard let self, self.completed, self.panel != nil else { return }
+            let onReady = self.onReady
+            self.close()
+            onReady()
+        }
+    }
+
+    private func close() {
+        timer?.invalidate()
+        timer = nil
+        panel?.orderOut(nil)
+        panel = nil
+        row = nil
+        completed = false
+    }
+}
+
 private final class PermissionSetupRowView: NSView {
     private let statusCircleImageView = NSImageView()
     private let statusGrantedCircleImageView = NSImageView()
@@ -2068,16 +2304,19 @@ private final class PermissionSetupRowView: NSView {
     private let actionButton = NSButton(title: "Allow", target: nil, action: nil)
     private let requestAction: () -> Void
     private let grantedTitle: String
+    private let actionTitle: String
     private var grantedState: Bool?
     private var actionAvailable = true
     private var checkmarkAnimationGeneration = 0
     private var circleAnimationGeneration = 0
 
-    init(title: String, detail: String, grantedTitle: String = "Granted", requestAction: @escaping () -> Void) {
+    init(title: String, detail: String, grantedTitle: String = "Granted", actionTitle: String = "Allow",
+         requestAction: @escaping () -> Void) {
         titleLabel = NSTextField(labelWithString: title)
         detailLabel = NSTextField(wrappingLabelWithString: detail)
         self.requestAction = requestAction
         self.grantedTitle = grantedTitle
+        self.actionTitle = actionTitle
         super.init(frame: .zero)
 
         wantsLayer = true
@@ -2291,7 +2530,7 @@ private final class PermissionSetupRowView: NSView {
     }
 
     private func applyActionAppearance(_ granted: Bool) {
-        actionButton.title = granted ? grantedTitle : (actionAvailable ? "Allow" : "Next")
+        actionButton.title = granted ? grantedTitle : (actionAvailable ? actionTitle : "Next")
         actionButton.isEnabled = !granted && actionAvailable
         actionButton.alphaValue = granted || actionAvailable ? 1 : 0.55
         layer?.backgroundColor = rowBackgroundColor(granted: granted).cgColor
@@ -2978,6 +3217,7 @@ final class OnboardingPrimaryButton: NSButton {
     private var greenButtonFillRowView: DockSettingPersistenceRowView?
     private var menuBarBlackoutRowView: DockSettingPersistenceRowView?
     private var menuBarBlackoutAccessItem: NSMenuItem?
+    private var rainbowAppleMenuBarRowView: DockSettingPersistenceRowView?
     private let wallpaperAccessPrompt = WallpaperAccessPrompt()
     private var finderDeleteKeyRowView: DockSettingPersistenceRowView?
     private var forceClickMiddleClickRowView: DockSettingPersistenceRowView?
@@ -2997,6 +3237,7 @@ final class OnboardingPrimaryButton: NSButton {
     private var cursorTeleportManager: CursorTeleportManager?
     private let lockscreenSoundPlayer = LockscreenSoundPlayer()
     private let mutedVolumeMenuBarController = MutedVolumeMenuBarController()
+    private let mutedSoundSetupPrompt = MutedSoundSetupPrompt()
     private weak var mutedVolumeMenuBarRow: DockSettingPersistenceRowView?
     private lazy var fullscreenVideoKeyboardLightController = FullscreenVideoKeyboardLightController { [weak self] in
         self?.dockWatcher?.currentFullscreenApplicationPIDs() ?? []
@@ -3007,6 +3248,7 @@ final class OnboardingPrimaryButton: NSButton {
     private let screenshotClipboardManager = ScreenshotClipboardManager.shared
     private let greenButtonFillController = GreenButtonFillController()
     private let menuBarBlackoutController = MenuBarBlackoutController()
+    private let rainbowAppleMenuBarController = RainbowAppleMenuBarController()
     private let finderDeleteKeyController = FinderDeleteKeyController()
     private let forceClickMiddleClickController = ForceClickMiddleClickController()
     /// Fingers on the trackpad, as MultitouchSupport last reported them.
@@ -3195,17 +3437,48 @@ final class OnboardingPrimaryButton: NSButton {
         }
         screenshotClipboardManager.isPaused = !dockAwayEnabled
         mutedVolumeMenuBarController.recoverPreviousSession()
-        mutedVolumeMenuBarController.onDisabled = { [weak self] in
-            self?.mutedVolumeMenuBarRow?.setOn(false)
+        mutedVolumeMenuBarController.onDisabled = { [weak self] reason in
+            guard let self else { return }
+            self.mutedVolumeMenuBarRow?.setOn(false)
+            self.extrasDidChange()
+            // Only after moving away from Show When Active, such as to Always
+            // Show: choosing Show When Active itself, while muted, is what
+            // turned it off, so that can't be the cue to turn it on again.
+            if case .changedInSettings(let mode) = reason, let mode, mode != 2 {
+                self.watchForMutedSoundReturn()
+            }
+            self.showMutedSoundDisabledPopover(reason)
         }
         if dockAwayEnabled {
             mutedVolumeMenuBarController.setEnabled(UserDefaults.standard.bool(forKey: MutedVolumeMenuBarController.preferenceKey))
+        }
+        // Still waiting from before a relaunch for Sound to come back.
+        if UserDefaults.standard.bool(forKey: Self.mutedSoundAwaitingReturnKey),
+           !UserDefaults.standard.bool(forKey: MutedVolumeMenuBarController.preferenceKey) {
+            watchForMutedSoundReturn()
         }
         fullscreenVideoKeyboardLightController.recoverPreviousSession()
         if dockAwayEnabled {
             fullscreenVideoKeyboardLightController.setEnabled(
                 UserDefaults.standard.bool(forKey: FullscreenVideoKeyboardLightController.preferenceKey)
             )
+        }
+        // Desktop boxes show wallpapers only from places DockAway may read
+        // without macOS asking: anywhere ordinary, or a protected folder the
+        // black menu bar has already let macOS ask about.
+        DesktopWallpaperThumbnails.shared.canRead = { url in
+            var removable = false, network = false
+            if url.path.hasPrefix("/Volumes/"),
+               let volume = try? url.resourceValues(forKeys: [.volumeIsRemovableKey, .volumeIsEjectableKey,
+                                                              .volumeIsLocalKey]) {
+                removable = volume.volumeIsRemovable == true || volume.volumeIsEjectable == true
+                network = volume.volumeIsLocal == false
+            }
+            guard let location = MenuBarBlackoutDecision.askingLocation(
+                of: url.path, home: NSHomeDirectory(), volumeIsRemovable: removable, volumeIsNetwork: network
+            ) else { return true }
+            let allowed = UserDefaults.standard.stringArray(forKey: "menuBarBlackoutWallpaperLocationsAsked") ?? []
+            return allowed.contains(location.rawValue)
         }
         menuBarBlackoutController.isSuspended = { [weak self] in
             self?.dockWatcher?.isMissionControlActive == true
@@ -3248,6 +3521,17 @@ final class OnboardingPrimaryButton: NSButton {
         menuBarBlackoutController.setEnabled(
             UserDefaults.standard.bool(forKey: MenuBarBlackoutController.preferenceKey) && dockAwayEnabled
         )
+        rainbowAppleMenuBarController.isSuspended = { [weak self] in
+            self?.dockWatcher?.isMissionControlActive == true
+        }
+        rainbowAppleMenuBarController.currentDesktopIsFullscreen = { [weak self] display in
+            guard let selection = self?.dockWatcher?.desktopSelection(on: display) else { return false }
+            return selection.fullscreenSpaceIDs.contains(selection.currentID)
+        }
+        rainbowAppleMenuBarController.restoreToEveryDesktop = { restoreWindowToEveryDesktop($0, "Rainbow Apple logo") }
+        rainbowAppleMenuBarController.setEnabled(
+            UserDefaults.standard.bool(forKey: RainbowAppleMenuBarController.preferenceKey) && dockAwayEnabled
+        )
         NSApp.setActivationPolicy(.accessory)
 
         // These are first-run defaults only. UserDefaults preserves any later
@@ -3263,6 +3547,7 @@ final class OnboardingPrimaryButton: NSButton {
             ScreenshotClipboardManager.preferenceKey: false,
             GreenButtonFillController.preferenceKey: false,
             MenuBarBlackoutController.preferenceKey: false,
+            RainbowAppleMenuBarController.preferenceKey: false,
             FinderDeleteKeyController.preferenceKey: false,
             ForceClickMiddleClickController.preferenceKey: false,
             QuickLookCopyOrientationManager.preferenceKey: false,
@@ -3330,8 +3615,10 @@ final class OnboardingPrimaryButton: NSButton {
         finderDeleteKeyController.isSuppressed = { [weak self] in
             self?.statusMenuIsOpen == true
         }
+        // Mission Control's clicks go straight through: it ignores a click
+        // whose press and release arrive together, as a held press's do.
         forceClickMiddleClickController.isSuppressed = { [weak self] in
-            self?.statusMenuIsOpen == true
+            self?.statusMenuIsOpen == true || self?.dockWatcher?.isMissionControlActive == true
         }
         // Tells a trackpad click from a mouse's. Unknown while the watcher
         // isn't running, as when DockAway is paused.
@@ -3367,6 +3654,7 @@ final class OnboardingPrimaryButton: NSButton {
                 || self.dockWatcher?.isMissionControlActive == true
         }
         refreshHoverActivationController()
+        ScrollActivity.startWatching()
         startPermissionHealthMonitoring()
         runtimePermissionAccess.start { [weak self] in
             guard let self, !self.isQuitting else { return }
@@ -3464,9 +3752,8 @@ final class OnboardingPrimaryButton: NSButton {
         return "App: ?"
     }
 
-    private var activeStatusTitle: String {
-        autoHidePaused ? "DockAway: Auto-Hide Paused" : "DockAway: Active"
-    }
+    /// Still "Active" while "Pause Auto-Hide" is on: everything else keeps working.
+    private var activeStatusTitle: String { "DockAway: Active" }
 
     private var inactiveStatusTitle: String {
         if dockSettingsRestartInProgress {
@@ -4234,10 +4521,12 @@ final class OnboardingPrimaryButton: NSButton {
                 self.trackpadFingerCount = fingers
                 guard self.monitoringShouldRun else { return }
                 self.dockWatcher?.missionControlTrackpadContactsChanged(fingers)
+                // Ahead of the icon lookups: the black settles before macOS
+                // pictures the desktops for the swipe.
+                self.menuBarBlackoutController.desktopGestureContactsChanged(fingers)
                 if fingers >= 3, !self.desktopSwipeContactsActive { self.prefetchDesktopSwipeIcons() }
                 self.desktopSwipeContactsActive = fingers >= 3
                 self.desktopChangeTooltip.desktopGestureContactsChanged(fingers)
-                self.menuBarBlackoutController.desktopGestureContactsChanged(fingers)
                 if fingers < 3 {
                     // Refresh even when the gesture was cancelled and macOS
                     // didn't post a changed-Space notification.
@@ -5248,7 +5537,7 @@ final class OnboardingPrimaryButton: NSButton {
         )
         hoverDelayView.slider.minValue = 0
         hoverDelayView.slider.maxValue = 2
-        hoverDelayView.slider.snapMarkerValues = [0.05, 0.1, 0.25, 0.5, 1.0, 1.5]
+        hoverDelayView.slider.snapMarkerValues = [0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5]
         hoverDelayView.slider.target = self
         hoverDelayView.slider.action = #selector(previewHoverActivationDelay(_:))
         hoverDelayView.slider.commitHandler = { [weak self] delay in
@@ -5806,10 +6095,11 @@ final class OnboardingPrimaryButton: NSButton {
         missionControlMenu.autoenablesItems = false
 
         let expandTitle = "Auto-Expand Desktop Strip"
+        let instantCloseTitle = "Show Desktop Close Buttons Instantly"
         let closeWindowsTitle = "Close Windows in Mission Control"
         let keyboardTitle = "Keyboard Shortcuts in Mission Control"
         let expandItem = NSMenuItem(title: expandTitle, action: nil, keyEquivalent: "")
-        let missionControlRowWidth = ceil([expandTitle, closeWindowsTitle, keyboardTitle].map {
+        let missionControlRowWidth = ceil([expandTitle, instantCloseTitle, closeWindowsTitle, keyboardTitle].map {
             ($0 as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 13)]).width
         }.max() ?? 0) + 90 // Widen menu row so the help buttons and separator align cleanly with comfortable padding.
         expandItem.view = DockSettingPersistenceRowView(
@@ -5825,6 +6115,20 @@ final class OnboardingPrimaryButton: NSButton {
             UserDefaults.standard.set(enabled, forKey: MissionControlAutoExpand.preferenceKey)
         }
         missionControlMenu.addItem(expandItem)
+        let instantCloseItem = NSMenuItem()
+        instantCloseItem.view = DockSettingPersistenceRowView(
+            title: instantCloseTitle,
+            isOn: UserDefaults.standard.bool(forKey: MissionControlDesktopCloseButtons.preferenceKey),
+            width: missionControlRowWidth, leadingInset: 18, titleLeadingAdjustment: 1,
+            font: .menuFont(ofSize: 13), indicatorSize: 16, multiline: false,
+            helpHeading: "Show Desktop Close Buttons Instantly",
+            helpTextProvider: {
+                "Shows the close buttons on the desktops in Mission Control as soon as your pointer reaches the desktop strip, instead of after a pause.\n\n• Works by holding Option for you while your pointer is over the strip, as macOS shows every desktop's close button while Option is held.\n• Lets go when your pointer leaves the strip or Mission Control closes."
+            }
+        ) { enabled in
+            UserDefaults.standard.set(enabled, forKey: MissionControlDesktopCloseButtons.preferenceKey)
+        }
+        missionControlMenu.addItem(instantCloseItem)
         let closeWindowsItem = NSMenuItem()
         closeWindowsItem.view = DockSettingPersistenceRowView(
             title: closeWindowsTitle,
@@ -6206,6 +6510,29 @@ final class OnboardingPrimaryButton: NSButton {
         self.menuBarBlackoutAccessItem = wallpaperAccessItem
         extrasMenu.addItem(wallpaperAccessItem)
         refreshMenuBarBlackoutAccessRow()
+
+        let rainbowAppleMenuBarTitle = "Classic Rainbow Apple Logo"
+        let rainbowAppleMenuBarItem = NSMenuItem(title: rainbowAppleMenuBarTitle, action: nil, keyEquivalent: "")
+        let rainbowAppleMenuBarRow = DockSettingPersistenceRowView(
+            title: rainbowAppleMenuBarTitle,
+            isOn: UserDefaults.standard.bool(forKey: RainbowAppleMenuBarController.preferenceKey),
+            width: settingsRowWidth,
+            leadingInset: 18,
+            trailingInset: 12,
+            titleLeadingAdjustment: 1,
+            indicatorSize: 16,
+            helpHeading: rainbowAppleMenuBarTitle,
+            helpTextProvider: {
+                "Replaces the monochrome Apple logo in the menu bar with the classic six-color rainbow Apple logo.\n\n• Works on every display with a visible menu bar.\n• Automatically hides in full screen and whenever the menu bar is hidden.\n• Clicks pass right through to the Apple menu as usual."
+            }
+        ) { [weak self] enabled in
+            self?.setRainbowAppleMenuBarEnabled(enabled)
+        }
+        rainbowAppleMenuBarRow.autoresizingMask = [.width]
+        rainbowAppleMenuBarItem.view = rainbowAppleMenuBarRow
+        self.rainbowAppleMenuBarRowView = rainbowAppleMenuBarRow
+        extrasMenu.addItem(rainbowAppleMenuBarItem)
+
         extrasMenu.addItem(mutedSoundItem)
 
         // Wide enough for the longest title, so every row's help button
@@ -6527,22 +6854,150 @@ final class OnboardingPrimaryButton: NSButton {
     // methods, so each stays in sync with the other.
 
     private func setMutedSoundIconEnabled(_ enabled: Bool) {
+        // Turning it on or off here is the person's own choice; it no longer
+        // waits to come back on by itself.
+        stopWatchingForMutedSoundReturn()
         // Checked and saved now, but while paused it waits for Resume.
         let accepted = enabled && !dockAwayEnabled
             ? mutedVolumeMenuBarController.saveEnabledWithoutStarting()
             : mutedVolumeMenuBarController.setEnabled(enabled)
         mutedVolumeMenuBarRow?.setOn(enabled && accepted)
         extrasDidChange()
-        guard !accepted else { return }
-        let alert = NSAlert()
-        alert.messageText = "Set Sound to Show When Active"
-        alert.informativeText = "Click Continue to open Menu Bar in System Settings (Control Center on macOS 15), then set Sound to \"Show When Active\". Then turn this option on again."
-        alert.addButton(withTitle: "Continue")
-        alert.addButton(withTitle: "Not Now").keyEquivalent = "\u{1b}"
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        // Called Menu Bar on macOS 26 and later, and Control Center before.
-        openSystemSettingsPane("com.apple.ControlCenter-Settings.extension")
+        guard enabled, !accepted else { return }
+        mutedSoundSetupPrompt.show(
+            // Called Menu Bar on macOS 26 and later, and Control Center before.
+            openSettings: { [weak self] in self?.openSystemSettingsPane("com.apple.ControlCenter-Settings.extension") },
+            onReady: { [weak self] in self?.finishMutedSoundSetup() }
+        )
+    }
+
+    /// Says why "Show Sound Icon When Muted" turned itself off.
+    private func showMutedSoundDisabledPopover(_ reason: MutedVolumeMenuBarController.DisableReason) {
+        let detail: String
+        switch reason {
+        case .changedInSettings(let mode) where mode == MutedVolumeMenuBarController.alwaysShowMode:
+            detail = "Sound was set to \"Always Show\". Set it back to \"Show When Active\" to turn this on again."
+        case .changedInSettings:
+            detail = "Sound was changed in System Settings. Set it back to \"Show When Active\" to turn this on again."
+        case .couldNotSwitch:
+            detail = "macOS didn't let DockAway change Sound's menu bar setting. Turn this on again to retry."
+        }
+        showMutedSoundNotice(turnedOn: false) { [weak self] in
+            self?.showMenuBarPopover(
+                symbolName: "exclamationmark.triangle.fill",
+                symbolDescription: "Turned off",
+                symbolColor: .systemOrange,
+                title: "Show Sound Icon When Muted is off",
+                detail: detail,
+                contentSize: NSSize(width: 360, height: 76)
+            )
+        }
+    }
+
+    /// Set while "Show Sound Icon When Muted" is off only because Sound was
+    /// changed in System Settings: setting Sound back to Show When Active
+    /// turns it on again.
+    private static let mutedSoundAwaitingReturnKey = "MutedSoundAwaitingShowWhenActive"
+    private var mutedSoundReturnTimer: Timer?
+    /// Checks in a row that found Sound on Show When Active.
+    private var mutedSoundReturnReads = 0
+
+    /// Watches for Sound to be set back to Show When Active, and waits for two
+    /// checks in a row to agree so a passing value can't turn it on. Reading
+    /// the setting is a quick local lookup, so every second costs nothing.
+    private func watchForMutedSoundReturn() {
+        UserDefaults.standard.set(true, forKey: Self.mutedSoundAwaitingReturnKey)
+        mutedSoundReturnTimer?.invalidate()
+        mutedSoundReturnReads = 0
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard MutedVolumeMenuBarController.readMode() == 2 else {
+                    self.mutedSoundReturnReads = 0
+                    return
+                }
+                self.mutedSoundReturnReads += 1
+                guard self.mutedSoundReturnReads >= 2 else { return }
+                self.stopWatchingForMutedSoundReturn()
+                self.finishMutedSoundSetup(returned: true)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        mutedSoundReturnTimer = timer
+    }
+
+    private func stopWatchingForMutedSoundReturn() {
+        mutedSoundReturnTimer?.invalidate()
+        mutedSoundReturnTimer = nil
+        UserDefaults.standard.removeObject(forKey: Self.mutedSoundAwaitingReturnKey)
+    }
+
+    /// Sound is set to Show When Active now: turns the option on and says so.
+    private func finishMutedSoundSetup(returned: Bool = false) {
+        let accepted = dockAwayEnabled
+            ? mutedVolumeMenuBarController.setEnabled(true)
+            : mutedVolumeMenuBarController.saveEnabledWithoutStarting()
+        mutedVolumeMenuBarRow?.setOn(accepted)
+        extrasDidChange()
+        guard accepted else { return }
+        let detail = !dockAwayEnabled
+            ? "It starts when you resume DockAway."
+            : returned
+                ? "Sound is \"Show When Active\" again, so the icon shows while you’re muted."
+                : "The Sound icon now shows in the menu bar while you’re muted."
+        showMutedSoundNotice(turnedOn: true) { [weak self] in
+            self?.showMenuBarPopover(
+                // The muted Sound icon this option shows, in a green circle.
+                symbolName: "speaker.slash.circle.fill",
+                symbolDescription: "Turned on",
+                symbolColor: .systemGreen,
+                title: returned ? "Show Sound Icon When Muted is back on" : "Show Sound Icon When Muted is on",
+                detail: detail,
+                contentSize: NSSize(width: 360, height: 76)
+            )
+        }
+    }
+
+    /// The latest note about "Show Sound Icon When Muted" turning on or off,
+    /// held while System Settings is in front: shown there, a note pinned to
+    /// the menu bar as macOS rearranges it for the Sound icon made the Menu
+    /// Bar page stop responding.
+    private var pendingMutedSoundNotice: (() -> Void)?
+    /// Whether the option was on before the first held note.
+    private var mutedSoundOnBeforeNotices: Bool?
+    private var mutedSoundNoticeObserver: NSObjectProtocol?
+
+    private func showMutedSoundNotice(turnedOn: Bool, _ show: @escaping () -> Void) {
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.systempreferences" else {
+            show()
+            return
+        }
+        if pendingMutedSoundNotice == nil { mutedSoundOnBeforeNotices = !turnedOn }
+        pendingMutedSoundNotice = show
+        guard mutedSoundNoticeObserver == nil else { return }
+        mutedSoundNoticeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard app?.bundleIdentifier != "com.apple.systempreferences" else { return }
+            MainActor.assumeIsolated { self?.showHeldMutedSoundNotice() }
+        }
+    }
+
+    /// Out of System Settings: the latest note, unless the option ended up
+    /// as it was, when there's nothing to say.
+    private func showHeldMutedSoundNotice() {
+        if let observer = mutedSoundNoticeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        mutedSoundNoticeObserver = nil
+        let show = pendingMutedSoundNotice
+        let wasOn = mutedSoundOnBeforeNotices
+        pendingMutedSoundNotice = nil
+        mutedSoundOnBeforeNotices = nil
+        let isOn = UserDefaults.standard.bool(forKey: MutedVolumeMenuBarController.preferenceKey)
+        guard let show, wasOn != isOn else { return }
+        show()
     }
 
     private func setLockscreenSoundEnabled(_ event: LockscreenSoundPlayer.Event, _ enabled: Bool) {
@@ -6616,6 +7071,13 @@ final class OnboardingPrimaryButton: NSButton {
         menuBarBlackoutRowView?.setOn(enabled)
         menuBarBlackoutController.setEnabled(enabled && dockAwayEnabled)
         refreshMenuBarBlackoutAccessRow()
+        extrasDidChange()
+    }
+
+    private func setRainbowAppleMenuBarEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: RainbowAppleMenuBarController.preferenceKey)
+        rainbowAppleMenuBarRowView?.setOn(enabled)
+        rainbowAppleMenuBarController.setEnabled(enabled && dockAwayEnabled)
         extrasDidChange()
     }
 
@@ -6781,6 +7243,12 @@ final class OnboardingPrimaryButton: NSButton {
                                  setOn: { [weak self] in self?.setMenuBarBlackoutEnabled($0) })
             ),
             OnboardingExtrasOption(
+                title: "Classic Rainbow Apple Logo",
+                detail: "Turns the menu bar Apple logo into the classic six-color rainbow Apple logo",
+                control: .toggle(isOn: { defaults.bool(forKey: RainbowAppleMenuBarController.preferenceKey) },
+                                 setOn: { [weak self] in self?.setRainbowAppleMenuBarEnabled($0) })
+            ),
+            OnboardingExtrasOption(
                 title: "Show Sound Icon When Muted",
                 detail: "Shows the Sound icon in the menu bar while muted",
                 control: .toggle(isOn: { defaults.bool(forKey: MutedVolumeMenuBarController.preferenceKey) },
@@ -6831,6 +7299,9 @@ final class OnboardingPrimaryButton: NSButton {
             UserDefaults.standard.bool(forKey: MenuBarBlackoutController.preferenceKey)
         )
         refreshMenuBarBlackoutAccessRow()
+        rainbowAppleMenuBarRowView?.setOn(
+            UserDefaults.standard.bool(forKey: RainbowAppleMenuBarController.preferenceKey)
+        )
         refreshHoverActivationMenu()
         chromiumWebAppPlacementRowView?.setOn(
             ChromiumWebAppPlacementController.isEnabled
@@ -8801,6 +9272,9 @@ final class OnboardingPrimaryButton: NSButton {
             running && defaults.bool(forKey: MenuBarBlackoutController.preferenceKey)
         )
         refreshMenuBarBlackoutAccessRow()
+        rainbowAppleMenuBarController.setEnabled(
+            running && defaults.bool(forKey: RainbowAppleMenuBarController.preferenceKey)
+        )
 
         if running {
             if defaults.bool(forKey: MutedVolumeMenuBarController.preferenceKey) {
@@ -9644,6 +10118,10 @@ final class OnboardingPrimaryButton: NSButton {
             }
         }
         if let aboutPanel = aboutPanelWindow {
+            // Only the close button: the panel can't be minimized or zoomed,
+            // so those two would just sit there, grayed out.
+            aboutPanel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            aboutPanel.standardWindowButton(.zoomButton)?.isHidden = true
             aboutPanel.appearance = NSAppearance(named: .aqua)
             aboutPanel.backgroundColor = NSColor(
                 srgbRed: 84.0 / 255.0,
@@ -9776,6 +10254,7 @@ final class OnboardingPrimaryButton: NSButton {
         iconShineView.play(after: 1.08)
     }
 
+
     private func makePermissionSetupWindow(
         setupView: PermissionSetupView
     ) -> (
@@ -9798,7 +10277,15 @@ final class OnboardingPrimaryButton: NSButton {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        // In a virtual machine, the solid background below goes without the
+        // shadow too, as tested there.
+        let usesSolidBackground: Bool
+        if #available(macOS 26.0, *) {
+            usesSolidBackground = false
+        } else {
+            usesSolidBackground = PermissionSetupPanel.isVirtualMachine
+        }
+        panel.hasShadow = !usesSolidBackground
         panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.isFloatingPanel = true
@@ -9811,7 +10298,19 @@ final class OnboardingPrimaryButton: NSButton {
 
         let contentView = NSView(frame: NSRect(origin: .zero, size: windowSize))
         let backgroundView: NSView
-        if #available(macOS 26.0, *) {
+        if usesSolidBackground {
+            let plainView = OnboardingSolidBackgroundView(frame: NSRect(origin: .zero, size: windowSize),
+                                                          cornerRadius: panelCornerRadius)
+            contentView.translatesAutoresizingMaskIntoConstraints = false
+            plainView.addSubview(contentView)
+            NSLayoutConstraint.activate([
+                contentView.leadingAnchor.constraint(equalTo: plainView.leadingAnchor),
+                contentView.trailingAnchor.constraint(equalTo: plainView.trailingAnchor),
+                contentView.topAnchor.constraint(equalTo: plainView.topAnchor),
+                contentView.bottomAnchor.constraint(equalTo: plainView.bottomAnchor)
+            ])
+            backgroundView = plainView
+        } else if #available(macOS 26.0, *) {
             let glassView = NSGlassEffectView(frame: NSRect(origin: .zero, size: windowSize))
             // The standard glass treatment gives the panel a defined rim and
             // keeps the content behind the window visible.
@@ -9834,10 +10333,13 @@ final class OnboardingPrimaryButton: NSButton {
             effectView.material = .popover
             effectView.blendingMode = .behindWindow
             effectView.state = .active
+            // A mask image rounds the blur in the window server. Masking the
+            // layer instead redraws the whole blurred panel on every frame,
+            // which made scrolling stutter on slower graphics.
+            effectView.maskImage = PermissionSetupPanel.roundedMask(radius: panelCornerRadius)
             effectView.wantsLayer = true
             effectView.layer?.cornerRadius = panelCornerRadius
             effectView.layer?.cornerCurve = .continuous
-            effectView.layer?.masksToBounds = true
             effectView.layer?.borderWidth = 1
             effectView.layer?.borderColor = NSColor.white.withAlphaComponent(0.15).cgColor
             contentView.translatesAutoresizingMaskIntoConstraints = false
@@ -11494,26 +11996,29 @@ final class OnboardingPrimaryButton: NSButton {
         permissionHealthTimer?.invalidate()
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, !self.isQuitting, !self.permissionRelaunchScheduled,
+                guard !ScrollActivity.isScrolling,
+                      let self, !self.isQuitting, !self.permissionRelaunchScheduled,
                       !self.permissionContinuePending,
                       self.automaticSuspensionReasons.isEmpty else { return }
 
                 let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
                 let settingsIsFrontmost = frontmost == "com.apple.systempreferences"
                     || frontmost == "com.apple.SystemSettings"
+                let onPermissionsPage = self.permissionSetupInProgress
+                    && self.onboardingCurrentStep == 1
                 // Remain responsive in onboarding and Settings, even if Settings
                 // was opened independently. Each check launches a short-lived
                 // process, so background checks are spaced out; opening the
                 // menu or switching apps still checks right away.
                 self.permissionMonitor.refresh(
-                    minimumInterval: self.permissionSetupInProgress || settingsIsFrontmost ? 0.4 : 15
+                    minimumInterval: onPermissionsPage || settingsIsFrontmost ? 0.4 : 15
                 )
             }
         }
         // Allow system timer coalescing without changing the polling interval.
         timer.tolerance = 0.05
         permissionHealthTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .default)
     }
 
     func accessibilityPermissionWasRevoked() {
@@ -11674,6 +12179,7 @@ final class OnboardingPrimaryButton: NSButton {
         mutedVolumeMenuBarController.stop()
         fullscreenVideoKeyboardLightController.stop()
         menuBarBlackoutController.stop()
+        rainbowAppleMenuBarController.stop()
         isQuitting = true
         statusItemSpaceRefresh.cancel()
         desktopChangeTooltip.dismiss()

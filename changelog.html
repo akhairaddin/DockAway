@@ -9,6 +9,31 @@
     </style>
 </head>
 <body>
+    <h3>Version 2.1.6 <span style="font-weight: normal;">(11-19-26)</span></h3>
+    <h4>New Features</h4>
+    <ul>
+        <li><b>Quit Apps From the Desktop Change Popup:</b> Drag an app icon out of the "Desktop Change Popup" and a round close button appears beneath it. Drop the icon there to quit that app, or anywhere else to put it back.</li>
+        <li><b>Classic Rainbow Apple Logo:</b> A new option in "Extras" turns the menu bar Apple logo into the classic six-color rainbow Apple logo on every display with a visible menu bar, and steps aside in full screen or whenever the menu bar is hidden.</li>
+        <li><b>Instant Desktop Close Buttons in Mission Control:</b> With "Show Desktop Close Buttons Instantly" on in "Mission Control" settings, every desktop's close button appears as soon as your pointer reaches the desktop strip in Mission Control, with no pause. It works by holding Option for you while the pointer is over the strip.</li>
+    </ul>
+    <h4>Improvements</h4>
+    <ul>
+        <li><b>Wallpaper in Desktop Boxes:</b> Each desktop's box in "Desktop Manager" now shows your wallpaper behind its apps, like a small picture of that desktop, so empty desktops are easy to spot. DockAway only reads the wallpaper where it's already allowed to, so this never brings up a new permission prompt.</li>
+        <li><b>Guided Setup for Show Sound Icon When Muted:</b> Turning on "Show Sound Icon When Muted" now walks you through setting Sound to "Show When Active", checks it for you while System Settings is open, and turns the option on by itself once it's set. A note by the menu bar icon confirms it's on, and another explains if it turns itself off because Sound was changed in System Settings; setting Sound back to "Show When Active" turns it on again.</li>
+        <li><b>Delete Key in the Trash:</b> With "Delete Finder Items with Delete Key" on, pressing Delete in the Trash deletes the item right away, and Return confirms the Delete or "Empty Trash" dialog.</li>
+        <li><b>Still Active With Auto-Hide Paused:</b> With "Pause Auto-Hide" on, the menu now says "DockAway: Active" instead of "DockAway: Auto-Hide Paused", since everything else DockAway does keeps working.</li>
+        <li><b>Lighter Quick Look Copy Checks:</b> With "Correct Quick Look Copy Orientation" on, DockAway checks for Quick Look in the background and half as often, so a busy Finder can no longer make DockAway stutter.</li>
+    </ul>
+    <h4>Bug Fixes</h4>
+    <ul>
+        <li><b>System Settings No Longer Freezes With Force Click:</b> With "Middle Click with Force Click" on, clicking pop-up menus and sheets in System Settings, such as on the Menu Bar page, could leave the page frozen. Clicks there, and in other windows macOS draws for apps, such as Open and Save dialogs, now go straight through.</li>
+        <li><b>Clicks in Mission Control Work the First Time:</b> With "Middle Click with Force Click" on, trackpad clicks in Mission Control often did nothing, so adding or closing a desktop or picking a window could take several tries. Clicks there now go straight through, and in other apps a click's release no longer arrives at the same instant as its press.</li>
+        <li><b>Dock Shows Again on Empty Desktops:</b> A minimized System Settings window could keep the Dock hidden on an empty desktop, because macOS still reports its Wallpaper pane as on screen. DockAway now ignores it.</li>
+        <li><b>Black Menu Bar No Longer Cut Off on Quick Swipes:</b> With "Black Out Menu Bar for Filled Screens" on, swiping away from a filled desktop just after the black appeared could slide it onto the next desktop cut off at both ends, then make it jump to full width. It now arrives whole and sweeps away smoothly.</li>
+        <li><b>Show Sound Icon When Muted Stays On:</b> Relaunching DockAway while muted could mistake its own change to Sound for yours, turning "Show Sound Icon When Muted" off and leaving Sound on "Always Show". DockAway now lets macOS settle before deciding Sound was changed.</li>
+        <li><b>No More Freezes Scrolling the Onboarding in a Virtual Machine:</b> In a macOS 14 or 15 virtual machine, scrolling the onboarding could freeze DockAway and the whole machine. The onboarding now uses a solid background there, and DockAway no longer stops to wait on macOS while you scroll.</li>
+    </ul>
+
     <h3>Version 2.1.5 <span style="font-weight: normal;">(11-5-26)</span></h3>
     <h4>New Features</h4>
     <ul>

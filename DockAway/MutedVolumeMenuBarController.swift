@@ -12,9 +12,27 @@ final class MutedVolumeMenuBarController {
     private var timer: Timer?
     private var device = AudioDeviceID(kAudioObjectUnknown)
     private var expectedMode: Int?
+    /// When DockAway last changed Sound's visibility. macOS takes a moment to
+    /// settle after a change, and a read in between can still show the
+    /// previous value, which looked like the person changing it.
+    private var lastWriteAt: TimeInterval = -.infinity
+    /// Checks in a row that found a different setting than DockAway's.
+    private var mismatches = 0
+    private static let settleTime: TimeInterval = 3
     private var isRunning = false
     private let silenceProvider: (() -> Bool?)?
-    var onDisabled: (() -> Void)?
+    /// Why the option turned itself off.
+    enum DisableReason: Equatable {
+        /// Sound's visibility was changed in System Settings, to this mode.
+        case changedInSettings(mode: Int?)
+        /// macOS didn't take DockAway's change to Sound's visibility.
+        case couldNotSwitch
+    }
+
+    var onDisabled: ((DisableReason) -> Void)?
+
+    /// Always Show, as Sound's visibility setting stores it.
+    static let alwaysShowMode = 18
 
     init(silenceProvider: (() -> Bool?)? = nil) {
         self.silenceProvider = silenceProvider
@@ -39,7 +57,10 @@ final class MutedVolumeMenuBarController {
     /// Recover a temporary Always Show setting after an interrupted previous run.
     func recoverPreviousSession() {
         guard let owned = UserDefaults.standard.object(forKey: Self.ownershipKey) as? Int else { return }
-        if Self.readMode() == owned, !Self.writeMode(2) { return }
+        if Self.readMode() == owned {
+            lastWriteAt = ProcessInfo.processInfo.systemUptime
+            guard Self.writeMode(2) else { return }
+        }
         UserDefaults.standard.removeObject(forKey: Self.ownershipKey)
     }
 
@@ -165,25 +186,37 @@ final class MutedVolumeMenuBarController {
 
     func refresh() {
         guard isRunning else { return }
-        guard Self.readMode() == expectedMode else {
+        let mode = Self.readMode()
+        guard mode == expectedMode else {
+            // Only a change that lasts is the person's: not one read while
+            // DockAway's own change settles, and not a single odd read.
+            mismatches += 1
+            if ProcessInfo.processInfo.systemUptime - lastWriteAt < Self.settleTime || mismatches < 2 { return }
+            mismatches = 0
             // A manual change wins. Do not restore over the user's new choice.
             expectedMode = nil
             stop()
             UserDefaults.standard.set(false, forKey: Self.preferenceKey)
-            onDisabled?()
+            onDisabled?(.changedInSettings(mode: mode))
             return
         }
+        mismatches = 0
+        // While the person is in System Settings, Sound's setting stays as
+        // it is, so DockAway never changes it under them as they pick one.
+        // It catches up once they leave.
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.systempreferences" { return }
         if currentDevice() != device { rebindDevice(); return }
         // Unknown output state should not strand a temporary Always Show setting.
         let desired = Self.desiredMode(isSilent: silent() ?? false)
         guard desired != expectedMode else { return }
         UserDefaults.standard.set(desired, forKey: Self.ownershipKey)
+        lastWriteAt = ProcessInfo.processInfo.systemUptime
         guard Self.writeMode(desired) else {
             NSLog("DockAway: unable to update native Sound menu bar visibility")
             if Self.readMode() == desired { expectedMode = desired }
             stop()
             UserDefaults.standard.set(false, forKey: Self.preferenceKey)
-            onDisabled?()
+            onDisabled?(.couldNotSwitch)
             return
         }
         expectedMode = desired

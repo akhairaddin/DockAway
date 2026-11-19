@@ -28,6 +28,11 @@ final class QuickLookCopyOrientationManager {
     private var quickLookWasVisibleUntil = Date.distantPast
     private var previewedFileURL: URL?
     private var nextQuickLookSampleAt: TimeInterval = 0
+    private var nextPreviewedFileLookupAt: TimeInterval = 0
+    private var sampleInFlight = false
+    /// Where Finder is asked about Quick Look, away from the main thread.
+    private let probeQueue = DispatchQueue(label: "AK.DockAway.QuickLookProbe", qos: .utility)
+    private static let quickLookSampleInterval: TimeInterval = 0.5
     private var correctionGeneration: UInt = 0
     private var isWritingPasteboard = false
 
@@ -42,6 +47,8 @@ final class QuickLookCopyOrientationManager {
         quickLookWasVisibleUntil = .distantPast
         previewedFileURL = nil
         nextQuickLookSampleAt = 0
+        nextPreviewedFileLookupAt = 0
+        sampleInFlight = false
         isWritingPasteboard = false
     }
 
@@ -55,7 +62,7 @@ final class QuickLookCopyOrientationManager {
         }
         timer.tolerance = 0.02
         self.timer = timer
-        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .default)
     }
 
     private func pollPasteboard() {
@@ -63,37 +70,53 @@ final class QuickLookCopyOrientationManager {
         let finderOwnsFrontmostUI = frontmostBundleIdentifier == "com.apple.finder"
             || frontmostBundleIdentifier == "com.apple.quicklook.QuickLookUIService"
         let now = ProcessInfo.processInfo.systemUptime
-        var sampledQuickLook = false
         if finderOwnsFrontmostUI, now >= nextQuickLookSampleAt {
             sampleQuickLookVisibility(now: now)
-            sampledQuickLook = true
         }
 
         let pasteboard = NSPasteboard.general
         let changeCount = pasteboard.changeCount
         guard changeCount != lastPasteboardChangeCount else { return }
         lastPasteboardChangeCount = changeCount
-        // A copy made right after Quick Look opened can land between samples.
         let containsImage = pasteboard.types?.contains {
             Self.imagePayloadTypes.contains($0)
         } == true
-        if containsImage, !sampledQuickLook {
-            sampleQuickLookVisibility(now: now)
-        }
-        if containsImage {
-            dockAwayDebugLog("Quick Look image clipboard change; previewRecentlyVisible=\(Date() <= quickLookWasVisibleUntil); FinderFrontmost=\(finderOwnsFrontmostUI)")
-        }
+        guard containsImage, !isWritingPasteboard else { return }
+        dockAwayDebugLog("Quick Look image clipboard change; previewRecentlyVisible=\(Date() <= quickLookWasVisibleUntil); FinderFrontmost=\(finderOwnsFrontmostUI)")
 
-        guard !isWritingPasteboard,
-              Date() <= quickLookWasVisibleUntil,
-              let source = Self.copySource(
-                from: pasteboard,
-                preferredFileURL: previewedFileURL ?? Self.finderSelectedImageURL()
-              ) else { return }
-
-        dockAwayDebugLog("Quick Look image copy detected; source=\(source.url?.lastPathComponent ?? "clipboard metadata")")
+        // Look at Quick Look once more, since a copy made right after it
+        // opened can land between samples. Asking Finder can wait on it, so
+        // that happens off the main thread.
         correctionGeneration &+= 1
         let generation = correctionGeneration
+        let copiedAt = Date()
+        let wasRecentlyVisible = copiedAt <= quickLookWasVisibleUntil
+        probeQueue.async { [weak self] in
+            let visible = Self.finderQuickLookIsVisible()
+            // The file is only needed while the copy can still be Quick Look's.
+            let selectedURL = visible || wasRecentlyVisible ? Self.finderSelectedImageURL() : nil
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.timer != nil, self.correctionGeneration == generation,
+                          NSPasteboard.general.changeCount == changeCount else { return }
+                    if visible {
+                        self.quickLookWasVisibleUntil = Date().addingTimeInterval(2)
+                        if let selectedURL { self.previewedFileURL = selectedURL }
+                    }
+                    guard !self.isWritingPasteboard,
+                          copiedAt <= self.quickLookWasVisibleUntil,
+                          let source = Self.copySource(
+                            from: NSPasteboard.general,
+                            preferredFileURL: self.previewedFileURL ?? selectedURL
+                          ) else { return }
+                    self.correctOrientation(of: source, changeCount: changeCount, generation: generation)
+                }
+            }
+        }
+    }
+
+    private func correctOrientation(of source: CopySource, changeCount: Int, generation: UInt) {
+        dockAwayDebugLog("Quick Look image copy detected; source=\(source.url?.lastPathComponent ?? "clipboard metadata")")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // An upright image is copied right already. Leaving it alone
             // saves decoding it and filling the clipboard with a large TIFF.
@@ -112,20 +135,40 @@ final class QuickLookCopyOrientationManager {
         }
     }
 
-    /// Quick Look visibility costs Accessibility IPC into Finder, so it is
-    /// sampled less often than the pasteboard. The 2 s grace window, which
-    /// keeps a copy associated with Quick Look if the panel dismisses as the
-    /// pasteboard owner publishes its promised data, also spans the gap.
+    /// Quick Look visibility costs Accessibility IPC into Finder, which can
+    /// stall while Finder is busy, so it's sampled off the main thread and
+    /// less often than the pasteboard. The 2 s grace window, which keeps a
+    /// copy associated with Quick Look if the panel dismisses as the
+    /// pasteboard owner publishes its promised data, spans the gaps. The
+    /// previewed file, a deeper search, is looked up at most once a second;
+    /// a copy looks it up again anyway.
     private func sampleQuickLookVisibility(now: TimeInterval) {
-        nextQuickLookSampleAt = now + 0.25
-        if Self.finderQuickLookIsVisible() {
-            if Date() > quickLookWasVisibleUntil {
-                dockAwayDebugLog("Finder Quick Look preview detected")
+        nextQuickLookSampleAt = now + Self.quickLookSampleInterval
+        guard !sampleInFlight else { return }
+        sampleInFlight = true
+        let wantsFileURL = previewedFileURL == nil || now >= nextPreviewedFileLookupAt
+        probeQueue.async { [weak self] in
+            let visible = Self.finderQuickLookIsVisible()
+            let url = visible && wantsFileURL ? Self.finderSelectedImageURL() : nil
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.sampleInFlight = false
+                    guard self.timer != nil else { return }
+                    if visible {
+                        if Date() > self.quickLookWasVisibleUntil {
+                            dockAwayDebugLog("Finder Quick Look preview detected")
+                        }
+                        self.quickLookWasVisibleUntil = Date().addingTimeInterval(2)
+                        if wantsFileURL {
+                            self.previewedFileURL = url
+                            self.nextPreviewedFileLookupAt = ProcessInfo.processInfo.systemUptime + 1
+                        }
+                    } else if Date() > self.quickLookWasVisibleUntil {
+                        self.previewedFileURL = nil
+                    }
+                }
             }
-            quickLookWasVisibleUntil = Date().addingTimeInterval(2)
-            previewedFileURL = Self.finderSelectedImageURL()
-        } else if Date() > quickLookWasVisibleUntil {
-            previewedFileURL = nil
         }
     }
 
@@ -341,7 +384,7 @@ final class QuickLookCopyOrientationManager {
         CGImageSourceCreateWithData(data as CFData, nil)
     }
 
-    private static func finderQuickLookIsVisible() -> Bool {
+    private nonisolated static func finderQuickLookIsVisible() -> Bool {
         if finderAccessibilityShowsQuickLook() {
             return true
         }
@@ -376,7 +419,7 @@ final class QuickLookCopyOrientationManager {
         }
     }
 
-    private static func finderAccessibilityShowsQuickLook() -> Bool {
+    private nonisolated static func finderAccessibilityShowsQuickLook() -> Bool {
         guard let finder = NSRunningApplication.runningApplications(
             withBundleIdentifier: "com.apple.finder"
         ).first else { return false }
@@ -388,7 +431,7 @@ final class QuickLookCopyOrientationManager {
         }
     }
 
-    private static func finderSelectedImageURL() -> URL? {
+    private nonisolated static func finderSelectedImageURL() -> URL? {
         guard let finder = NSRunningApplication.runningApplications(
             withBundleIdentifier: "com.apple.finder"
         ).first else { return nil }
@@ -410,7 +453,7 @@ final class QuickLookCopyOrientationManager {
         return nil
     }
 
-    private static func selectedFileURL(
+    private nonisolated static func selectedFileURL(
         in element: AXUIElement,
         matchingFileName: String?,
         depth: Int
@@ -448,7 +491,7 @@ final class QuickLookCopyOrientationManager {
         return nil
     }
 
-    private static func quickLookPreviewedFileName(
+    private nonisolated static func quickLookPreviewedFileName(
         in application: AXUIElement
     ) -> String? {
         guard let quickLookWindow = windows(of: application).first(where: {
@@ -458,7 +501,7 @@ final class QuickLookCopyOrientationManager {
         return previewedFileName(in: quickLookWindow, depth: 0)
     }
 
-    private static func previewedFileName(
+    private nonisolated static func previewedFileName(
         in element: AXUIElement,
         depth: Int
     ) -> String? {
@@ -483,7 +526,7 @@ final class QuickLookCopyOrientationManager {
         return nil
     }
 
-    private static func firstFileURL(
+    private nonisolated static func firstFileURL(
         in element: AXUIElement,
         depth: Int
     ) -> URL? {
@@ -504,7 +547,7 @@ final class QuickLookCopyOrientationManager {
         return nil
     }
 
-    private static func windows(of application: AXUIElement) -> [AXUIElement] {
+    private nonisolated static func windows(of application: AXUIElement) -> [AXUIElement] {
         // Finder can expose an empty AXWindows array while its real windows,
         // including QLPreviewPanel, remain available through AXChildren.
         // Prefer the focused window, then merge both public discovery paths.

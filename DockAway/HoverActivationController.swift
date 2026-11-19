@@ -621,6 +621,26 @@ final class HoverActivationController {
         }
         spaceTransitionPointer = nil
 
+        // While scrolling, nothing activates and the window server isn't
+        // asked; the dwell starts again once it stops.
+        if ScrollActivity.isScrolling {
+            candidate = nil
+            candidateStartedAt = now
+            evaluationPolicy.invalidate()
+            return
+        }
+
+        // With "Wait for Pointer to Stop", nothing can activate while the
+        // pointer moves, so the window snapshot and Accessibility hit-test
+        // wait until it rests. The dwell starts from the last moving tick,
+        // as it did when every tick restarted it.
+        if pointerIsMoving, Self.settings.waitsForPointerToStop {
+            candidate = nil
+            candidateStartedAt = now
+            evaluationPolicy.invalidate()
+            return
+        }
+
         let frontmostApplication = NSWorkspace.shared.frontmostApplication
         let buttonsPressed = NSEvent.pressedMouseButtons != 0
         guard evaluationPolicy.shouldEvaluate(now: now, pointerMoved: pointerIsMoving,
