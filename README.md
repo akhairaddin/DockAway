@@ -8,13 +8,23 @@ A native macOS menu-bar utility that shows the Dock on empty desktops and hides 
 
 <p align="center">
   <a href="https://github.com/akhairaddin/DockAway/releases/latest">Download</a> ·
+  <a href="#a-whole-desktop-manager-in-your-menubar">Desktop Manager</a> ·
   <a href="#features">Features</a> ·
-  <a href="#desktop-manager">Desktop Manager</a> ·
   <a href="#first-launch-and-permissions">Setup</a> ·
   <a href="#privacy">Privacy</a> ·
   <a href="changelog.html">Changelog</a> ·
   <a href="https://github.com/akhairaddin/DockAway/issues">Support</a>
 </p>
+
+## A Whole Desktop Manager, In Your Menubar.
+
+<p align="center">
+  <img src="DockAway/docs/desktop-manager-preview.png" alt="DockAway Desktop Manager showing app icons over each desktop's wallpaper, numbered desktops, and add buttons grouped across two displays" width="380">
+</p>
+
+See your desktops and their app icons, grouped by display, with each box optionally showing that desktop's own wallpaper. Switch to, create, close, drag desktops to reorder them or even move them between monitors. Fullscreen apps get their own named tiles, and the layout adapts to the number of desktops and apps. Incredibly handy when you have 2+ Displays and you're juggling between desktops.
+
+Open the menu with **Option+Up** or **Option+Shift+W**, then navigate with **arrow keys or WASD**. Right- and left-hand profiles have customizable select and close bindings. Closing while **+** is selected first moves the highlight back to a desktop; a second press closes it. Escape dismisses the menu.
 
 ## Features
 
@@ -34,16 +44,6 @@ A native macOS menu-bar utility that shows the Dock on empty desktops and hides 
 An empty desktop or minimizing its last window shows the Dock. App windows hide it, unless a blacklisted app is frontmost. A blacklisted window behind another app does not keep the Dock visible.
 
 Use **Auto-Hide Blacklist → Choose Application…** for apps that aren't running. To keep the Dock shown for a while without pausing anything else, turn on **Pause Auto-Hide** at the top of the Auto-Hide Blacklist. DockAway respects your system Dock-hiding shortcut, **Command+Option+D** by default, and checks the live Dock state before toggling it. Quitting restores normal Dock visibility.
-
-## A Whole Desktop Manager, In Your Menubar.
-
-<p align="center">
-  <img src="DockAway/docs/desktop-manager-preview.png" alt="DockAway Desktop Manager showing app icons over each desktop's wallpaper, numbered desktops, and add buttons grouped across two displays" width="380">
-</p>
-
-See your desktops and their app icons, grouped by display, with each box optionally showing that desktop's own wallpaper. Switch to, create, close, drag desktops to reorder them or even move them between monitors. Fullscreen apps get their own named tiles, and the layout adapts to the number of desktops and apps. Incredibly handy when you have 2+ Displays and you're juggling between desktops.
-
-Open the menu with **Option+Up** or **Option+Shift+W**, then navigate with **arrow keys or WASD**. Right- and left-hand profiles have customizable select and close bindings. Closing while **+** is selected first moves the highlight back to a desktop; a second press closes it. Escape dismisses the menu.
 
 ## First launch and permissions
 
