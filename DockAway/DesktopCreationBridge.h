@@ -14,6 +14,11 @@ uint64_t DockAwayCreateDesktop(void);
 uint64_t DockAwayCreateDesktopOnDisplay(uint32_t displayID, uint64_t anchorSpaceID);
 BOOL DockAwayJumpToDesktop(uint64_t spaceID, uint64_t expectedCurrentID);
 BOOL DockAwayActivateSpace(uint64_t spaceID);
+/// Activates the frontmost application window on a Space reached by
+/// DockAwayJumpToDesktop. Unlike DockAwayActivateSpace, an empty Space
+/// activates nothing: the jump bypasses the Dock, and activating Finder
+/// there makes macOS slide back to the Space the Dock still thinks is current.
+BOOL DockAwayActivateSpaceWindow(uint64_t spaceID);
 BOOL DockAwayReorderDesktop(uint64_t spaceID, uint64_t targetID);
 BOOL DockAwayAppendDesktop(uint64_t spaceID, uint64_t targetID);
 BOOL DockAwayMoveWindowToSpace(CGWindowID windowID, uint64_t targetSpaceID);

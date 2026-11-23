@@ -9659,6 +9659,33 @@ final class OnboardingPrimaryButton: NSButton {
         }
     }
 
+    #if DEBUG
+    /// Logs where the display is for a few seconds after a Desktop Manager
+    /// jump, and every app activation meanwhile, to catch a slide back.
+    private func traceDesktopArrival(_ target: UInt64, on display: CGDirectDisplayID, activatedWindow: Bool) {
+        let frontmost = NSWorkspace.shared.frontmostApplication?.localizedName ?? "none"
+        dockAwayDebugLog("Desktop arrival: target \(target), activated a window there: \(activatedWindow), frontmost \(frontmost)")
+        let observer = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let app = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.localizedName ?? "?"
+            MainActor.assumeIsolated {
+                let current = self?.dockWatcher?.desktopSelection(on: display)?.currentID ?? 0
+                dockAwayDebugLog("Desktop arrival: \(app) activated, current desktop \(current)")
+            }
+        }
+        for delay in [0.3, 1.0, 2.0, 4.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                let current = self?.dockWatcher?.desktopSelection(on: display)?.currentID ?? 0
+                dockAwayDebugLog("Desktop arrival: after \(delay) s current desktop \(current)\(current == target ? "" : " (NOT the target)")")
+                if delay == 4.0 {
+                    NSWorkspace.shared.notificationCenter.removeObserver(observer)
+                }
+            }
+        }
+    }
+    #endif
+
     private func selectDesktop(_ identifier: UInt64) {
         guard isDesktopManagerEnabled, !desktopCreationInProgress else { return }
         guard let initial = desktopDisplaySections.first(where: {
@@ -9697,7 +9724,14 @@ final class OnboardingPrimaryButton: NSButton {
                         CGWarpMouseCursorPosition(CGPoint(x: bounds.midX, y: bounds.midY))
                     }
                 }
-                DockAwayActivateSpace(identifier)
+                // An empty desktop keeps the current app in front, as a
+                // native switch does; activating Finder would slide back.
+                #if DEBUG
+                let activated = DockAwayActivateSpaceWindow(identifier)
+                self.traceDesktopArrival(identifier, on: initial.displayID, activatedWindow: activated)
+                #else
+                _ = DockAwayActivateSpaceWindow(identifier)
+                #endif
             }
             self.dockWatcher?.refreshStatus()
             self.refreshDesktopTiles()
@@ -9812,7 +9846,7 @@ final class OnboardingPrimaryButton: NSButton {
                 self.refreshDesktopTiles()
                 switch outcome {
                 case .arrived:
-                    DockAwayActivateSpace(neighbor)
+                    DockAwayActivateSpaceWindow(neighbor)
                     self.closeDesktop(identifier, restoreMenu: shouldRestoreMenu, didSwitchAway: true)
                 case .failed(let message):
                     let alert = NSAlert()

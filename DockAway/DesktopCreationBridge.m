@@ -499,7 +499,7 @@ BOOL DockAwayJumpToDesktop(uint64_t spaceID, uint64_t expectedCurrentID) {
     }
 }
 
-BOOL DockAwayActivateSpace(uint64_t spaceID) {
+static BOOL DockAwayActivateSpaceInternal(uint64_t spaceID, BOOL activatesFinderWhenEmpty) {
     @autoreleasepool {
         if (!spaceID) return NO;
         const DockAwaySkyLightFunctions *skyLight = DockAwaySkyLight();
@@ -596,6 +596,7 @@ BOOL DockAwayActivateSpace(uint64_t spaceID) {
             }
         }
 
+        if (!activatesFinderWhenEmpty) return NO;
         // If no regular application window is present on the space, activate Finder to focus the desktop
         NSArray<NSRunningApplication *> *finders = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.finder"];
         if (finders.count > 0) {
@@ -607,6 +608,14 @@ BOOL DockAwayActivateSpace(uint64_t spaceID) {
         }
         return NO;
     }
+}
+
+BOOL DockAwayActivateSpace(uint64_t spaceID) {
+    return DockAwayActivateSpaceInternal(spaceID, YES);
+}
+
+BOOL DockAwayActivateSpaceWindow(uint64_t spaceID) {
+    return DockAwayActivateSpaceInternal(spaceID, NO);
 }
 
 BOOL DockAwayMoveWindowToSpace(CGWindowID windowID, uint64_t targetSpaceID) {
