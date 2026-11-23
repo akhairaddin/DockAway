@@ -20,7 +20,7 @@ A native macOS menu-bar utility that shows the Dock on empty desktops and hides 
 
 - **Automatic Dock visibility:** Reacts to app switches, window changes, and desktop swipes on the display under your pointer. Predictive hiding helps the Dock get out of the way as you open an app.
 - **Desktop indicators:** Customize desktop numbers in the menu bar and optionally show a brief **Desktop Change Popup**, which can list the apps on the desktop you arrive on, the app in front first. Drag an app's icon out of the popup to quit it.
-- **Window navigation:** Optional activate-on-hover, cursor teleportation between displays, and active-desktop placement for Finder and Chromium web apps.
+- **Window navigation:** Optional **Focus on Hover**, cursor teleportation between displays, and active-desktop placement for Finder and Chromium web apps.
 - **Fill Window with Green Button:** Bring a window forward and toggle between filling the available display area and its remembered size. Without a saved size, restore to a centered smaller window. Option-click enters fullscreen.
 - **Black Out Menu Bar for Filled Screens:** While a window fills the screen, the menu bar and a thin frame down the window's sides turn black so the window blends in, with the menu bar text staying white on any still-image wallpaper.
 - **Middle Click with Force Click:** Press harder on the trackpad to middle click, so you can open links in new tabs or close tabs without a mouse.

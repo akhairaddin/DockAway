@@ -209,6 +209,38 @@ enum MenuBarBlackoutDecision {
         }
         return nil
     }
+
+    /// How long to wait before swapping to a banded wallpaper copy so its
+    /// full-width black top band does not cut an opening bar sweep short.
+    nonisolated static func bandSwapDelay(
+        allowDefer: Bool,
+        reduceMotion: Bool,
+        overlayShown: Bool,
+        overlayWaitingToHide: Bool,
+        remainingBarCoverDelay: TimeInterval,
+        wipeInDuration: TimeInterval
+    ) -> TimeInterval {
+        guard allowDefer, !reduceMotion else { return 0 }
+        if overlayShown { return max(0, remainingBarCoverDelay) }
+        if overlayWaitingToHide { return 0 }
+        return max(0, wipeInDuration)
+    }
+
+    /// How long a display must stay without a filling window before the black
+    /// menu bar starts hiding. Arriving on a desktop keeps a longer grace in
+    /// case macOS takes a moment to report the new desktop's windows.
+    nonisolated static func unfilledGraceDelay(settledDesktop: Bool) -> TimeInterval {
+        settledDesktop ? 0.4 : 0.1
+    }
+
+    /// Longest wait after starting a wallpaper restore before starting the close
+    /// sweep when macOS doesn't flip the menu bar's text color first (such as in
+    /// Dark Mode). Animated closes already keep the menu bar fully covered for
+    /// their opening overhang while the restored wallpaper finishes applying.
+    nonisolated static func wallpaperRestoreWait(hasNotch: Bool, reduceMotion: Bool) -> TimeInterval {
+        if reduceMotion { return 0.5 }
+        return hasNotch ? 0.3 : 0.4
+    }
 }
 
 /// A place macOS asks about before an app opens a file there, by its
@@ -290,13 +322,7 @@ struct MenuBarBlackoutBlockedWallpaper: Equatable {
 final class MenuBarBlackoutController {
     static let preferenceKey = "blackMenuBarWhenScreenFilled"
     private static let swapsKey = "menuBarBlackoutWallpaperSwaps"
-    private static let pollInterval: TimeInterval = 0.25
-    /// The black stays solid until a wallpaper DockAway puts back is showing,
-    /// so it fades into the real wallpaper rather than over the copy's black
-    /// band, which disappears all at once. macOS flips the menu bar's text
-    /// color when it shows (about a third of a second); this is the longest
-    /// it waits for that.
-    private static let wallpaperShowTimeout: TimeInterval = 1.0
+    private static let pollInterval: TimeInterval = 0.15
     /// How often a filled display checks whether something else changed its wallpaper.
     private static let wallpaperCheckInterval: TimeInterval = 2
     private static let maximumSwapRecords = 16
@@ -358,6 +384,10 @@ final class MenuBarBlackoutController {
     private var overlays: [CGDirectDisplayID: MenuBarBlackoutOverlay] = [:]
     /// Displays whose black is waiting for their put-back wallpaper to show.
     private var fadesAwaitingWallpaper = Set<CGDirectDisplayID>()
+    /// Displays waiting for the opening sweep to reach the screen edges before
+    /// swapping to the banded wallpaper, so the copy's full-width black band
+    /// never appears mid-sweep and cuts the slide-out short.
+    private var pendingBandSwaps: [CGDirectDisplayID: DispatchWorkItem] = [:]
     /// Whether each desktop had a filling window when it was last showing, so
     /// swiping between filled desktops keeps the black instead of dropping it
     /// while the window list is mid-transition.
@@ -398,8 +428,10 @@ final class MenuBarBlackoutController {
     private static let blackTextGrace: TimeInterval = 1.5
     /// When each display's black last stopped having a filling window. It stays
     /// until that's lasted a moment, so a brief gap mid-transition can't drop it.
-    private var unfilledSince: [CGDirectDisplayID: TimeInterval] = [:]
-    private static let hideDelay: TimeInterval = 0.4
+    /// Deadline when an unfilled display may start hiding, and a scheduled
+    /// check to catch that moment promptly instead of waiting for the next poll.
+    private var unfilledHideAt: [CGDirectDisplayID: TimeInterval] = [:]
+    private var pendingHideChecks: [CGDirectDisplayID: DispatchWorkItem] = [:]
     /// macOS reports the new desktop about a second after the fingers lift,
     /// once the swipe's animation finishes; a cancelled swipe reports nothing.
     private static let swipeLandingTimeout: TimeInterval = 1.4
@@ -465,6 +497,37 @@ final class MenuBarBlackoutController {
         if enabled { start() } else { stop(animated: true) }
     }
 
+    private func cancelPendingBandSwap(on display: CGDirectDisplayID) {
+        pendingBandSwaps.removeValue(forKey: display)?.cancel()
+    }
+
+    private func cancelAllPendingBandSwaps() {
+        pendingBandSwaps.values.forEach { $0.cancel() }
+        pendingBandSwaps.removeAll()
+    }
+
+    private func cancelPendingHideCheck(on display: CGDirectDisplayID) {
+        pendingHideChecks.removeValue(forKey: display)?.cancel()
+    }
+
+    private func cancelAllPendingHideChecks() {
+        pendingHideChecks.values.forEach { $0.cancel() }
+        pendingHideChecks.removeAll()
+    }
+
+    private func schedulePendingHideCheck(on display: CGDirectDisplayID, after delay: TimeInterval) {
+        guard pendingHideChecks[display] == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pendingHideChecks.removeValue(forKey: display)
+                self.pollInBackground()
+            }
+        }
+        pendingHideChecks[display] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.01, delay + 0.005), execute: work)
+    }
+
     /// Takes the black away and puts back any wallpaper DockAway replaced.
     /// Quitting stops at once; turning the option off fades out.
     func stop(animated: Bool = false) {
@@ -472,7 +535,10 @@ final class MenuBarBlackoutController {
         timer?.invalidate()
         timer = nil
         windowPollInFlight = false
+        cancelAllPendingBandSwaps()
+        cancelAllPendingHideChecks()
         filledSince.removeAll()
+        unfilledHideAt.removeAll()
         lastWallpaperCheck.removeAll()
         swappedWhileFilled.removeAll()
         textWillBeWhite.removeAll()
@@ -501,6 +567,9 @@ final class MenuBarBlackoutController {
                 guard let self else { return }
                 // Each desktop has its own wallpaper; finding a different one
                 // after switching isn't another app changing it back.
+                self.cancelAllPendingBandSwaps()
+                self.cancelAllPendingHideChecks()
+                self.unfilledHideAt.removeAll()
                 self.swappedWhileFilled.removeAll()
                 self.wallpaperReverts.removeAll()
                 self.rememberedFilled.removeAll()
@@ -518,6 +587,11 @@ final class MenuBarBlackoutController {
                 MainActor.assumeIsolated { self?.evaluate(checkWallpapers: true) }
             })
         }
+        for name in [NSWorkspace.didHideApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            observers.append(workspaceCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.evaluate(checkWallpapers: false) }
+            })
+        }
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -531,7 +605,7 @@ final class MenuBarBlackoutController {
                 self?.pollInBackground()
             }
         }
-        timer.tolerance = 0.05
+        timer.tolerance = 0.03
         RunLoop.main.add(timer, forMode: .default)
         self.timer = timer
         evaluate(checkWallpapers: true)
@@ -666,13 +740,15 @@ final class MenuBarBlackoutController {
     private func stepAway() {
         isAway = true
         dockAwayDebugLog("Menu bar blackout: the screen locked or slept")
+        cancelAllPendingBandSwaps()
+        cancelAllPendingHideChecks()
         for screen in NSScreen.screens { restoreWallpaper(on: screen) }
         for display in Array(overlays.keys) {
             hideOverlay(on: display, animated: false, reason: "the screen locked or slept")
         }
         fadesAwaitingWallpaper.removeAll()
         filledSince.removeAll()
-        unfilledSince.removeAll()
+        unfilledHideAt.removeAll()
         lastWallpaperCheck.removeAll()
         swappedWhileFilled.removeAll()
         textWillBeWhite.removeAll()
@@ -692,6 +768,7 @@ final class MenuBarBlackoutController {
             // macOS pictures the black on the desktop sliding in as the swipe
             // begins, so a sweep caught partway would arrive cut off and then
             // jump to its full width as the swipe lands.
+            cancelAllPendingBandSwaps()
             for overlay in overlays.values { overlay.finishSweep() }
             lookAheadForSwipe()
         } else {
@@ -849,23 +926,32 @@ final class MenuBarBlackoutController {
             // and opening again.
             let arrivedEmpty = currentSpaceID(display.id).flatMap { spaceFilled[$0] } == false
             if filled {
-                unfilledSince[display.id] = nil
+                unfilledHideAt[display.id] = nil
+                cancelPendingHideCheck(on: display.id)
             } else if overlays[display.id]?.isShown == true, !settledDesktop || !arrivedEmpty {
-                let since = unfilledSince[display.id] ?? now
-                unfilledSince[display.id] = since
+                let hideAt = unfilledHideAt[display.id]
+                    ?? (now + MenuBarBlackoutDecision.unfilledGraceDelay(settledDesktop: settledDesktop))
+                unfilledHideAt[display.id] = hideAt
                 // Keep the black through a brief gap, such as mid-transition.
-                if now - since < Self.hideDelay { filled = true }
+                if now < hideAt {
+                    filled = true
+                    schedulePendingHideCheck(on: display.id, after: hideAt - now)
+                }
             }
             if rememberedFilled[display.id] != filled {
                 rememberedFilled[display.id] = filled
                 if let space = currentSpaceID(display.id) { spaceFilled[space] = filled }
             }
-            if !filled { unfilledSince[display.id] = nil }
+            if !filled {
+                unfilledHideAt[display.id] = nil
+                cancelPendingHideCheck(on: display.id)
+            }
             if filling[display.id] == nil, filled { continue }
             if let window = filling[display.id] {
                 filledSince[display.id] = filledSince[display.id] ?? now
-                // The wallpaper swaps as the black sweeps in, so the menu bar
-                // text turns white while it opens.
+                // The banded wallpaper swaps once the opening sweep reaches the
+                // screen edges so the copy's full-width black band never
+                // cuts the slide-out short.
                 let checkedRecently = now - (lastWallpaperCheck[display.id] ?? 0) < Self.wallpaperCheckInterval
                 if checkWallpapers || !checkedRecently {
                     lastWallpaperCheck[display.id] = now
@@ -883,6 +969,7 @@ final class MenuBarBlackoutController {
                     hideOverlay(on: display.id, animated: true, reason: "the menu bar text wouldn't be white")
                 }
             } else {
+                cancelPendingBandSwap(on: display.id)
                 let wasFilled = filledSince.removeValue(forKey: display.id) != nil
                 lastWallpaperCheck[display.id] = nil
                 textWillBeWhite[display.id] = nil
@@ -937,6 +1024,10 @@ final class MenuBarBlackoutController {
     /// out of step. Rather than leave black text on black, the black goes and
     /// the wallpaper is put back, to be banded afresh at the next check.
     private func checkTextTurnedWhite(on screen: NSScreen, display: CGDirectDisplayID, now: TimeInterval) {
+        guard pendingBandSwaps[display] == nil else {
+            blackTextSince[display] = nil
+            return
+        }
         guard menuBarTextIsWhite(display) == false else {
             blackTextSince[display] = nil
             return
@@ -1021,10 +1112,17 @@ final class MenuBarBlackoutController {
 
     private func hideOverlay(on display: CGDirectDisplayID, animated: Bool, awaitingWallpaper: Bool = false,
                              quickly: Bool = false, reason: String) {
+        cancelPendingBandSwap(on: display)
+        cancelPendingHideCheck(on: display)
+        unfilledHideAt[display] = nil
         guard let overlay = overlays[display] else { return }
         if animated && awaitingWallpaper {
+            let wait = MenuBarBlackoutDecision.wallpaperRestoreWait(
+                hasNotch: overlay.hasNotch,
+                reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            )
             fadesAwaitingWallpaper.insert(display)
-            overlay.setShown(false, animated: true, after: Self.wallpaperShowTimeout, reason: reason)
+            overlay.setShown(false, animated: true, after: wait, reason: reason)
         } else {
             overlay.setShown(false, animated: animated, quickly: quickly, reason: reason)
         }
@@ -1116,7 +1214,9 @@ final class MenuBarBlackoutController {
 
     /// Returns whether the menu bar text will be white behind the black, or
     /// nil if that can't be told right now, as while DockAway's menu is open.
-    private func applyBand(on screen: NSScreen, display: CGDirectDisplayID, now: TimeInterval) -> Bool? {
+    private func applyBand(on screen: NSScreen, display: CGDirectDisplayID, now: TimeInterval,
+                           allowDefer: Bool = true) -> Bool? {
+        if allowDefer, pendingBandSwaps[display] != nil { return true }
         guard var inputs = wallpaperInputs(for: screen) else { return menuBarTextIsWhite(display) }
         if isBandedCopy(inputs.url) {
             guard let swap = swaps[inputs.url.lastPathComponent] else { return true }
@@ -1172,8 +1272,46 @@ final class MenuBarBlackoutController {
         }
         guard (swapsPausedUntil[display] ?? 0) <= now else { return false }
 
+        let overlay = overlays[display]
+        let deferDelay = MenuBarBlackoutDecision.bandSwapDelay(
+            allowDefer: allowDefer,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            overlayShown: overlay?.isShown == true,
+            overlayWaitingToHide: overlay?.isWaitingToHide == true,
+            remainingBarCoverDelay: overlay?.remainingBarCoverDelay ?? 0,
+            wipeInDuration: MenuBarBlackoutOverlay.wipeInDuration
+        )
+        if deferDelay > 0.01 {
+            let scheduledSpace = currentSpaceID(display)
+            let work = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.pendingBandSwaps.removeValue(forKey: display)
+                    guard self.isEnabled, !self.isAway, !self.desktopGestureActive,
+                          !self.isSwitchingDesktops(),
+                          self.filledSince[display] != nil,
+                          self.overlays[display]?.isShown == true,
+                          scheduledSpace == nil || self.currentSpaceID(display) == scheduledSpace,
+                          let screen = NSScreen.screen(withDisplayID: display) else { return }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    self.lastWallpaperCheck[display] = now
+                    if let white = self.applyBand(on: screen, display: display, now: now, allowDefer: false) {
+                        self.textWillBeWhite[display] = white
+                        if !white {
+                            self.hideOverlay(on: display, animated: true, reason: "the menu bar text wouldn't be white")
+                        }
+                    }
+                }
+            }
+            pendingBandSwaps[display] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + deferDelay, execute: work)
+            return true
+        }
+
         // Another app putting its wallpaper back while the window still fills
         // the screen means it's managing the wallpaper; stop competing for a while.
+        // Counted only here, as the swap happens, so a deferred swap isn't
+        // counted both when it's scheduled and when it runs.
         if swappedWhileFilled.contains(display) {
             let reverts = (wallpaperReverts[display] ?? 0) + 1
             wallpaperReverts[display] = reverts
@@ -1184,6 +1322,7 @@ final class MenuBarBlackoutController {
                 return false
             }
         }
+
         swappedWhileFilled.insert(display)
 
         let scaling = (options[.imageScaling] as? NSNumber)?.intValue ?? Int(NSImageScaling.scaleProportionallyUpOrDown.rawValue)
@@ -1569,8 +1708,10 @@ final class MenuBarBlackoutOverlay {
     /// Cancels a delayed sweep out when the black is wanted again first.
     private var fadeGeneration = 0
     private var fadeOutWaiting = false
+    /// System uptime when an opening bar sweep finishes covering the menu bar.
+    private var barCoveredAt: TimeInterval = 0
     /// The black opens out from the middle of the screen and closes back into it.
-    private static let wipeInDuration: TimeInterval = 0.85
+    static let wipeInDuration: TimeInterval = 0.85
     private static let wipeOutDuration: TimeInterval = 1.3
     /// For when the menu bar text is already, or about to be, black.
     private static let quickWipeDuration: TimeInterval = 0.6
@@ -1578,6 +1719,14 @@ final class MenuBarBlackoutOverlay {
 
     init(restoreToEveryDesktop: @escaping (NSWindow) -> Void) {
         self.restoreToEveryDesktop = restoreToEveryDesktop
+    }
+
+    var isWaitingToHide: Bool { fadeOutWaiting }
+
+    var hasNotch: Bool { frameView?.notch != nil }
+
+    var remainingBarCoverDelay: TimeInterval {
+        max(0, barCoveredAt - ProcessInfo.processInfo.systemUptime)
     }
 
     private var windows: [MenuBarBlackoutPanel] { [frame] }
@@ -1601,6 +1750,8 @@ final class MenuBarBlackoutOverlay {
                   reason: String) {
         guard animated else {
             fadeGeneration += 1
+            fadeOutWaiting = false
+            barCoveredAt = 0
             isShown = shown
             windows.forEach { $0.contentView?.alphaValue = shown ? 1 : 0 }
             frameView?.setRevealed(shown)
@@ -1630,6 +1781,7 @@ final class MenuBarBlackoutOverlay {
     /// Ends a sweep that's under way at once, where it was heading: fully
     /// open, or hidden.
     func finishSweep() {
+        barCoveredAt = 0
         guard let frameView, frameView.isSweeping else { return }
         if isShown {
             frameView.setRevealed(true)
@@ -1657,6 +1809,7 @@ final class MenuBarBlackoutOverlay {
         let windows = self.windows
         if shown { orderFront(windows) }
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            barCoveredAt = 0
             windows.forEach { $0.contentView?.alphaValue = shown ? 1 : 0 }
             frameView?.setRevealed(shown)
             if !shown { windows.forEach { $0.orderOut(nil) } }
@@ -1671,6 +1824,9 @@ final class MenuBarBlackoutOverlay {
             guard !shown, overlay.fadeGeneration == generation else { return }
             windows.forEach { $0.orderOut(nil) }
         }
+        barCoveredAt = (shown && frameView?.isSweeping == true)
+            ? ProcessInfo.processInfo.systemUptime + duration
+            : 0
     }
 }
 
@@ -1703,27 +1859,54 @@ private final class MenuBarBlackoutPanel: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
-/// The black menu bar and the thin frame down the window's sides, around an
+/// The black menu bar and thin frame down the window's sides, around an
 /// opening rounded like the window's corners, traced with a thin gray line
-/// like a window's border. Shape layers keep it sharp without a screen-sized
-/// image behind them.
+/// like a window's border. Built from plain composited layers and tiny
+/// pre-rendered corner/flare images so Core Animation never asks the window
+/// server to scan-convert screen-sized paths during a sweep.
 private final class MenuBarBlackoutFrameView: NSView {
-    private let black = CAShapeLayer()
-    private let border = CAShapeLayer()
+    /// The solid middle of the black menu bar, centered on the notch, with its
+    /// lower corners rounded like the notch.
+    private let barBody = CALayer()
+    /// Pre-rendered inward top flares at each end of the bar so only their
+    /// horizontal position moves during a sweep.
+    private let leftFlare = CALayer()
+    private let rightFlare = CALayer()
+    /// Keeps the bar to the menu bar.
+    private let barClip = CALayer()
+    /// Narrow perimeter clips covering the frame down the sides, top, and
+    /// bottom around the opening, leaving the middle of the screen untouched.
+    private let leftDropClip = CALayer()
+    private let rightDropClip = CALayer()
+    private let topDropClip = CALayer()
+    private let bottomDropClip = CALayer()
+    private let topLeftCorner = CALayer()
+    private let bottomLeftCorner = CALayer()
+    private let leftEdgeBlack = CALayer()
+    private let leftEdgeBorder = CALayer()
+    private let topRightCorner = CALayer()
+    private let bottomRightCorner = CALayer()
+    private let rightEdgeBlack = CALayer()
+    private let rightEdgeBorder = CALayer()
+    private let topEdgeBlack = CALayer()
+    private let topEdgeBorder = CALayer()
+    private let bottomEdgeBlack = CALayer()
+    private let bottomEdgeBorder = CALayer()
     private var geometry: [CGRect] = []
     private var radius: CGFloat = 0
-    /// A solid band centered on the notch that the black shows through. Its
-    /// ends are shaped like the sides of a MacBook Pro's notch, so it grows
-    /// out of the notch as a wider notch and shrinks back into it. Only the
-    /// ends move, so they keep their exact shape.
-    private let wipeMask = CAShapeLayer()
+    private var frameArea: CGRect = .zero
+    private var leftBand: CGRect = .zero
+    private var rightBand: CGRect = .zero
+    private var topBand: CGRect = .zero
+    private var bottomBand: CGRect = .zero
+    private var renderedScale: CGFloat = 0
     private var isRevealed = false
     /// The band's current width, from one end's outer edge to the other's.
     private var wipeWidth: CGFloat = 0
     /// The camera housing, in this view's coordinates.
     var notch: CGRect? {
         didSet {
-            guard notch != oldValue, wipeMask.animation(forKey: "wipe") == nil else { return }
+            guard notch != oldValue, barBody.animation(forKey: "wipe") == nil else { return }
             needsLayout = true
         }
     }
@@ -1731,6 +1914,9 @@ private final class MenuBarBlackoutFrameView: NSView {
     private static let notchBottomRadius: CGFloat = 10
     /// The small inward curves where the notch meets the top of the screen.
     private static let notchTopRadius: CGFloat = 6
+    /// Solid overlap tucked behind `barBody` so fractional x positions never
+    /// expose an anti-aliased seam between each flare and the body.
+    private static let flareOverlap: CGFloat = 1
     /// How much deeper than the notch the band's shaped ends reach.
     private static let extraNotchDepth: CGFloat = 1
     /// How long the extra point below the notch takes to rise back into it
@@ -1801,21 +1987,164 @@ private final class MenuBarBlackoutFrameView: NSView {
     private static let borderColor = NSColor(white: 1, alpha: 0.12).cgColor
     private static let borderWidth: CGFloat = 0.5
 
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {}
+
+    private var currentBackingScale: CGFloat {
+        max(1, window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        black.fillColor = NSColor.black.cgColor
-        black.fillRule = .evenOdd
-        border.fillColor = nil
-        border.strokeColor = Self.borderColor
-        border.lineWidth = Self.borderWidth
-        for shape in [black, border] {
-            shape.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
-            layer?.addSublayer(shape)
+        layerContentsRedrawPolicy = .never
+
+        barBody.anchorPoint = CGPoint(x: 0.5, y: 1)
+        barBody.backgroundColor = NSColor.black.cgColor
+        barBody.cornerCurve = .circular
+        barBody.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+
+        leftFlare.anchorPoint = CGPoint(x: 0, y: 1)
+        leftFlare.contentsGravity = .resize
+        rightFlare.anchorPoint = CGPoint(x: 1, y: 1)
+        rightFlare.contentsGravity = .resize
+        barClip.addSublayer(barBody)
+        barClip.addSublayer(leftFlare)
+        barClip.addSublayer(rightFlare)
+
+        for blackStrip in [leftEdgeBlack, rightEdgeBlack, topEdgeBlack, bottomEdgeBlack] {
+            blackStrip.backgroundColor = NSColor.black.cgColor
         }
-        wipeMask.fillColor = NSColor.black.cgColor
-        wipeMask.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()]
-        layer?.mask = wipeMask
+        for borderStrip in [leftEdgeBorder, rightEdgeBorder, topEdgeBorder, bottomEdgeBorder] {
+            borderStrip.backgroundColor = Self.borderColor
+        }
+        for sublayer in [topLeftCorner, bottomLeftCorner, leftEdgeBlack, leftEdgeBorder] {
+            leftDropClip.addSublayer(sublayer)
+        }
+        for sublayer in [topRightCorner, bottomRightCorner, rightEdgeBlack, rightEdgeBorder] {
+            rightDropClip.addSublayer(sublayer)
+        }
+        for sublayer in [topEdgeBlack, topEdgeBorder] {
+            topDropClip.addSublayer(sublayer)
+        }
+        for sublayer in [bottomEdgeBlack, bottomEdgeBorder] {
+            bottomDropClip.addSublayer(sublayer)
+        }
+
+        // Each clip's own coordinates are the view's, so the layers inside
+        // use the view's coordinates however the clip moves.
+        let clips = [barClip, leftDropClip, rightDropClip, topDropClip, bottomDropClip]
+        for clip in clips {
+            clip.anchorPoint = .zero
+            clip.masksToBounds = true
+            layer?.addSublayer(clip)
+        }
+        let allLayers = clips + [
+            barBody, leftFlare, rightFlare,
+            topLeftCorner, bottomLeftCorner, leftEdgeBlack, leftEdgeBorder,
+            topRightCorner, bottomRightCorner, rightEdgeBlack, rightEdgeBorder,
+            topEdgeBlack, topEdgeBorder, bottomEdgeBlack, bottomEdgeBorder
+        ]
+        let noActions: [String: CAAction] = [
+            "position": NSNull(), "bounds": NSNull(), "frame": NSNull(),
+            "cornerRadius": NSNull(), "contents": NSNull(), "hidden": NSNull()
+        ]
+        for item in allLayers {
+            if item !== barBody && item !== leftFlare && item !== rightFlare {
+                item.anchorPoint = .zero
+            }
+            item.actions = noActions
+        }
+        ensureFlareImages(scale: currentBackingScale)
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        let scale = currentBackingScale
+        guard scale != renderedScale else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        ensureFlareImages(scale: scale)
+        if geometry.count == 3 {
+            rebuildFrameLayers(menuBar: geometry[0], window: geometry[1], opening: geometry[2],
+                               radius: radius, scale: scale)
+            applyVisualState(width: wipeWidth, drop: wipeDrop, settle: isRevealed ? 0 : 1)
+        }
+        CATransaction.commit()
+    }
+
+    /// Clips `clip` to `rect`, in the view's coordinates.
+    private static func setClip(_ clip: CALayer, to rect: CGRect) {
+        clip.position = rect.origin
+        clip.bounds = rect
+    }
+
+    private func ensureFlareImages(scale: CGFloat) {
+        renderedScale = scale
+        leftFlare.contents = Self.makeFlareImage(rightSide: false, scale: scale)
+        leftFlare.contentsScale = scale
+        rightFlare.contents = Self.makeFlareImage(rightSide: true, scale: scale)
+        rightFlare.contentsScale = scale
+    }
+
+    private static func makeFlareImage(rightSide: Bool, scale: CGFloat) -> CGImage? {
+        let totalWidth = notchTopRadius + flareOverlap
+        let pw = max(1, Int((totalWidth * scale).rounded()))
+        let ph = max(1, Int((notchTopRadius * scale).rounded()))
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        context.scaleBy(x: CGFloat(pw) / totalWidth, y: CGFloat(ph) / notchTopRadius)
+        let fh = notchTopRadius * quarterCircle
+        let path = CGMutablePath()
+        if !rightSide {
+            path.move(to: CGPoint(x: 0, y: notchTopRadius))
+            path.addCurve(to: CGPoint(x: notchTopRadius, y: 0),
+                          control1: CGPoint(x: fh, y: notchTopRadius),
+                          control2: CGPoint(x: notchTopRadius, y: fh))
+            path.addLine(to: CGPoint(x: totalWidth, y: 0))
+            path.addLine(to: CGPoint(x: totalWidth, y: notchTopRadius))
+            path.closeSubpath()
+        } else {
+            path.move(to: .zero)
+            path.addLine(to: CGPoint(x: flareOverlap, y: 0))
+            path.addCurve(to: CGPoint(x: totalWidth, y: notchTopRadius),
+                          control1: CGPoint(x: flareOverlap, y: fh),
+                          control2: CGPoint(x: totalWidth - fh, y: notchTopRadius))
+            path.addLine(to: CGPoint(x: 0, y: notchTopRadius))
+            path.closeSubpath()
+        }
+        context.addPath(path)
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fillPath()
+        return context.makeImage()
+    }
+
+    private static func makeCornerImage(tileRect: CGRect, frameArea: CGRect, opening: CGRect,
+                                        radius: CGFloat, scale: CGFloat) -> CGImage? {
+        guard tileRect.width > 0, tileRect.height > 0 else { return nil }
+        let pw = max(1, Int((tileRect.width * scale).rounded()))
+        let ph = max(1, Int((tileRect.height * scale).rounded()))
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        context.scaleBy(x: CGFloat(pw) / tileRect.width, y: CGFloat(ph) / tileRect.height)
+        context.translateBy(x: -tileRect.minX, y: -tileRect.minY)
+        let blackPath = CGMutablePath()
+        blackPath.addRect(frameArea)
+        blackPath.addPath(roundedRect(opening, radius: radius))
+        context.addPath(blackPath)
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fillPath(using: .evenOdd)
+        let inset = borderWidth / 2
+        let strokePath = roundedRect(opening.insetBy(dx: inset, dy: inset), radius: max(0, radius - inset))
+        context.addPath(strokePath)
+        context.setStrokeColor(borderColor)
+        context.setLineWidth(borderWidth)
+        context.strokePath()
+        return context.makeImage()
     }
 
     private var menuBarHeight: CGFloat { geometry.first.map { bounds.maxY - $0.minY } ?? 0 }
@@ -1845,6 +2174,11 @@ private final class MenuBarBlackoutFrameView: NSView {
         return dockedDepth + (openDepth - dockedDepth) * openness(width: width)
     }
 
+    private func barDepth(width: CGFloat, settle: CGFloat = 0) -> CGFloat {
+        let lift = notch == nil ? min(1, max(0, width) / Self.skinnyWidth) : 1
+        return max(0, (wipeDepth(width: width) - (notch == nil ? 0 : Self.extraNotchDepth * settle)) * lift)
+    }
+
     /// How far open the band is, from 0 docked in the notch to 1 fully open.
     private func openness(width: CGFloat) -> CGFloat {
         let closed = wipeWidth(revealed: false), open = wipeWidth(revealed: true)
@@ -1869,54 +2203,159 @@ private final class MenuBarBlackoutFrameView: NSView {
     /// A cubic curve's handle for a quarter circle.
     private static let quarterCircle: CGFloat = 0.5523
 
-    /// The band, `width` wide and centered on the notch: down to the notch's
-    /// depth, each end the side of a notch (an inward curve meeting the top
-    /// of the screen, straight down, a rounded lower corner). Below the menu
-    /// bar, between the ends' straight sides, it reaches `drop` of the way
-    /// down the screen. Every width and drop has the same points, so only the
-    /// ends and that lower edge move.
-    private func wipePath(width: CGFloat, drop: CGFloat, settle: CGFloat = 0) -> CGPath {
-        let top = bounds.maxY
+    /// The band's outer edges for a width, and how far its ends' inward
+    /// curves and rounded corners have shrunk (1 is full size).
+    private func bandEdges(width: CGFloat) -> (left: CGFloat, right: CGFloat, shrink: CGFloat) {
         // Without a notch, once it's down to just its two ends it keeps
-        // narrowing, its curves shrinking to fit, and only when it's really
-        // skinny does it pull up toward the top of the screen until it's gone.
+        // narrowing, its curves shrinking to fit.
         let shrink = notch == nil ? min(1, max(0, width) / (2 * Self.endLength)) : 1
-        let lift = notch == nil ? min(1, max(0, width) / Self.skinnyWidth) : 1
-        // `settle` lets the extra point below the notch rise back into it at
-        // the very end of a close, or grow out of it at the start of an open.
-        let depth = (wipeDepth(width: width) - (notch == nil ? 0 : Self.extraNotchDepth * settle)) * lift
         let center = notch?.midX ?? bounds.midX
         let half = max(width, 2 * Self.endLength * shrink) / 2
-        let left = center - half, right = center + half
-        let flare = Self.notchTopRadius * shrink, corner = Self.notchBottomRadius * shrink
-        let handle = corner * Self.quarterCircle, flareHandle = flare * Self.quarterCircle
-        let bottom = top - depth
-        let path = CGMutablePath()
-        path.move(to: CGPoint(x: left, y: top))
-        // Left end: the inward curve, down the side, the rounded corner.
-        path.addCurve(to: CGPoint(x: left + flare, y: top - flare),
-                      control1: CGPoint(x: left + flareHandle, y: top),
-                      control2: CGPoint(x: left + flare, y: top - flare + flareHandle))
-        path.addLine(to: CGPoint(x: left + flare, y: bottom + corner))
-        path.addCurve(to: CGPoint(x: left + flare + corner, y: bottom),
-                      control1: CGPoint(x: left + flare, y: bottom + corner - handle),
-                      control2: CGPoint(x: left + flare + corner - handle, y: bottom))
-        // Along the bottom to the right end, the mirror image.
-        path.addLine(to: CGPoint(x: right - flare - corner, y: bottom))
-        path.addCurve(to: CGPoint(x: right - flare, y: bottom + corner),
-                      control1: CGPoint(x: right - flare - corner + handle, y: bottom),
-                      control2: CGPoint(x: right - flare, y: bottom + corner - handle))
-        path.addLine(to: CGPoint(x: right - flare, y: top - flare))
-        path.addCurve(to: CGPoint(x: right, y: top),
-                      control1: CGPoint(x: right - flare, y: top - flare + flareHandle),
-                      control2: CGPoint(x: right - flareHandle, y: top))
-        path.closeSubpath()
-        // Below the menu bar, growing down from it.
-        let barBottom = top - menuBarHeight
+        return (center - half, center + half, shrink)
+    }
+
+    /// How much of the black below the menu bar shows for a band `width`
+    /// wide: between the band's straight sides, growing down from the bar
+    /// `drop` of the way down the screen.
+    private func dropRect(width: CGFloat, drop: CGFloat) -> CGRect {
+        let (left, right, shrink) = bandEdges(width: width)
+        let flare = Self.notchTopRadius * shrink
+        let barBottom = bounds.maxY - menuBarHeight
         let reach = max(0, barBottom - bounds.minY) * min(1, max(0, drop))
-        path.addRect(CGRect(x: left + flare, y: barBottom - reach,
-                            width: max(0, right - left - 2 * flare), height: reach))
-        return path
+        return CGRect(x: left + flare, y: barBottom - reach, width: max(0, right - left - 2 * flare), height: reach)
+    }
+
+    private func barLayout(width: CGFloat, settle: CGFloat) -> (
+        centerX: CGFloat, top: CGFloat, depth: CGFloat,
+        left: CGFloat, right: CGFloat, flare: CGFloat,
+        bodyWidth: CGFloat, cornerRadius: CGFloat, shrink: CGFloat
+    ) {
+        let (left, right, shrink) = bandEdges(width: width)
+        let centerX = (left + right) / 2
+        let depth = barDepth(width: width, settle: settle)
+        let flare = Self.notchTopRadius * shrink
+        let corner = Self.notchBottomRadius * shrink
+        let bodyWidth = max(0, right - left - 2 * flare)
+        let cornerRadius = min(corner, depth / 2, bodyWidth / 2)
+        return (centerX, bounds.maxY, depth, left, right, flare, bodyWidth, cornerRadius, shrink)
+    }
+
+    /// Intersects a perimeter band with `dropRect`, returning a canonical zero-height
+    /// rect at the band's top edge whenever nothing is visible so keyframe
+    /// interpolation never jumps between unrelated coordinates.
+    private static func clippedBandRect(_ band: CGRect, by dropRect: CGRect) -> CGRect {
+        guard !band.isEmpty else { return .zero }
+        guard dropRect.height > 0, dropRect.width > 0 else {
+            return CGRect(x: band.minX, y: band.maxY, width: band.width, height: 0)
+        }
+        let minX = max(band.minX, min(band.maxX, dropRect.minX))
+        let maxX = max(minX, min(band.maxX, dropRect.maxX))
+        let maxY = max(band.minY, min(band.maxY, dropRect.maxY))
+        let minY = max(band.minY, min(maxY, dropRect.minY))
+        guard maxX > minX, maxY > minY else {
+            return CGRect(x: band.minX, y: band.maxY, width: band.width, height: 0)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    private func applyVisualState(width: CGFloat, drop: CGFloat, settle: CGFloat) {
+        let b = barLayout(width: width, settle: settle)
+        barBody.position = CGPoint(x: b.centerX, y: b.top)
+        barBody.bounds = CGRect(x: 0, y: 0, width: b.bodyWidth, height: b.depth)
+        barBody.cornerRadius = b.cornerRadius
+
+        let flareWidth = (Self.notchTopRadius + Self.flareOverlap) * b.shrink
+        let flareBounds = CGRect(x: 0, y: 0, width: flareWidth, height: b.flare)
+        leftFlare.position = CGPoint(x: b.left, y: b.top)
+        leftFlare.bounds = flareBounds
+        rightFlare.position = CGPoint(x: b.right, y: b.top)
+        rightFlare.bounds = flareBounds
+
+        let dr = dropRect(width: width, drop: drop)
+        Self.setClip(leftDropClip, to: Self.clippedBandRect(leftBand, by: dr))
+        Self.setClip(rightDropClip, to: Self.clippedBandRect(rightBand, by: dr))
+        Self.setClip(topDropClip, to: Self.clippedBandRect(topBand, by: dr))
+        Self.setClip(bottomDropClip, to: Self.clippedBandRect(bottomBand, by: dr))
+    }
+
+    private func rebuildFrameLayers(menuBar: CGRect, window: CGRect, opening: CGRect,
+                                    radius: CGFloat, scale: CGFloat) {
+        frameArea = CGRect(x: window.minX, y: window.minY, width: window.width,
+                           height: max(0, menuBar.minY - window.minY))
+        let allSublayers = [
+            topLeftCorner, bottomLeftCorner, leftEdgeBlack, leftEdgeBorder,
+            topRightCorner, bottomRightCorner, rightEdgeBlack, rightEdgeBorder,
+            topEdgeBlack, topEdgeBorder, bottomEdgeBlack, bottomEdgeBorder
+        ]
+        guard !frameArea.isEmpty else {
+            leftBand = .zero; rightBand = .zero; topBand = .zero; bottomBand = .zero
+            for layer in allSublayers { layer.frame = .zero }
+            for corner in [topLeftCorner, bottomLeftCorner, topRightCorner, bottomRightCorner] {
+                corner.contents = nil
+            }
+            return
+        }
+
+        let ext = min(radius > 0 ? ceil(radius * 1.6) + 2 : 2,
+                      floor(max(0, opening.width) / 2),
+                      floor(max(0, opening.height) / 2))
+        let leftMaxX = min(frameArea.maxX, max(frameArea.minX, ceil(opening.minX + ext)))
+        let rightMinX = max(leftMaxX, min(frameArea.maxX, floor(opening.maxX - ext)))
+        let tlMinY = max(frameArea.minY, min(frameArea.maxY, floor(opening.maxY - ext)))
+        let blMaxY = min(tlMinY, max(frameArea.minY, ceil(opening.minY + ext)))
+
+        leftBand = CGRect(x: frameArea.minX, y: frameArea.minY,
+                          width: leftMaxX - frameArea.minX, height: frameArea.height)
+        rightBand = CGRect(x: rightMinX, y: frameArea.minY,
+                           width: frameArea.maxX - rightMinX, height: frameArea.height)
+        let centerWidth = max(0, rightMinX - leftMaxX)
+        let topBandMinY = max(blMaxY, min(frameArea.maxY, opening.maxY - Self.borderWidth))
+        topBand = CGRect(x: leftMaxX, y: topBandMinY, width: centerWidth, height: frameArea.maxY - topBandMinY)
+        let bottomBandMaxY = max(frameArea.minY, min(topBandMinY, opening.minY + Self.borderWidth))
+        bottomBand = CGRect(x: leftMaxX, y: frameArea.minY, width: centerWidth, height: bottomBandMaxY - frameArea.minY)
+
+        func setCorner(_ layer: CALayer, _ rect: CGRect) {
+            if rect.width > 0, rect.height > 0 {
+                layer.frame = rect
+                layer.contents = Self.makeCornerImage(tileRect: rect, frameArea: frameArea,
+                                                      opening: opening, radius: radius, scale: scale)
+                layer.contentsScale = scale
+            } else {
+                layer.frame = .zero
+                layer.contents = nil
+            }
+        }
+        func setStrip(_ layer: CALayer, _ rect: CGRect) {
+            layer.frame = (rect.width > 0 && rect.height > 0) ? rect : .zero
+        }
+
+        let tlRect = CGRect(x: leftBand.minX, y: tlMinY, width: leftBand.width, height: frameArea.maxY - tlMinY)
+        let blRect = CGRect(x: leftBand.minX, y: frameArea.minY, width: leftBand.width, height: blMaxY - frameArea.minY)
+        let trRect = CGRect(x: rightBand.minX, y: tlMinY, width: rightBand.width, height: frameArea.maxY - tlMinY)
+        let brRect = CGRect(x: rightBand.minX, y: frameArea.minY, width: rightBand.width, height: blMaxY - frameArea.minY)
+        setCorner(topLeftCorner, tlRect)
+        setCorner(bottomLeftCorner, blRect)
+        setCorner(topRightCorner, trRect)
+        setCorner(bottomRightCorner, brRect)
+
+        let midY = blMaxY, midH = max(0, tlMinY - blMaxY)
+        let leftBlackX1 = max(leftBand.minX, min(leftBand.maxX, opening.minX))
+        let leftBorderX1 = max(leftBlackX1, min(leftBand.maxX, opening.minX + Self.borderWidth))
+        setStrip(leftEdgeBlack, CGRect(x: leftBand.minX, y: midY, width: leftBlackX1 - leftBand.minX, height: midH))
+        setStrip(leftEdgeBorder, CGRect(x: leftBlackX1, y: midY, width: leftBorderX1 - leftBlackX1, height: midH))
+
+        let rightBlackX0 = max(rightBand.minX, min(rightBand.maxX, opening.maxX))
+        let rightBorderX0 = min(rightBlackX0, max(rightBand.minX, opening.maxX - Self.borderWidth))
+        setStrip(rightEdgeBlack, CGRect(x: rightBlackX0, y: midY, width: rightBand.maxX - rightBlackX0, height: midH))
+        setStrip(rightEdgeBorder, CGRect(x: rightBorderX0, y: midY, width: rightBlackX0 - rightBorderX0, height: midH))
+
+        let topSplitY = max(topBand.minY, min(topBand.maxY, opening.maxY))
+        setStrip(topEdgeBlack, CGRect(x: topBand.minX, y: topSplitY, width: topBand.width, height: topBand.maxY - topSplitY))
+        setStrip(topEdgeBorder, CGRect(x: topBand.minX, y: topBand.minY, width: topBand.width, height: topSplitY - topBand.minY))
+
+        let bottomSplitY = max(bottomBand.minY, min(bottomBand.maxY, opening.minY))
+        setStrip(bottomEdgeBlack, CGRect(x: bottomBand.minX, y: bottomBand.minY, width: bottomBand.width, height: bottomSplitY - bottomBand.minY))
+        setStrip(bottomEdgeBorder, CGRect(x: bottomBand.minX, y: bottomSplitY, width: bottomBand.width, height: bottomBand.maxY - bottomSplitY))
     }
 
     /// Where a timing curve is at `x` of the way through, as CAMediaTimingFunction would put it.
@@ -1943,7 +2382,7 @@ private final class MenuBarBlackoutFrameView: NSView {
 
     /// Opens the black out of the notch, or closes it back into the notch.
     /// Whether the black is sweeping in or out right now.
-    var isSweeping: Bool { wipeMask.animation(forKey: "wipe") != nil }
+    var isSweeping: Bool { barBody.animation(forKey: "wipe") != nil }
 
     func setRevealed(_ revealed: Bool, duration: TimeInterval? = nil, completion: (() -> Void)? = nil) {
         wipeGeneration += 1
@@ -1959,9 +2398,20 @@ private final class MenuBarBlackoutFrameView: NSView {
         let barBottom = bounds.maxY - menuBarHeight
         let fullReach = max(1, barBottom - bounds.minY)
         let currentWidth: CGFloat, currentDrop: CGFloat
-        if wipeMask.animation(forKey: "wipe") != nil, let box = wipeMask.presentation()?.path?.boundingBox {
-            currentWidth = box.width
-            currentDrop = min(1, max(0, (barBottom - box.minY) / fullReach))
+        if barBody.animation(forKey: "wipe") != nil,
+           let leftX = leftFlare.presentation()?.position.x,
+           let rightX = rightFlare.presentation()?.position.x {
+            currentWidth = max(0, rightX - leftX)
+            let sampleClip = !leftBand.isEmpty ? leftDropClip : rightDropClip
+            if let clipBounds = sampleClip.presentation()?.bounds, clipBounds.height > 0.01 {
+                if !frameArea.isEmpty, clipBounds.minY <= frameArea.minY + 0.5 {
+                    currentDrop = 1
+                } else {
+                    currentDrop = min(1, max(0, (barBottom - clipBounds.minY) / fullReach))
+                }
+            } else {
+                currentDrop = 0
+            }
         } else {
             currentWidth = wipeWidth(revealed: wasRevealed)
             currentDrop = wasRevealed ? 1 : 0
@@ -1970,10 +2420,10 @@ private final class MenuBarBlackoutFrameView: NSView {
         wipeDrop = targetDrop
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        wipeMask.removeAnimation(forKey: "wipe")
-        wipeMask.frame = bounds
-        // Closed, the extra point below the notch is gone too.
-        wipeMask.path = wipePath(width: targetWidth, drop: targetDrop, settle: revealed ? 0 : 1)
+        for item in [barBody, leftFlare, rightFlare, leftDropClip, rightDropClip, topDropClip, bottomDropClip] {
+            item.removeAnimation(forKey: "wipe")
+        }
+        applyVisualState(width: targetWidth, drop: targetDrop, settle: revealed ? 0 : 1)
         let distance = abs(targetWidth - currentWidth)
         guard let duration, duration > 0, distance > 0.5 || abs(targetDrop - currentDrop) > 0.01 else {
             CATransaction.setCompletionBlock { completion?() }
@@ -1996,10 +2446,15 @@ private final class MenuBarBlackoutFrameView: NSView {
                                                              bounce: bounce, samplesPerSecond: samplesPerSecond)
             total = delay + moveDuration
             let count = max(2, Int(total * samplesPerSecond))
+            let maxIndex = offsets.count - 1
             frames = (0...count).map { index in
                 let t = total * Double(index) / Double(count)
-                let moving = max(0, t - delay) / moveDuration
-                let offset = offsets[min(offsets.count - 1, Int((moving * Double(offsets.count - 1)).rounded()))]
+                let moving = min(1, max(0, t - delay) / moveDuration)
+                let exact = moving * Double(maxIndex)
+                let low = min(maxIndex, Int(exact))
+                let high = min(maxIndex, low + 1)
+                let frac = CGFloat(exact - Double(low))
+                let offset = offsets[low] + (offsets[high] - offsets[low]) * frac
                 return (targetWidth + 2 * offset, currentDrop * (1 - Self.smooth(t / (glide * Self.dropRetract))))
             }
         } else {
@@ -2034,22 +2489,83 @@ private final class MenuBarBlackoutFrameView: NSView {
                 return (width, currentDrop + (targetDrop - currentDrop) * dropProgress)
             }
         }
-        let animation = CAKeyframeAnimation(keyPath: "path")
-        // The extra point below the notch: gone at the very end of a close,
-        // growing at the very start of an open.
+
         let count = max(1, frames.count - 1)
-        animation.values = frames.enumerated().map { index, frame in
+        let layouts = frames.enumerated().map { index, frame in
             let t = total * Double(index) / Double(count)
             let settled = revealed ? 1 - Self.smooth(t / settle) : Self.smooth((t - (total - settle)) / settle)
-            return wipePath(width: frame.width, drop: frame.drop, settle: settled)
+            return barLayout(width: frame.width, settle: settled)
         }
-        animation.calculationMode = .linear
-        animation.duration = total
+        // Keeps ProMotion at its full rate through the slow bounce.
+        let frameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+        func makeKeyframe(_ keyPath: String, _ values: [Any], duration keyDuration: Double) -> CAKeyframeAnimation {
+            let animation = CAKeyframeAnimation(keyPath: keyPath)
+            animation.values = values
+            animation.calculationMode = .linear
+            animation.duration = keyDuration
+            animation.preferredFrameRateRange = frameRateRange
+            return animation
+        }
+
         CATransaction.setCompletionBlock { [weak self] in
             guard self?.wipeGeneration == generation else { return }
             completion?()
         }
-        wipeMask.add(animation, forKey: "wipe")
+
+        let bodyBounds = makeKeyframe(
+            "bounds",
+            layouts.map { NSValue(rect: CGRect(x: 0, y: 0, width: $0.bodyWidth, height: $0.depth)) },
+            duration: total)
+        let cornerRadii = layouts.map(\.cornerRadius)
+        let bodyCornerVaries = cornerRadii.contains { abs($0 - barBody.cornerRadius) > 0.001 }
+        if bodyCornerVaries {
+            let radiusAnimation = makeKeyframe("cornerRadius", cornerRadii.map { NSNumber(value: Double($0)) }, duration: total)
+            let group = CAAnimationGroup()
+            group.animations = [bodyBounds, radiusAnimation]
+            group.duration = total
+            group.preferredFrameRateRange = frameRateRange
+            barBody.add(group, forKey: "wipe")
+        } else {
+            barBody.add(bodyBounds, forKey: "wipe")
+        }
+
+        let leftX = makeKeyframe("position.x", layouts.map { NSNumber(value: Double($0.left)) }, duration: total)
+        let rightX = makeKeyframe("position.x", layouts.map { NSNumber(value: Double($0.right)) }, duration: total)
+        let flareVaries = layouts.contains { abs($0.shrink - 1) > 0.001 }
+        if flareVaries {
+            let flareSizes = layouts.map {
+                NSValue(rect: CGRect(x: 0, y: 0, width: (Self.notchTopRadius + Self.flareOverlap) * $0.shrink,
+                                     height: $0.flare))
+            }
+            for (flareLayer, posAnimation) in [(leftFlare, leftX), (rightFlare, rightX)] {
+                let boundsAnimation = makeKeyframe("bounds", flareSizes, duration: total)
+                let group = CAAnimationGroup()
+                group.animations = [posAnimation, boundsAnimation]
+                group.duration = total
+                group.preferredFrameRateRange = frameRateRange
+                flareLayer.add(group, forKey: "wipe")
+            }
+        } else {
+            leftFlare.add(leftX, forKey: "wipe")
+            rightFlare.add(rightX, forKey: "wipe")
+        }
+
+        for (clip, band) in [(leftDropClip, leftBand), (rightDropClip, rightBand),
+                             (topDropClip, topBand), (bottomDropClip, bottomBand)] {
+            let rects = frames.map { Self.clippedBandRect(band, by: dropRect(width: $0.width, drop: $0.drop)) }
+            guard let lastNonEmpty = rects.lastIndex(where: { !$0.isEmpty }) else { continue }
+            let endIndex = revealed ? count : min(count, lastNonEmpty + 1)
+            let slice = Array(rects[0...endIndex])
+            let clipDuration = total * Double(endIndex) / Double(count)
+            let position = makeKeyframe("position", slice.map { NSValue(point: $0.origin) }, duration: clipDuration)
+            let clipBounds = makeKeyframe("bounds", slice.map { NSValue(rect: $0) }, duration: clipDuration)
+            let dropAnimation = CAAnimationGroup()
+            dropAnimation.animations = [position, clipBounds]
+            dropAnimation.duration = clipDuration
+            dropAnimation.preferredFrameRateRange = frameRateRange
+            clip.add(dropAnimation, forKey: "wipe")
+        }
+
         CATransaction.commit()
     }
 
@@ -2057,36 +2573,30 @@ private final class MenuBarBlackoutFrameView: NSView {
 
     /// In this view's coordinates (origin at the bottom left).
     func update(menuBar: CGRect, window: CGRect, opening: CGRect, radius: CGFloat) {
-        guard [menuBar, window, opening] != geometry || radius != self.radius else { return }
+        let scale = currentBackingScale
+        guard [menuBar, window, opening] != geometry || radius != self.radius || scale != renderedScale else { return }
         geometry = [menuBar, window, opening]
         self.radius = radius
-        let shape = Self.roundedRect(opening, radius: radius)
-        let blackPath = CGMutablePath()
-        // The menu bar and the window below it, without overlapping, so the
-        // opening is the only hole.
-        blackPath.addRect(menuBar)
-        blackPath.addRect(CGRect(x: window.minX, y: window.minY, width: window.width,
-                                 height: max(0, menuBar.minY - window.minY)))
-        blackPath.addPath(shape)
-        black.path = blackPath
-        // Just inside the opening's edge.
-        let inset = Self.borderWidth / 2
-        border.path = Self.roundedRect(opening.insetBy(dx: inset, dy: inset), radius: max(0, radius - inset))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        // The bar shows only over the menu bar, where it's solid black.
+        Self.setClip(barClip, to: menuBar)
+        ensureFlareImages(scale: scale)
+        rebuildFrameLayers(menuBar: menuBar, window: window, opening: opening, radius: radius, scale: scale)
+        applyVisualState(width: wipeWidth, drop: wipeDrop, settle: isRevealed ? 0 : 1)
+        CATransaction.commit()
     }
 
     override func layout() {
         super.layout()
-        black.frame = bounds
-        border.frame = bounds
-        if wipeMask.animation(forKey: "wipe") == nil {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if barBody.animation(forKey: "wipe") == nil {
             wipeWidth = wipeWidth(revealed: isRevealed)
             wipeDrop = isRevealed ? 1 : 0
-            wipeMask.frame = bounds
-            wipeMask.path = wipePath(width: wipeWidth, drop: wipeDrop)
-            CATransaction.commit()
+            applyVisualState(width: wipeWidth, drop: wipeDrop, settle: isRevealed ? 0 : 1)
         }
+        CATransaction.commit()
     }
 
     private static func roundedRect(_ rect: CGRect, radius: CGFloat) -> CGPath {

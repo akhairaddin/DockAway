@@ -115,31 +115,27 @@ enum SingleDisplayIndicatorStyle {
 }
 
 /// Defaults for the Menubar Dock/Desktop Indicator menu, including its Desktop
-/// Change Pill and Desktop Manager number style. A fresh install starts with
+/// Change Pill. A fresh install starts with
 /// these. An install that was set up with an earlier version keeps the look
 /// it already had for anything it never changed.
 enum MenuBarIndicatorDefaults {
     static let revisionKey = "menuBarIndicatorDefaultsRevision"
     static let currentRevision = 1
 
-    // Read by AppDelegate's desktop indicator style, DesktopNumberStylePreference
-    // and DesktopChangeTooltip.
+    // Read by AppDelegate's desktop indicator style and DesktopChangeTooltip.
     static let badgeKey = "DesktopIndicatorTextBadge"
     static let accentKey = "DesktopIndicatorTextAccent"
     static let fillActiveDisplayCountKey = "fillActiveDisplayCount"
-    static let numberStyleKey = "desktopNumberIndicatorStyle"
     static let desktopChangePillKey = "showDesktopChangeTooltip"
     static let desktopChangePillAppIconsKey = "desktopChangeTooltipShowsAppIcons"
 
     /// A filled desktop count without the accent color, filled only on the
-    /// active display; accent pill numbers in Desktop Manager; and the Desktop
-    /// Change Pill with app icons.
+    /// active display, and the Desktop Change Pill with app icons.
     static var values: [String: Any] {
         [
             badgeKey: 1, // Filled
             accentKey: false,
             fillActiveDisplayCountKey: true,
-            numberStyleKey: "accentPill",
             desktopChangePillKey: true,
             desktopChangePillAppIconsKey: true
         ]
@@ -153,7 +149,6 @@ enum MenuBarIndicatorDefaults {
             badgeKey: defaults.integer(forKey: "DesktopIndicatorAppearance") == 4 ? 1 : 0,
             accentKey: true,
             fillActiveDisplayCountKey: false,
-            numberStyleKey: "subtleShadow",
             desktopChangePillKey: false,
             desktopChangePillAppIconsKey: false
         ]

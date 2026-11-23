@@ -3133,8 +3133,8 @@ final class OnboardingPrimaryButton: NSButton {
     }
     private weak var blacklistClearActionView: DockSettingResetControlsRowView?
     private var currentBlacklistBundleIdentifier: String?
-    private weak var hoverActivationBlacklistMenu: NSMenu?
-    private weak var hoverActivationBlacklistClearActionView: DockSettingResetControlsRowView?
+    private weak var focusOnHoverBlacklistMenu: NSMenu?
+    private weak var focusOnHoverBlacklistClearActionView: DockSettingResetControlsRowView?
     private var dockSettingsMenu: NSMenu!
     private var dockPositionRowView: DockPositionRowView!
     private var dockAnimationSliderView: DockSettingSliderView!
@@ -3222,10 +3222,10 @@ final class OnboardingPrimaryButton: NSButton {
     private var finderDeleteKeyRowView: DockSettingPersistenceRowView?
     private var forceClickMiddleClickRowView: DockSettingPersistenceRowView?
     private var quickLookCopyOrientationRowView: DockSettingPersistenceRowView?
-    private var hoverActivationEnabledRowView: DockSettingToggleRowView?
-    private var hoverActivationPointerStopRowView: DockSettingToggleRowView?
-    private var hoverActivationRaiseRowView: DockSettingToggleRowView?
-    private var hoverActivationDelaySliderView: DockSettingSliderView?
+    private var focusOnHoverEnabledRowView: DockSettingToggleRowView?
+    private var focusOnHoverPointerStopRowView: DockSettingToggleRowView?
+    private var focusOnHoverRaiseRowView: DockSettingToggleRowView?
+    private var focusOnHoverDelaySliderView: DockSettingSliderView?
     private var keyboardNavigationRowViews: [DockSettingKeyRebindRowView] = []
     private var keyboardNavigationEnabledRowView: DockSettingToggleRowView?
     private var keyboardNavigationHandToggleRows: [NavigationHand: DockSettingHandToggleHeaderView] = [:]
@@ -3254,7 +3254,7 @@ final class OnboardingPrimaryButton: NSButton {
     /// Fingers on the trackpad, as MultitouchSupport last reported them.
     private var trackpadFingerCount = 0
     private let quickLookCopyOrientationManager = QuickLookCopyOrientationManager()
-    private let hoverActivationController = HoverActivationController()
+    private let focusOnHoverController = FocusOnHoverController()
     private let dockIconClickMinimizeController = DockIconClickMinimizeController()
     private let chromiumWebAppPlacementController = ChromiumWebAppPlacementController()
     private weak var chromiumWebAppPlacementRowView: DockSettingPersistenceRowView?
@@ -3551,11 +3551,11 @@ final class OnboardingPrimaryButton: NSButton {
             FinderDeleteKeyController.preferenceKey: false,
             ForceClickMiddleClickController.preferenceKey: false,
             QuickLookCopyOrientationManager.preferenceKey: false,
-            HoverActivationController.enabledPreferenceKey: false,
-            HoverActivationController.delayPreferenceKey: HoverActivationController.defaultDelay,
-            HoverActivationController.waitsForPointerToStopPreferenceKey: false,
-            HoverActivationController.raisesWindowPreferenceKey: false,
-            HoverActivationController.protectedBundleIdentifiersPreferenceKey: [String](),
+            FocusOnHoverController.enabledPreferenceKey: false,
+            FocusOnHoverController.delayPreferenceKey: FocusOnHoverController.defaultDelay,
+            FocusOnHoverController.waitsForPointerToStopPreferenceKey: false,
+            FocusOnHoverController.raisesWindowPreferenceKey: false,
+            FocusOnHoverController.protectedBundleIdentifiersPreferenceKey: [String](),
             DockIconClickMinimizeController.preferenceKey: false,
             DockIconClickMinimizeController.hidePreferenceKey: false,
             DockIconClickMinimizeController.cyclePreferenceKey: false,
@@ -3615,10 +3615,12 @@ final class OnboardingPrimaryButton: NSButton {
         finderDeleteKeyController.isSuppressed = { [weak self] in
             self?.statusMenuIsOpen == true
         }
-        // Mission Control's clicks go straight through: it ignores a click
-        // whose press and release arrive together, as a held press's do.
+        // Mission Control's clicks and DockAway's own modal alerts go straight through.
         forceClickMiddleClickController.isSuppressed = { [weak self] in
-            self?.statusMenuIsOpen == true || self?.dockWatcher?.isMissionControlActive == true
+            self?.statusMenuIsOpen == true
+                || NSApp.modalWindow != nil
+                || StatusMenuFocus.keepsFocusForWindow
+                || self?.dockWatcher?.isMissionControlActive == true
         }
         // Tells a trackpad click from a mouse's. Unknown while the watcher
         // isn't running, as when DockAway is paused.
@@ -3646,14 +3648,19 @@ final class OnboardingPrimaryButton: NSButton {
         refreshFinderDeleteKeyController()
         refreshForceClickMiddleClickController()
         refreshQuickLookCopyOrientationManager()
-        hoverActivationController.isSuppressed = { [weak self] in
+        focusOnHoverController.isSuppressed = { [weak self] in
             guard let self else { return true }
+            // A DockAway alert keeps focus until it's answered; activating
+            // another app under the pointer would also take the alert's
+            // text field's I-beam away.
             return self.statusMenuIsOpen
+                || NSApp.modalWindow != nil
+                || StatusMenuFocus.keepsFocusForWindow
                 || !self.dockAwayEnabled
                 || !self.automaticSuspensionReasons.isEmpty
                 || self.dockWatcher?.isMissionControlActive == true
         }
-        refreshHoverActivationController()
+        refreshFocusOnHoverController()
         ScrollActivity.startWatching()
         startPermissionHealthMonitoring()
         runtimePermissionAccess.start { [weak self] in
@@ -3990,7 +3997,7 @@ final class OnboardingPrimaryButton: NSButton {
     }
 
     @objc private func handleSpaceDidChange() {
-        hoverActivationController.beginSpaceTransition()
+        focusOnHoverController.beginSpaceTransition()
         refreshDesktopTiles()
         updateMenuBarDesktopBadge()
         refreshDesktopIndicatorAppearanceMenu()
@@ -5480,36 +5487,36 @@ final class OnboardingPrimaryButton: NSButton {
         dockAwaySettingsMenu.addItem(teleportWindowMoveItem)
         dockAwaySettingsMenu.addItem(wideMenuSeparator(width: settingsRowWidth, leadingInset: 14, trailingInset: 14))
 
-        let hoverActivationTitle = "Activate on Hover"
-        let hoverActivationItem = NSMenuItem(
-            title: hoverActivationTitle,
+        let focusOnHoverTitle = "Focus on Hover"
+        let focusOnHoverItem = NSMenuItem(
+            title: focusOnHoverTitle,
             action: nil,
             keyEquivalent: ""
         )
-        let hoverActivationIcon = NSImage(
+        let focusOnHoverIcon = NSImage(
             systemSymbolName: "cursorarrow.motionlines",
-            accessibilityDescription: hoverActivationTitle
+            accessibilityDescription: focusOnHoverTitle
         ) ?? NSImage(
             systemSymbolName: "cursorarrow",
-            accessibilityDescription: hoverActivationTitle
+            accessibilityDescription: focusOnHoverTitle
         )
-        hoverActivationItem.view = DockAwayMenuRowView(
-            title: hoverActivationTitle,
-            icon: hoverActivationIcon,
+        focusOnHoverItem.view = DockAwayMenuRowView(
+            title: focusOnHoverTitle,
+            icon: focusOnHoverIcon,
             hasSubmenu: true,
             leadingInset: 12,
             titleLeadingAdjustment: 0,
             width: settingsRowWidth
         )
-        hoverActivationItem.state = .on
-        hoverActivationItem.onStateImage = menuIcon(from: hoverActivationIcon)
+        focusOnHoverItem.state = .on
+        focusOnHoverItem.onStateImage = menuIcon(from: focusOnHoverIcon)
 
-        let hoverActivationMenu = NSMenu(title: hoverActivationTitle)
-        hoverActivationMenu.autoenablesItems = false
-        hoverActivationMenu.delegate = self
-        let hoverActivationRowWidth = max(settingsRowWidth, 330)
+        let focusOnHoverMenu = NSMenu(title: focusOnHoverTitle)
+        focusOnHoverMenu.autoenablesItems = false
+        focusOnHoverMenu.delegate = self
+        let focusOnHoverRowWidth = max(settingsRowWidth, 330)
 
-        let hoverEnabledTitle = "Activate on Hover"
+        let hoverEnabledTitle = "Focus on Hover"
         let hoverEnabledItem = NSMenuItem(
             title: hoverEnabledTitle,
             action: nil,
@@ -5517,59 +5524,59 @@ final class OnboardingPrimaryButton: NSButton {
         )
         let hoverEnabledRow = DockSettingToggleRowView(
             title: hoverEnabledTitle,
-            isOn: HoverActivationController.isEnabled,
-            width: hoverActivationRowWidth,
+            isOn: FocusOnHoverController.isEnabled,
+            width: focusOnHoverRowWidth,
             leadingInset: 18,
             trailingInset: 12,
             helpHeading: hoverEnabledTitle,
             helpTextProvider: {
-                "Makes the window under your pointer the active one after the delay below, without a click, so what you type goes where you're pointing.\n\n• Bring Window to Front decides whether it also comes above the windows overlapping it.\n• Wait for Pointer to Stop holds off until the pointer settles.\n• Nothing changes while a menu is open, a mouse button is held, or a desktop is switching.\n• Apps in the Focus Prevention Blacklist aren't activated this way, and keep focus while they're in front."
+                "Focuses the window under your pointer after the delay below, without a click, so what you type goes where you're pointing.\n\n• Bring Window to Front decides whether it also comes above the windows overlapping it.\n• Wait for Pointer to Stop holds off until the pointer settles.\n• Nothing changes while a menu is open, a mouse button is held, or a desktop is switching.\n• Apps in the Focus Prevention Blacklist aren't focused this way, and keep focus while they're in front."
             }
         ) { [weak self] enabled in
             UserDefaults.standard.set(
                 enabled,
-                forKey: HoverActivationController.enabledPreferenceKey
+                forKey: FocusOnHoverController.enabledPreferenceKey
             )
-            self?.hoverActivationEnabledRowView?.setOn(enabled)
-            self?.refreshHoverActivationController()
+            self?.focusOnHoverEnabledRowView?.setOn(enabled)
+            self?.refreshFocusOnHoverController()
         }
         hoverEnabledItem.view = hoverEnabledRow
-        self.hoverActivationEnabledRowView = hoverEnabledRow
-        hoverActivationMenu.addItem(hoverEnabledItem)
-        hoverActivationMenu.addItem(wideMenuSeparator(
-            width: hoverActivationRowWidth,
+        self.focusOnHoverEnabledRowView = hoverEnabledRow
+        focusOnHoverMenu.addItem(hoverEnabledItem)
+        focusOnHoverMenu.addItem(wideMenuSeparator(
+            width: focusOnHoverRowWidth,
             leadingInset: 18,
             trailingInset: 14
         ))
 
-        let hoverDelayItem = NSMenuItem(title: "Hover Activation Delay", action: nil, keyEquivalent: "")
+        let hoverDelayItem = NSMenuItem(title: "Focus Delay", action: nil, keyEquivalent: "")
         let hoverDelayView = DockSettingSliderView(
-            title: "Hover Activation Delay",
+            title: "Focus Delay",
             leadingTitle: "Instant",
             trailingTitle: "2 sec",
-            accessibilityLabel: "Hover activation delay",
-            accessibilityHelp: "Set how long the pointer must remain over a window before it becomes active.",
-            width: hoverActivationRowWidth,
-            helpHeading: "Hover Activation Delay",
+            accessibilityLabel: "Hover focus delay",
+            accessibilityHelp: "Set how long the pointer must remain over a window before it receives focus.",
+            width: focusOnHoverRowWidth,
+            helpHeading: "Focus Delay",
             helpTextProvider: {
-                "Controls how long your pointer must remain over a window before DockAway activates it.\n\n• Slide left for immediate activation.\n• A short delay prevents windows from activating while you simply pass over them.\n• Changes apply immediately."
+                "Controls how long your pointer must remain over a window before DockAway focuses it.\n\n• Slide left for immediate focus.\n• A short delay prevents windows from taking focus while you simply pass over them.\n• Changes apply immediately."
             }
         )
         hoverDelayView.slider.minValue = 0
         hoverDelayView.slider.maxValue = 2
         hoverDelayView.slider.snapMarkerValues = [0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5]
         hoverDelayView.slider.target = self
-        hoverDelayView.slider.action = #selector(previewHoverActivationDelay(_:))
+        hoverDelayView.slider.action = #selector(previewFocusOnHoverDelay(_:))
         hoverDelayView.slider.commitHandler = { [weak self] delay in
             UserDefaults.standard.set(
                 delay,
-                forKey: HoverActivationController.delayPreferenceKey
+                forKey: FocusOnHoverController.delayPreferenceKey
             )
-            self?.refreshHoverActivationMenu()
+            self?.refreshFocusOnHoverMenu()
         }
         hoverDelayItem.view = hoverDelayView
-        self.hoverActivationDelaySliderView = hoverDelayView
-        hoverActivationMenu.addItem(hoverDelayItem)
+        self.focusOnHoverDelaySliderView = hoverDelayView
+        focusOnHoverMenu.addItem(hoverDelayItem)
 
         let pointerStopTitle = "Wait for Pointer to Stop"
         let pointerStopItem = NSMenuItem(
@@ -5579,52 +5586,52 @@ final class OnboardingPrimaryButton: NSButton {
         )
         let pointerStopRow = DockSettingToggleRowView(
             title: pointerStopTitle,
-            isOn: HoverActivationController.waitsForPointerToStop,
-            width: hoverActivationRowWidth,
+            isOn: FocusOnHoverController.waitsForPointerToStop,
+            width: focusOnHoverRowWidth,
             leadingInset: 18,
             trailingInset: 12,
             helpHeading: pointerStopTitle,
             helpTextProvider: {
-                "Waits until the pointer stops moving before focusing or bringing a window forward.\n\n• The Hover Activation Delay starts over whenever the pointer moves.\n• Windows you pass over on the way somewhere else are left alone."
+                "Waits until the pointer stops moving before focusing or bringing a window forward.\n\n• The Focus Delay starts over whenever the pointer moves.\n• Windows you pass over on the way somewhere else are left alone."
             }
         ) { [weak self] enabled in
             UserDefaults.standard.set(
                 enabled,
-                forKey: HoverActivationController.waitsForPointerToStopPreferenceKey
+                forKey: FocusOnHoverController.waitsForPointerToStopPreferenceKey
             )
-            self?.hoverActivationPointerStopRowView?.setOn(enabled)
+            self?.focusOnHoverPointerStopRowView?.setOn(enabled)
         }
         pointerStopRow.toggleControl.setAccessibilityHelp(
-            "Waits until the pointer stops moving before focusing or bringing a window forward. The hover activation delay restarts whenever the pointer moves."
+            "Waits until the pointer stops moving before focusing or bringing a window forward. The hover focus delay restarts whenever the pointer moves."
         )
         pointerStopItem.view = pointerStopRow
-        self.hoverActivationPointerStopRowView = pointerStopRow
-        hoverActivationMenu.addItem(pointerStopItem)
+        self.focusOnHoverPointerStopRowView = pointerStopRow
+        focusOnHoverMenu.addItem(pointerStopItem)
 
         let raiseTitle = "Bring Window to Front"
         let raiseItem = NSMenuItem(title: raiseTitle, action: nil, keyEquivalent: "")
         let raiseRow = DockSettingToggleRowView(
             title: raiseTitle,
-            isOn: HoverActivationController.raisesWindow,
-            width: hoverActivationRowWidth,
+            isOn: FocusOnHoverController.raisesWindow,
+            width: focusOnHoverRowWidth,
             leadingInset: 18,
             trailingInset: 12,
             helpHeading: raiseTitle,
             helpTextProvider: {
-                "Raises the exact hovered window above overlapping windows when it becomes active.\n\nTurn this off when you want keyboard focus to follow the pointer with the least possible change to window order."
+                "Raises the exact hovered window above overlapping windows when it receives focus.\n\nTurn this off when you want keyboard focus to follow the pointer with the least possible change to window order."
             }
         ) { [weak self] enabled in
             UserDefaults.standard.set(
                 enabled,
-                forKey: HoverActivationController.raisesWindowPreferenceKey
+                forKey: FocusOnHoverController.raisesWindowPreferenceKey
             )
-            self?.hoverActivationRaiseRowView?.setOn(enabled)
+            self?.focusOnHoverRaiseRowView?.setOn(enabled)
         }
         raiseItem.view = raiseRow
-        self.hoverActivationRaiseRowView = raiseRow
-        hoverActivationMenu.addItem(raiseItem)
-        hoverActivationMenu.addItem(wideMenuSeparator(
-            width: hoverActivationRowWidth,
+        self.focusOnHoverRaiseRowView = raiseRow
+        focusOnHoverMenu.addItem(raiseItem)
+        focusOnHoverMenu.addItem(wideMenuSeparator(
+            width: focusOnHoverRowWidth,
             leadingInset: 18,
             trailingInset: 14
         ))
@@ -5643,18 +5650,18 @@ final class OnboardingPrimaryButton: NSButton {
             hasSubmenu: true,
             leadingInset: 18,
             titleLeadingAdjustment: 1,
-            width: hoverActivationRowWidth
+            width: focusOnHoverRowWidth
         )
         let focusBlacklistMenu = NSMenu(title: "Focus Prevention Blacklist")
         focusBlacklistMenu.autoenablesItems = false
         focusBlacklistMenu.delegate = self
         focusBlacklistItem.submenu = focusBlacklistMenu
-        self.hoverActivationBlacklistMenu = focusBlacklistMenu
-        rebuildHoverActivationBlacklistMenu()
-        hoverActivationMenu.addItem(focusBlacklistItem)
+        self.focusOnHoverBlacklistMenu = focusBlacklistMenu
+        rebuildFocusOnHoverBlacklistMenu()
+        focusOnHoverMenu.addItem(focusBlacklistItem)
 
-        hoverActivationItem.submenu = hoverActivationMenu
-        dockAwaySettingsMenu.addItem(hoverActivationItem)
+        focusOnHoverItem.submenu = focusOnHoverMenu
+        dockAwaySettingsMenu.addItem(focusOnHoverItem)
 
         let displayOrderItem = NSMenuItem(title: "List Active Display on Top", action: nil, keyEquivalent: "")
         displayOrderItem.view = SubmenuLabelView.displayOrder()
@@ -6087,18 +6094,6 @@ final class OnboardingPrimaryButton: NSButton {
                 separatorItem.view = SubmenuLabelView.indicatorSeparator()
                 separatorItem.submenu = separatorMenu
                 desktopIndicatorAppearanceMenu.addItem(separatorItem)
-
-                let numberStyleMenu = DesktopNumberIndicatorMenu()
-                numberStyleMenu.onChange = { [weak self] in
-                    guard let self else { return }
-                    self.updateDockAwayMenuState()
-                    self.updateMenuBarDesktopBadge(liveCustomization: true)
-                }
-                let numberStyleItem = NSMenuItem(title: "Desktop Manager Number Style", action: nil, keyEquivalent: "")
-                numberStyleItem.tag = -109
-                numberStyleItem.view = SubmenuLabelView.desktopNumberIndicator()
-                numberStyleItem.submenu = numberStyleMenu
-                desktopIndicatorAppearanceMenu.addItem(numberStyleItem)
             }
         }
         desktopIndicatorAppearanceItem.submenu = desktopIndicatorAppearanceMenu
@@ -7322,7 +7317,7 @@ final class OnboardingPrimaryButton: NSButton {
         rainbowAppleMenuBarRowView?.setOn(
             UserDefaults.standard.bool(forKey: RainbowAppleMenuBarController.preferenceKey)
         )
-        refreshHoverActivationMenu()
+        refreshFocusOnHoverMenu()
         chromiumWebAppPlacementRowView?.setOn(
             ChromiumWebAppPlacementController.isEnabled
         )
@@ -7367,26 +7362,26 @@ final class OnboardingPrimaryButton: NSButton {
         )
     }
 
-    private func refreshHoverActivationController() {
-        hoverActivationController.setEnabled(
-            HoverActivationController.isEnabled
+    private func refreshFocusOnHoverController() {
+        focusOnHoverController.setEnabled(
+            FocusOnHoverController.isEnabled
                 && accessibilityAccessGranted
                 && dockAwayEnabled
         )
-        refreshHoverActivationMenu()
+        refreshFocusOnHoverMenu()
     }
 
-    private func refreshHoverActivationMenu() {
-        let enabled = HoverActivationController.isEnabled
-        hoverActivationEnabledRowView?.setOn(enabled)
-        hoverActivationPointerStopRowView?.setOn(
-            HoverActivationController.waitsForPointerToStop
+    private func refreshFocusOnHoverMenu() {
+        let enabled = FocusOnHoverController.isEnabled
+        focusOnHoverEnabledRowView?.setOn(enabled)
+        focusOnHoverPointerStopRowView?.setOn(
+            FocusOnHoverController.waitsForPointerToStop
         )
-        hoverActivationPointerStopRowView?.setControlEnabled(enabled, updateMenuItem: false)
-        hoverActivationRaiseRowView?.setOn(HoverActivationController.raisesWindow)
-        hoverActivationRaiseRowView?.setControlEnabled(enabled, updateMenuItem: false)
-        hoverActivationDelaySliderView?.slider.isEnabled = enabled
-        let delay = HoverActivationController.delay
+        focusOnHoverPointerStopRowView?.setControlEnabled(enabled, updateMenuItem: false)
+        focusOnHoverRaiseRowView?.setOn(FocusOnHoverController.raisesWindow)
+        focusOnHoverRaiseRowView?.setControlEnabled(enabled, updateMenuItem: false)
+        focusOnHoverDelaySliderView?.slider.isEnabled = enabled
+        let delay = FocusOnHoverController.delay
         let delayText: String
         if delay < 0.005 {
             delayText = "Instant"
@@ -7395,10 +7390,10 @@ final class OnboardingPrimaryButton: NSButton {
         } else {
             delayText = String(format: "%.1f sec", delay)
         }
-        hoverActivationDelaySliderView?.setValue(delay, displayText: delayText)
+        focusOnHoverDelaySliderView?.setValue(delay, displayText: delayText)
     }
 
-    @objc private func previewHoverActivationDelay(_ sender: NSSlider) {
+    @objc private func previewFocusOnHoverDelay(_ sender: NSSlider) {
         let delay = sender.doubleValue
         let text: String
         if delay < 0.005 {
@@ -7408,7 +7403,7 @@ final class OnboardingPrimaryButton: NSButton {
         } else {
             text = String(format: "%.1f sec", delay)
         }
-        hoverActivationDelaySliderView?.setValue(delay, displayText: text)
+        focusOnHoverDelaySliderView?.setValue(delay, displayText: text)
     }
 
     /// Minimize and hide exclude each other. Cycle combines with either one,
@@ -7740,13 +7735,6 @@ final class OnboardingPrimaryButton: NSButton {
                     item.view = SubmenuLabelView.indicatorSeparator()
                 }
                 separatorMenu.update(style.separator)
-                continue
-            }
-            if let numberStyleMenu = item.submenu as? DesktopNumberIndicatorMenu {
-                if item.view == nil {
-                    item.view = SubmenuLabelView.desktopNumberIndicator()
-                }
-                numberStyleMenu.syncSelection()
                 continue
             }
             if let options = item.view as? DesktopIndicatorStyleOptionsView {
@@ -8514,13 +8502,13 @@ final class OnboardingPrimaryButton: NSButton {
         }
     }
 
-    // MARK: - Hover Activation Focus Prevention
+    // MARK: - Focus on Hover Focus Prevention
 
-    private func rebuildHoverActivationBlacklistMenu() {
-        guard let menu = hoverActivationBlacklistMenu else { return }
+    private func rebuildFocusOnHoverBlacklistMenu() {
+        guard let menu = focusOnHoverBlacklistMenu else { return }
         menu.removeAllItems()
 
-        let protectedIdentifiers = HoverActivationController.protectedBundleIdentifiers
+        let protectedIdentifiers = FocusOnHoverController.protectedBundleIdentifiers
         var applicationsByIdentifier = [String: BlacklistApplication]()
         var currentApplication: BlacklistApplication?
 
@@ -8630,7 +8618,7 @@ final class OnboardingPrimaryButton: NSButton {
         ) { [weak self, weak menu] in
             menu?.cancelTracking()
             DispatchQueue.main.async {
-                self?.chooseHoverActivationProtectedApplications()
+                self?.chooseFocusOnHoverProtectedApplications()
             }
         }
         chooseItem.view = chooseView
@@ -8644,11 +8632,11 @@ final class OnboardingPrimaryButton: NSButton {
             width: 280,
             leadingInset: 18
         ) { [weak self] in
-            self?.clearHoverActivationProtectedApplications()
+            self?.clearFocusOnHoverProtectedApplications()
         }
         clearItem.view = clearView
         clearView.setControlEnabled(!protectedIdentifiers.isEmpty)
-        hoverActivationBlacklistClearActionView = clearView
+        focusOnHoverBlacklistClearActionView = clearView
         menu.addItem(clearItem)
 
         menu.addItem(wideMenuSeparator(width: 280, leadingInset: 18, trailingInset: 14))
@@ -8661,10 +8649,10 @@ final class OnboardingPrimaryButton: NSButton {
             iconTrailingInset: 14,
             text: {
                 """
-                Prevents Hover Activation from activating blacklisted applications or switching focus away when they are active.
+                Prevents Focus on Hover from focusing blacklisted applications or switching focus away when they are active.
 
                 • Keeps keyboard and window focus locked to the frontmost app even when your cursor hovers over background windows.
-                • Excludes blacklisted apps from being auto-activated or brought forward on hover.
+                • Excludes blacklisted apps from being auto-focused or brought forward on hover.
                 • Ideal for launchers, quick-search tools, and floating panels (e.g., Spotlight, Raycast, Alfred, rcmd, or SuperCmd) so their popups do not disappear accidentally.
                 • Clicking another application or window with your mouse still switches focus immediately.
                 • Select any running application from the list above or click “Choose Application…” to add any installed app.
@@ -8697,7 +8685,7 @@ final class OnboardingPrimaryButton: NSButton {
                 accessibilityDescription: "Application"
             )
         ) { [weak self] isProtected in
-            self?.setHoverActivationProtectedApplication(
+            self?.setFocusOnHoverProtectedApplication(
                 application.bundleIdentifier,
                 isProtected: isProtected
             )
@@ -8712,7 +8700,7 @@ final class OnboardingPrimaryButton: NSButton {
             return true
         }
 
-        if HoverActivationDecision.isInteractiveAccessoryApp(bundleIdentifier: application.bundleIdentifier) {
+        if FocusOnHoverDecision.isInteractiveAccessoryApp(bundleIdentifier: application.bundleIdentifier) {
             return true
         }
 
@@ -8745,30 +8733,30 @@ final class OnboardingPrimaryButton: NSButton {
         return true
     }
 
-    private func setHoverActivationProtectedApplication(
+    private func setFocusOnHoverProtectedApplication(
         _ bundleIdentifier: String,
         isProtected: Bool
     ) {
-        var identifiers = HoverActivationController.protectedBundleIdentifiers
+        var identifiers = FocusOnHoverController.protectedBundleIdentifiers
         if isProtected {
             identifiers.insert(bundleIdentifier)
         } else {
             identifiers.remove(bundleIdentifier)
         }
-        saveHoverActivationProtectedBundleIdentifiers(identifiers)
+        saveFocusOnHoverProtectedBundleIdentifiers(identifiers)
     }
 
-    private func saveHoverActivationProtectedBundleIdentifiers(
+    private func saveFocusOnHoverProtectedBundleIdentifiers(
         _ identifiers: Set<String>
     ) {
         UserDefaults.standard.set(
             identifiers.sorted(),
-            forKey: HoverActivationController.protectedBundleIdentifiersPreferenceKey
+            forKey: FocusOnHoverController.protectedBundleIdentifiersPreferenceKey
         )
-        hoverActivationBlacklistClearActionView?.setControlEnabled(!identifiers.isEmpty)
+        focusOnHoverBlacklistClearActionView?.setControlEnabled(!identifiers.isEmpty)
     }
 
-    private func chooseHoverActivationProtectedApplications() {
+    private func chooseFocusOnHoverProtectedApplications() {
         let panel = NSOpenPanel()
         panel.title = "Choose Applications to Blacklist"
         panel.prompt = "Blacklist"
@@ -8784,23 +8772,23 @@ final class OnboardingPrimaryButton: NSButton {
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard let self, response == .OK else { return }
-            var identifiers = HoverActivationController.protectedBundleIdentifiers
+            var identifiers = FocusOnHoverController.protectedBundleIdentifiers
             for url in panel.urls {
                 if let bundleIdentifier = Bundle(url: url)?.bundleIdentifier,
                    bundleIdentifier != Bundle.main.bundleIdentifier {
                     identifiers.insert(bundleIdentifier)
                 }
             }
-            self.saveHoverActivationProtectedBundleIdentifiers(identifiers)
-            self.rebuildHoverActivationBlacklistMenu()
+            self.saveFocusOnHoverProtectedBundleIdentifiers(identifiers)
+            self.rebuildFocusOnHoverBlacklistMenu()
         }
     }
 
-    private func clearHoverActivationProtectedApplications() {
-        saveHoverActivationProtectedBundleIdentifiers([])
+    private func clearFocusOnHoverProtectedApplications() {
+        saveFocusOnHoverProtectedBundleIdentifiers([])
         // Uncheck in place, like the Auto-Hide Blacklist, so "Remove All" can
         // show that it worked instead of being rebuilt away.
-        for item in hoverActivationBlacklistMenu?.items ?? [] {
+        for item in focusOnHoverBlacklistMenu?.items ?? [] {
             guard item.representedObject is String,
                   let rowView = item.view as? DockSettingPersistenceRowView else { continue }
             rowView.setOn(false)
@@ -9279,7 +9267,7 @@ final class OnboardingPrimaryButton: NSButton {
         }
 
         refreshDockIconClickMinimizeController()
-        refreshHoverActivationController()
+        refreshFocusOnHoverController()
         refreshChromiumWebAppPlacementController()
         refreshForceClickMiddleClickController()
         refreshFinderDeleteKeyController()
@@ -9687,7 +9675,7 @@ final class OnboardingPrimaryButton: NSButton {
         // Prevent menuDidClose from reactivating the previous application on the old desktop,
         // which triggers an incomplete macOS slide animation back to the origin space.
         settingsMenuPreviousApplication = nil
-        hoverActivationController.beginSpaceTransition()
+        focusOnHoverController.beginSpaceTransition()
         statusItem.menu?.cancelTracking()
         desktopSwitcher.switchTo(identifier, initial: initial,
             forceDirectJump: true, snapshot: { [weak self] in
@@ -9810,7 +9798,7 @@ final class OnboardingPrimaryButton: NSButton {
             // The switch needs to end native menu tracking. Restore that menu
             // once removal finishes, rather than leaving it permanently closed.
             settingsMenuPreviousApplication = nil
-            hoverActivationController.beginSpaceTransition()
+            focusOnHoverController.beginSpaceTransition()
             statusItem.menu?.cancelTracking()
             desktopSwitcher.switchTo(neighbor, initial: before,
                 forceDirectJump: true, snapshot: { [weak self] in
@@ -11330,6 +11318,34 @@ final class OnboardingPrimaryButton: NSButton {
         )
     }
 
+    /// The width a wrapping label needs to keep its line breaks: its longest
+    /// line, without the space a wrapped line ends in, plus the 2 pt the label
+    /// keeps on each side of its text.
+    private static func widestLine(of label: NSTextField, within width: CGFloat) -> CGFloat {
+        let padding: CGFloat = 2
+        let storage = NSTextStorage(string: label.stringValue,
+                                    attributes: [.font: label.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)])
+        let layout = NSLayoutManager()
+        storage.addLayoutManager(layout)
+        let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = padding
+        layout.addTextContainer(container)
+        let text = storage.string as NSString
+        var widest: CGFloat = 0
+        layout.enumerateLineFragments(forGlyphRange: layout.glyphRange(for: container)) { _, _, _, glyphs, _ in
+            var characters = layout.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+            while characters.length > 0,
+                  let scalar = UnicodeScalar(text.character(at: NSMaxRange(characters) - 1)),
+                  CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                characters.length -= 1
+            }
+            guard characters.length > 0 else { return }
+            let trimmed = layout.glyphRange(forCharacterRange: characters, actualCharacterRange: nil)
+            widest = max(widest, layout.boundingRect(forGlyphRange: trimmed, in: container).maxX)
+        }
+        return widest > 0 ? min(width, widest + padding) : width
+    }
+
     @discardableResult
     private func showMenuBarPopover(
         symbolName: String,
@@ -11353,8 +11369,10 @@ final class OnboardingPrimaryButton: NSButton {
         statusImage.contentTintColor = symbolColor
         statusImage.imageScaling = .scaleProportionallyDown
         statusImage.translatesAutoresizingMaskIntoConstraints = false
+        // As wide as the symbol itself, so no empty margin sits to its left.
+        let iconWidth = ceil(statusImage.image?.size.width ?? 16)
         NSLayoutConstraint.activate([
-            statusImage.widthAnchor.constraint(equalToConstant: 28),
+            statusImage.widthAnchor.constraint(equalToConstant: iconWidth),
             statusImage.heightAnchor.constraint(equalToConstant: 28)
         ])
 
@@ -11433,20 +11451,33 @@ final class OnboardingPrimaryButton: NSButton {
         let stack = NSStackView(views: [statusImage, textStack])
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 10
+        stack.spacing = 11
         stack.translatesAutoresizingMaskIntoConstraints = false
 
+        // A label draws its text a few points inside its frame, so a row
+        // ending in text gets less margin to match the space left of the icon.
+        let leadingMargin: CGFloat = 14
+        let trailingMargin: CGFloat = celebrationButton != nil ? 14 : 10
+        let textInset = leadingMargin + iconWidth + stack.spacing + trailingMargin
         var fittedContentSize = contentSize
         if celebrationButton != nil {
             // Preserve the one-line title and emoji without compressing either
             // when the confirmation uses the longer restart wording.
-            fittedContentSize.width = max(contentSize.width, ceil(titleView.fittingSize.width) + 66)
+            fittedContentSize.width = max(contentSize.width, ceil(titleView.fittingSize.width) + textInset)
+        } else {
+            // Wrapped text rarely fills its line, which left a wide gap on the
+            // right. Narrow the popover to the longest line it actually has.
+            let available = contentSize.width - textInset
+            let usedWidth = [titleLabel, detailLabel]
+                .map { Self.widestLine(of: $0, within: available) }
+                .max() ?? available
+            fittedContentSize.width = min(contentSize.width, ceil(usedWidth) + textInset)
         }
         let contentView = NSView(frame: NSRect(origin: .zero, size: fittedContentSize))
         contentView.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: leadingMargin),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -trailingMargin),
             stack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor)
         ])
 
@@ -11895,7 +11926,7 @@ final class OnboardingPrimaryButton: NSButton {
         refreshChromiumWebAppPlacementController()
         refreshFinderDeleteKeyController()
         refreshForceClickMiddleClickController()
-        refreshHoverActivationController()
+        refreshFocusOnHoverController()
         if !accessibilityAccessGranted || !inputMonitoringAccessGranted {
             fourFingersDown = false
             fourFingerStartedInMissionControl = false
@@ -12210,7 +12241,7 @@ final class OnboardingPrimaryButton: NSButton {
         finderDeleteKeyController.stop()
         forceClickMiddleClickController.stop()
         quickLookCopyOrientationManager.stop()
-        hoverActivationController.stop()
+        focusOnHoverController.stop()
         dockIconClickMinimizeController.stop()
         chromiumWebAppPlacementController.stop()
         cursorTeleportManager?.stop()
@@ -12337,8 +12368,8 @@ extension AppDelegate: NSMenuDelegate {
         }
         if menu === blacklistMenu {
             rebuildBlacklistMenu()
-        } else if menu === hoverActivationBlacklistMenu {
-            rebuildHoverActivationBlacklistMenu()
+        } else if menu === focusOnHoverBlacklistMenu {
+            rebuildFocusOnHoverBlacklistMenu()
         } else if menu === dockSettingsMenu {
             refreshDockSettingsMenu()
         } else if menu === desktopIndicatorAppearanceMenu {
@@ -12456,7 +12487,8 @@ extension AppDelegate: NSMenuDelegate {
                 self.wallpaperAccessReturnApplication = nil
             }
             DispatchQueue.main.async { [weak self] in
-                guard let self, !self.statusMenuIsOpen, !self.desktopSwitcher.isSwitching,
+                guard let self, !StatusMenuFocus.keepsFocusForWindow, !self.statusMenuIsOpen,
+                      !self.desktopSwitcher.isSwitching,
                       NSApp.isActive,
                       NSApp.keyWindow == nil,
                       let previousApplication, !previousApplication.isTerminated else { return }

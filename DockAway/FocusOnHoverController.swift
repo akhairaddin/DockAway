@@ -99,7 +99,7 @@ private final class HoverFocusWithoutRaiseBridge {
                         postEvent: postEvent
                     )
                     if !makeFront(windowID: windowID, process: &process) {
-                        HoverActivationController.focusWithAccessibility(
+                        FocusOnHoverController.focusWithAccessibility(
                             window,
                             processIdentifier: processIdentifier
                         )
@@ -198,7 +198,7 @@ private final class HoverFocusWithoutRaiseBridge {
     }
 }
 
-struct HoverActivationDecision {
+struct FocusOnHoverDecision {
     static func isAuthenticationPromptOwner(bundleIdentifier: String?) -> Bool {
         guard let bundleIdentifier else { return false }
         return ["com.apple.SecurityAgent", "com.apple.LocalAuthentication.UIAgent"].contains(bundleIdentifier)
@@ -308,7 +308,7 @@ struct HoverActivationDecision {
             : configuredDelay
     }
 
-    static func shouldActivate(
+    static func shouldFocus(
         now: TimeInterval,
         candidateStartedAt: TimeInterval,
         delay: TimeInterval,
@@ -365,7 +365,8 @@ struct HoverActivationDecision {
 }
 
 @MainActor
-final class HoverActivationController {
+final class FocusOnHoverController {
+    // Preference key strings are preserved for backwards compatibility with existing installs.
     static let enabledPreferenceKey = "activateWindowsOnHover"
     static let delayPreferenceKey = "activateWindowsOnHoverDelay"
     static let waitsForPointerToStopPreferenceKey = "activateWindowsOnHoverWaitForPointerToStop"
@@ -388,7 +389,7 @@ final class HoverActivationController {
     private var timer: Timer?
     private var candidate: Candidate?
     private var candidateStartedAt: TimeInterval = 0
-    private var lastActivatedToken: CandidateToken?
+    private var lastFocusedToken: CandidateToken?
     private static var electronAppsByBundlePath: [String: Bool] = [:]
     private var previousPointer: CGPoint?
     private var spaceTransitionSuppressUntil: TimeInterval = 0
@@ -571,7 +572,7 @@ final class HoverActivationController {
         // an onscreen, visible window, including their elevated window levels.
         let owners = authenticationPromptOwners.owners {
             Set(NSWorkspace.shared.runningApplications.filter {
-                HoverActivationDecision.isAuthenticationPromptOwner(bundleIdentifier: $0.bundleIdentifier)
+                FocusOnHoverDecision.isAuthenticationPromptOwner(bundleIdentifier: $0.bundleIdentifier)
             }.map(\.processIdentifier))
         }
         guard !owners.isEmpty else {
@@ -601,7 +602,7 @@ final class HoverActivationController {
             return
         }
 
-        let pointerIsMoving = HoverActivationDecision.pointerIsMoving(
+        let pointerIsMoving = FocusOnHoverDecision.pointerIsMoving(
             from: previousPointer,
             to: pointer
         )
@@ -612,7 +613,7 @@ final class HoverActivationController {
             resetCandidate()
             return
         }
-        if !HoverActivationDecision.pointerMovedAfterSpaceTransition(
+        if !FocusOnHoverDecision.pointerMovedAfterSpaceTransition(
             from: spaceTransitionPointer,
             to: pointer
         ) {
@@ -621,7 +622,7 @@ final class HoverActivationController {
         }
         spaceTransitionPointer = nil
 
-        // While scrolling, nothing activates and the window server isn't
+        // While scrolling, nothing receives focus and the window server isn't
         // asked; the dwell starts again once it stops.
         if ScrollActivity.isScrolling {
             candidate = nil
@@ -630,7 +631,7 @@ final class HoverActivationController {
             return
         }
 
-        // With "Wait for Pointer to Stop", nothing can activate while the
+        // With "Wait for Pointer to Stop", nothing receives focus while the
         // pointer moves, so the window snapshot and Accessibility hit-test
         // wait until it rests. The dwell starts from the last moving tick,
         // as it did when every tick restarted it.
@@ -678,7 +679,7 @@ final class HoverActivationController {
         if candidate?.token != hovered.token {
             candidate = hovered
             candidateStartedAt = now
-            lastActivatedToken = nil
+            lastFocusedToken = nil
             return
         }
 
@@ -688,10 +689,10 @@ final class HoverActivationController {
             return
         }
 
-        guard HoverActivationDecision.shouldActivate(
+        guard FocusOnHoverDecision.shouldFocus(
             now: now,
             candidateStartedAt: candidateStartedAt,
-            delay: HoverActivationDecision.effectiveDelay(
+            delay: FocusOnHoverDecision.effectiveDelay(
                 configuredDelay: settings.delay,
                 waitsForPointerToStop: settings.waitsForPointerToStop,
                 stationaryFloor: Self.pointerStationaryFloor
@@ -702,7 +703,7 @@ final class HoverActivationController {
             menuIsOpen: menuIsOpen
         ) else { return }
 
-        if lastActivatedToken == hovered.token {
+        if lastFocusedToken == hovered.token {
             becomeIdle()
             return
         }
@@ -716,7 +717,7 @@ final class HoverActivationController {
         // focused alone while another app's window overlaps them.
         if !Self.raisesWindow, Self.raisesItselfWhenFocused(hovered.application),
            let windowID = hovered.window.windowID,
-           HoverActivationDecision.isCoveredByAnotherApp(
+           FocusOnHoverDecision.isCoveredByAnotherApp(
                windowID: windowID,
                ownerPID: hovered.application.processIdentifier,
                windows: Self.stackedWindows(in: snapshot())
@@ -725,14 +726,14 @@ final class HoverActivationController {
             return
         }
 
-        activate(hovered)
-        lastActivatedToken = hovered.token
-        // Require a fresh dwell period if activation failed or another utility
+        focus(hovered)
+        lastFocusedToken = hovered.token
+        // Require a fresh dwell period if focusing failed or another utility
         // immediately restored focus.
         candidateStartedAt = now
     }
 
-    private func activate(_ candidate: Candidate) {
+    private func focus(_ candidate: Candidate) {
         guard !candidate.application.isTerminated else {
             resetCandidate()
             return
@@ -752,7 +753,7 @@ final class HoverActivationController {
         }
 
         if candidate.application.activationPolicy == .accessory {
-            if HoverActivationDecision.isInteractiveAccessoryApp(bundleIdentifier: candidate.application.bundleIdentifier) {
+            if FocusOnHoverDecision.isInteractiveAccessoryApp(bundleIdentifier: candidate.application.bundleIdentifier) {
                 _ = candidate.application.activate(options: [.activateIgnoringOtherApps])
                 let applicationElement = AXUIElementCreateApplication(candidate.application.processIdentifier)
                 AXUIElementSetMessagingTimeout(applicationElement, 0.12)
@@ -773,7 +774,7 @@ final class HoverActivationController {
             }
             // Accessory apps cannot be focused without raising via private WindowServer
             // ordering APIs without desynchronizing AppKit active state and bringing
-            // panels forward. Only activate them if window raising is explicitly enabled.
+            // panels forward. Only focus them if window raising is explicitly enabled.
             guard Self.raisesWindow else { return }
             _ = candidate.application.activate(options: [])
             return
@@ -827,7 +828,7 @@ final class HoverActivationController {
     private func resetCandidate() {
         candidate = nil
         candidateStartedAt = 0
-        lastActivatedToken = nil
+        lastFocusedToken = nil
         evaluationPolicy.invalidate()
     }
 
@@ -850,10 +851,10 @@ final class HoverActivationController {
         // boundary before falling back to WindowServer geometry.
         for _ in 0..<64 {
             let role = element.string(kAXRoleAttribute)
-            if HoverActivationDecision.isMenuOrMenuBarRole(role) {
+            if FocusOnHoverDecision.isMenuOrMenuBarRole(role) {
                 return nil
             }
-            if HoverActivationDecision.isWindowContainerRole(role) {
+            if FocusOnHoverDecision.isWindowContainerRole(role) {
                 if let candidate = candidate(for: element, protectedBundleIdentifiers: protectedBundleIdentifiers) {
                     return candidate
                 }
@@ -906,7 +907,7 @@ final class HoverActivationController {
               !application.isTerminated,
               let bundleIdentifier = application.bundleIdentifier,
               !isProtected(bundleIdentifier: bundleIdentifier, userProtected: protectedBundleIdentifiers),
-              HoverActivationDecision.acceptsWindow(
+              FocusOnHoverDecision.acceptsWindow(
                 activationPolicy: application.activationPolicy,
                 bundleIdentifier: bundleIdentifier,
                 role: window.string(kAXRoleAttribute),
@@ -953,7 +954,7 @@ final class HoverActivationController {
             let isDockAwayTarget = ownerPID == getpid() && isDockAwayFocusableWindow(windowID: winID)
             let isInteractiveAccessory: Bool = {
                 guard let app = NSRunningApplication(processIdentifier: ownerPID) else { return false }
-                return HoverActivationDecision.isInteractiveAccessoryApp(bundleIdentifier: app.bundleIdentifier)
+                return FocusOnHoverDecision.isInteractiveAccessoryApp(bundleIdentifier: app.bundleIdentifier)
             }()
             guard layer == 0 || isDockAwayTarget || (layer <= 10 && isInteractiveAccessory) else {
                 return nil
@@ -998,23 +999,23 @@ final class HoverActivationController {
     }
 
     private static func raisesItselfWhenFocused(_ application: NSRunningApplication) -> Bool {
-        if HoverActivationDecision.raisesItselfWhenFocused(bundleIdentifier: application.bundleIdentifier) {
+        if FocusOnHoverDecision.raisesItselfWhenFocused(bundleIdentifier: application.bundleIdentifier) {
             return true
         }
         guard let bundleURL = application.bundleURL else { return false }
         if let cached = electronAppsByBundlePath[bundleURL.path] { return cached }
-        let isElectron = HoverActivationDecision.isElectronApp(bundleURL: bundleURL)
+        let isElectron = FocusOnHoverDecision.isElectronApp(bundleURL: bundleURL)
         electronAppsByBundlePath[bundleURL.path] = isElectron
         return isElectron
     }
 
-    private static func stackedWindows(in windowInfo: [[String: Any]]?) -> [HoverActivationDecision.StackedWindow] {
+    private static func stackedWindows(in windowInfo: [[String: Any]]?) -> [FocusOnHoverDecision.StackedWindow] {
         (windowInfo ?? []).compactMap { info in
             guard let number = info[kCGWindowNumber as String] as? NSNumber,
                   let owner = info[kCGWindowOwnerPID as String] as? NSNumber,
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds) else { return nil }
-            return HoverActivationDecision.StackedWindow(
+            return FocusOnHoverDecision.StackedWindow(
                 id: CGWindowID(number.uint32Value),
                 ownerPID: owner.int32Value,
                 layer: (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0,
@@ -1043,10 +1044,10 @@ final class HoverActivationController {
         if let focusedWindow {
             if CFEqual(focusedWindow, candidate.window) { return true }
             if isRelated(candidate.window, to: focusedWindow)
-                || HoverActivationDecision.isTransientWindowRole(
+                || FocusOnHoverDecision.isTransientWindowRole(
                     focusedWindow.string(kAXRoleAttribute)
                 )
-                || HoverActivationDecision.isTransientWindowSubrole(
+                || FocusOnHoverDecision.isTransientWindowSubrole(
                     focusedWindow.string(kAXSubroleAttribute)
                 ) {
                 return true
@@ -1063,13 +1064,13 @@ final class HoverActivationController {
 
         let candidateRole = candidate.window.string(kAXRoleAttribute)
         let candidateSubrole = candidate.window.string(kAXSubroleAttribute)
-        if HoverActivationDecision.isTransientWindowRole(candidateRole)
-            || HoverActivationDecision.isTransientWindowSubrole(candidateSubrole) {
+        if FocusOnHoverDecision.isTransientWindowRole(candidateRole)
+            || FocusOnHoverDecision.isTransientWindowSubrole(candidateSubrole) {
             return true
         }
 
         // If the frontmost application only exposes one main AX window, that window
-        // is already active. Re-activating it sends redundant focus transitions
+        // is already active. Re-focusing it sends redundant focus transitions
         // and synthesized key events that dismiss popups and omnibox suggestions.
         if let windows = applicationElement.elements(kAXWindowsAttribute) {
             if windows.count <= 1, let first = windows.first, CFEqual(first, candidate.window) {
@@ -1118,7 +1119,7 @@ final class HoverActivationController {
                let candSize = candidate.window.size(kAXSizeAttribute) {
                 overlaps = CGRect(origin: candPos, size: candSize).intersects(overlayBounds)
             }
-            return HoverActivationDecision.topWindowShowsCandidateFocused(
+            return FocusOnHoverDecision.topWindowShowsCandidateFocused(
                 topWindowIsCandidate: false,
                 topWindowIsDocument: overlaps && isDocumentWindow(windowID: winID, processIdentifier: pid),
                 topWindowOverlapsCandidate: overlaps

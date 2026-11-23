@@ -15,8 +15,8 @@ final class EventTap {
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
-    /// The tap's place in the event stream, which macOS hands to every call.
-    private var proxy: CGEventTapProxy?
+    /// The tap's place in the event stream, valid only while `dispatch` is on the stack.
+    private var activeProxy: CGEventTapProxy?
     private let modes: [CFRunLoopMode]
     private let reenablesWhenDisabled: Bool
     private let handler: Handler
@@ -84,28 +84,30 @@ final class EventTap {
             CFMachPortInvalidate(tap)
         }
         tap = nil
-        proxy = nil
+        activeProxy = nil
     }
 
-    /// Sends an event on from this tap's place in the event stream, such as a
-    /// click it held back. Taps and listeners ahead of it, which already saw
-    /// the original, don't see it a second time; a click-sound app listening
-    /// to the hardware would otherwise play it twice. Before this tap has seen
-    /// any event, it goes in at the session instead.
+    /// Sends an event on from this tap's place in the event stream when called
+    /// synchronously inside an event callback. Asynchronous posts fall back to
+    /// the session tap because `CGEventTapProxy` is only valid for the
+    /// duration of that single callback invocation.
     func post(_ event: CGEvent) {
-        if let proxy {
-            event.tapPostEvent(proxy)
+        if let activeProxy {
+            event.tapPostEvent(activeProxy)
         } else {
             event.post(tap: .cgSessionEventTap)
         }
     }
 
     private func dispatch(_ type: CGEventType, _ event: CGEvent, from proxy: CGEventTapProxy) -> Unmanaged<CGEvent>? {
-        self.proxy = proxy
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput,
-           reenablesWhenDisabled, let tap {
-            CGEvent.tapEnable(tap: tap, enable: true)
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if reenablesWhenDisabled, let tap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return handler(type, event) ? nil : Unmanaged.passUnretained(event)
         }
+        activeProxy = proxy
+        defer { activeProxy = nil }
         return handler(type, event) ? nil : Unmanaged.passUnretained(event)
     }
 }

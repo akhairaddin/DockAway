@@ -113,10 +113,6 @@ extension SubmenuLabelView {
         SubmenuLabelView(title: "Desktop Number Separator", style: .plain)
     }
 
-    static func desktopNumberIndicator() -> SubmenuLabelView {
-        SubmenuLabelView(title: "Desktop Manager Number Style", style: .plain)
-    }
-
     /// Titled by its menu item, which names the display being customized.
     static func customizeDisplays() -> SubmenuLabelView {
         SubmenuLabelView(title: nil, accessibilityLabel: "Customize", style: .plain, width: 250)

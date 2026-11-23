@@ -454,30 +454,10 @@ final class DesktopLabelCell: NSTextFieldCell {
             if oldValue != activePillColor { controlView?.needsDisplay = true }
         }
     }
-    var indicatorStyle: DesktopNumberIndicatorStyle = DesktopNumberStylePreference.currentStyle {
-        didSet {
-            if oldValue != indicatorStyle { controlView?.needsDisplay = true }
-        }
-    }
-
-    var showsPill: Bool {
-        if representsFullscreenSpace { return false }
-        switch indicatorStyle {
-        case .accentPill:
-            return isPillActive
-        case .subtleShadow:
-            return isKeyboardSelected
-        }
-    }
-
-    var isBoldWithShadow: Bool {
-        switch indicatorStyle {
-        case .accentPill:
-            return isKeyboardSelected
-        case .subtleShadow:
-            return isPillActive
-        }
-    }
+    /// The current desktop's number sits on an accent pill; the keyboard-
+    /// selected one is bold with a shadow.
+    var showsPill: Bool { isPillActive }
+    var isBoldWithShadow: Bool { isKeyboardSelected }
 
     override func drawingRect(forBounds rect: NSRect) -> NSRect { rect }
 
@@ -486,7 +466,7 @@ final class DesktopLabelCell: NSTextFieldCell {
     }
 
     func shadowForText(color: NSColor, bold: Bool, appearance: NSAppearance) -> NSShadow {
-        if indicatorStyle == .accentPill && isDesktopHovered && !representsFullscreenSpace {
+        if isDesktopHovered && !representsFullscreenSpace {
             let shadow = NSShadow()
             shadow.shadowColor = NSColor.black
             shadow.shadowOffset = NSSize(width: 0, height: -1.25)
@@ -516,6 +496,16 @@ final class DesktopLabelCell: NSTextFieldCell {
         return shadow
     }
 
+    /// A full-screen app's smaller name would sit high on the numbers' line.
+    /// How far down its first line's capitals center on the digits; a second
+    /// line hangs below.
+    private func fullscreenNameOffset(_ text: NSAttributedString) -> CGFloat {
+        guard representsFullscreenSpace, text.length > 0,
+              let nameFont = text.attribute(.font, at: 0, effectiveRange: nil) as? NSFont else { return 0 }
+        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+        return (numberFont.ascender - numberFont.capHeight / 2) - (nameFont.ascender - nameFont.capHeight / 2)
+    }
+
     override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
         let activeAppearance = controlView.effectiveAppearance
         let isDark = (activeAppearance.bestMatch(from: [.darkAqua, .aqua])
@@ -530,7 +520,7 @@ final class DesktopLabelCell: NSTextFieldCell {
             let textColor = NSColor.white
             pillText.addAttribute(.foregroundColor, value: textColor, range: fullRange)
 
-            if isBoldWithShadow {
+            if isBoldWithShadow && !representsFullscreenSpace {
                 pillText.addAttribute(
                     .font,
                     value: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold),
@@ -541,9 +531,16 @@ final class DesktopLabelCell: NSTextFieldCell {
             let shadow = shadowForText(color: textColor, bold: isBoldWithShadow, appearance: activeAppearance)
             pillText.addAttribute(.shadow, value: shadow, range: fullRange)
 
-            let textSize = pillText.size()
-            let pillWidth = max(17.0, ceil(textSize.width) + 6.0)
-            let pillHeight: CGFloat = 14.0
+            // A full-screen app's name may wrap, so its pill measures it within
+            // the label; a second line makes the pill taller.
+            let textSize = representsFullscreenSpace
+                ? pillText.boundingRect(with: NSSize(width: cellFrame.width, height: .greatestFiniteMagnitude),
+                                        options: [.usesLineFragmentOrigin, .usesFontLeading]).size
+                : pillText.size()
+            let pillWidth = min(cellFrame.width, max(17.0, ceil(textSize.width) + 6.0))
+            let pillHeight = representsFullscreenSpace
+                ? min(cellFrame.height, max(14.0, ceil(textSize.height) + 3.0))
+                : 14.0
             let pillRect = NSRect(
                 x: floor(cellFrame.midX - pillWidth / 2.0),
                 y: floor(cellFrame.minY),
@@ -555,7 +552,9 @@ final class DesktopLabelCell: NSTextFieldCell {
             let pill = NSBezierPath(roundedRect: pillRect, xRadius: 3.5, yRadius: 3.5)
             pill.fill()
 
-            pillText.draw(with: cellFrame, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            var textFrame = cellFrame
+            textFrame.origin.y += fullscreenNameOffset(pillText)
+            pillText.draw(with: textFrame, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
         } else {
             let styledText = NSMutableAttributedString(attributedString: attributedStringValue)
             let fullRange = NSRange(location: 0, length: styledText.length)
@@ -579,7 +578,9 @@ final class DesktopLabelCell: NSTextFieldCell {
 
             let shadow = shadowForText(color: textColor, bold: isBoldWithShadow, appearance: activeAppearance)
             styledText.addAttribute(.shadow, value: shadow, range: fullRange)
-            styledText.draw(with: cellFrame, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            var textFrame = cellFrame
+            textFrame.origin.y += fullscreenNameOffset(styledText)
+            styledText.draw(with: textFrame, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
         }
     }
 }
@@ -877,6 +878,14 @@ enum DesktopBoxMetrics {
     /// A corner icon's radius, plus the padding and the outline around it.
     static let cornerRadius = iconCornerFraction * iconSize + padding + outlineWidth
 
+    /// A full-screen app's box: its icon's own shape, as big as a box and
+    /// centered in it.
+    static func iconShape(in rect: CGRect) -> (rect: CGRect, radius: CGFloat) {
+        let side = min(rect.width, rect.height)
+        return (CGRect(x: rect.midX - side / 2, y: rect.midY - side / 2, width: side, height: side),
+                iconCornerFraction * side)
+    }
+
     /// The box's shape, with app-icon corners. An inset shape passes a
     /// radius reduced by the inset so it stays parallel.
     static func path(in rect: CGRect, radius: CGFloat = cornerRadius) -> CGPath {
@@ -893,6 +902,12 @@ private final class DesktopGlassOutlineView: NSGlassEffectView {
     var outlineWidth: CGFloat = 1.5 {
         didSet {
             if oldValue != outlineWidth { updateOutlineMask() }
+        }
+    }
+    /// Follows a full-screen app's icon instead of a desktop box.
+    var isIconShaped = false {
+        didSet {
+            if oldValue != isIconShaped { updateOutlineMask() }
         }
     }
 
@@ -915,10 +930,14 @@ private final class DesktopGlassOutlineView: NSGlassEffectView {
 
     private func updateOutlineMask() {
         guard bounds.width > outlineWidth * 2, bounds.height > outlineWidth * 2 else { return }
+        let shape = isIconShaped
+            ? DesktopBoxMetrics.iconShape(in: bounds)
+            : (rect: bounds, radius: DesktopBoxMetrics.cornerRadius)
+        if cornerRadius != shape.radius { cornerRadius = shape.radius }
         let path = CGMutablePath()
-        path.addPath(DesktopBoxMetrics.path(in: bounds))
-        let inner = bounds.insetBy(dx: outlineWidth, dy: outlineWidth)
-        path.addPath(DesktopBoxMetrics.path(in: inner, radius: DesktopBoxMetrics.cornerRadius - outlineWidth))
+        path.addPath(DesktopBoxMetrics.path(in: shape.rect, radius: shape.radius))
+        let inner = shape.rect.insetBy(dx: outlineWidth, dy: outlineWidth)
+        path.addPath(DesktopBoxMetrics.path(in: inner, radius: shape.radius - outlineWidth))
         let mask = CAShapeLayer()
         mask.frame = bounds
         mask.path = path
@@ -961,12 +980,27 @@ final class DesktopTileButton: NSButton {
         }
     }
     var belongsToActiveDisplay = true
-    var representsFullscreenSpace = false { didSet { needsDisplay = true } }
+    var representsFullscreenSpace = false {
+        didSet {
+            needsDisplay = true
+            if oldValue != representsFullscreenSpace { needsLayout = true }
+        }
+    }
     var showsFullscreenOutline = false { didSet { needsDisplay = true } }
     var canReorder = false
     var isDropTarget = false { didSet { needsDisplay = true } }
     var applicationIcons: [DesktopApplicationIcon] = [] {
-        didSet { needsDisplay = true }
+        didSet {
+            needsDisplay = true
+            if oldValue.isEmpty != applicationIcons.isEmpty { needsLayout = true }
+        }
+    }
+    /// A full-screen app's tile is its icon, as big as a desktop box, and its
+    /// outline follows the icon's shape.
+    private var showsIconAsBox: Bool { representsFullscreenSpace && !applicationIcons.isEmpty }
+    /// Where the outline goes and how round its corners are.
+    private var outlineShape: (rect: CGRect, radius: CGFloat) {
+        showsIconAsBox ? DesktopBoxMetrics.iconShape(in: bounds) : (bounds, DesktopBoxMetrics.cornerRadius)
     }
     /// The display's wallpaper, drawn behind the icons.
     var wallpaper: DesktopWallpaperPreview? {
@@ -1050,18 +1084,23 @@ final class DesktopTileButton: NSButton {
         let outline = DesktopGlassOutlineView(frame: bounds)
         outline.tintColor = source.tintColor
         outline.outlineWidth = source.outlineWidth
+        outline.isIconShaped = source.isIconShaped
         outline.autoresizingMask = [.width, .height]
         return outline
     }
 
     override func layout() {
         super.layout()
-        glassOutline?.frame = bounds
+        let shape = outlineShape
+        if #available(macOS 26.0, *), let glass = glassOutline as? DesktopGlassOutlineView {
+            glass.isIconShaped = showsIconAsBox
+            glass.frame = shape.rect
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         focusGlowLayer.frame = bounds
-        focusGlowLayer.path = DesktopBoxMetrics.path(in: bounds.insetBy(dx: 0.75, dy: 0.75),
-                                                     radius: DesktopBoxMetrics.cornerRadius - 0.75)
+        focusGlowLayer.path = DesktopBoxMetrics.path(in: shape.rect.insetBy(dx: 0.75, dy: 0.75),
+                                                     radius: shape.radius - 0.75)
         if isKeyboardFocused {
             applyFocusScale(animated: false)
         }
@@ -1225,15 +1264,24 @@ final class DesktopTileButton: NSButton {
             NSGraphicsContext.current?.imageInterpolation = .high
             wallpaper.draw(in: drawn, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             NSGraphicsContext.restoreGraphicsState()
-        } else if icons.isEmpty, !representsFullscreenSpace {
-            // A desktop with no apps gets a faint fill, so its box still
-            // reads as a desktop rather than an empty outline.
+        } else if !representsFullscreenSpace {
+            // Every desktop's box gets a faint fill behind its apps, so it
+            // reads as a desktop rather than an outline with icons in it.
             let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             NSColor.labelColor.withAlphaComponent(isDark ? 0.1 : 0.06).setFill()
             DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: 1, dy: 1),
                                          radius: DesktopBoxMetrics.cornerRadius - 1).fill()
         }
-        for (index, rect) in Self.iconFrames(count: icons.count, in: bounds).enumerated() {
+        let frames: [NSRect]
+        if showsIconAsBox {
+            // The icon's visible squircle is the box; its image has a margin.
+            let body = outlineShape.rect
+            let size = body.width / DesktopBoxMetrics.iconBodyFraction
+            frames = [NSRect(x: body.midX - size / 2, y: body.midY - size / 2, width: size, height: size)]
+        } else {
+            frames = Self.iconFrames(count: icons.count, in: bounds)
+        }
+        for (index, rect) in frames.enumerated() {
             if icons.count > 6 && index == 5 {
                 let text = "+\(icons.count - 5)" as NSString
                 let attributes: [NSAttributedString.Key: Any] = [
@@ -1274,8 +1322,9 @@ final class DesktopTileButton: NSButton {
             // Idle desktops keep their shape without bringing back the old
             // blue-tinted button fill.
             NSColor.secondaryLabelColor.withAlphaComponent(0.62).setStroke()
-            let outline = DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: 0.75, dy: 0.75),
-                                                       radius: DesktopBoxMetrics.cornerRadius - 0.75)
+            let shape = outlineShape
+            let outline = DesktopBoxMetrics.bezierPath(in: shape.rect.insetBy(dx: 0.75, dy: 0.75),
+                                                       radius: shape.radius - 0.75)
             outline.lineWidth = 1.0
             outline.stroke()
             return
@@ -1304,8 +1353,9 @@ final class DesktopTileButton: NSButton {
             let activeLineWidth: CGFloat = 2.25
             // Expand outward rather than inward so interior icon padding remains spacious.
             let activeInset: CGFloat = -0.15
-            let outline = DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: activeInset, dy: activeInset),
-                                                       radius: DesktopBoxMetrics.cornerRadius - activeInset)
+            let shape = outlineShape
+            let outline = DesktopBoxMetrics.bezierPath(in: shape.rect.insetBy(dx: activeInset, dy: activeInset),
+                                                       radius: shape.radius - activeInset)
             outline.lineWidth = activeLineWidth
 
             NSGraphicsContext.saveGraphicsState()
@@ -1320,8 +1370,9 @@ final class DesktopTileButton: NSButton {
             NSGraphicsContext.restoreGraphicsState()
         } else {
             strokeColor.setStroke()
-            let outline = DesktopBoxMetrics.bezierPath(in: bounds.insetBy(dx: 1, dy: 1),
-                                                       radius: DesktopBoxMetrics.cornerRadius - 1)
+            let shape = outlineShape
+            let outline = DesktopBoxMetrics.bezierPath(in: shape.rect.insetBy(dx: 1, dy: 1),
+                                                       radius: shape.radius - 1)
             outline.lineWidth = 1.0
             outline.stroke()
         }
@@ -2124,9 +2175,9 @@ final class DesktopDisplaySectionsView: NSView {
 }
 
 final class DesktopTilesView: NSView {
-    private var numberLabelYOffset: CGFloat {
-        DesktopNumberStylePreference.labelYOffset
-    }
+    /// How far above its box a desktop's number sits.
+    static let numberLabelYOffset: CGFloat = 4.5
+    private var numberLabelYOffset: CGFloat { Self.numberLabelYOffset }
     fileprivate var navigationTiles: [(id: UInt64, button: DesktopTileButton)] {
         Array(zip(desktopIDs, buttons)).map { (id: $0.0, button: $0.1) }
     }
@@ -2407,7 +2458,7 @@ final class DesktopTilesView: NSView {
               let labelCell = numberLabels[index].cell as? DesktopLabelCell else { return }
         labelCell.isKeyboardSelected = focused
         if !button.representsFullscreenSpace {
-            let isBold = (focused && labelCell.indicatorStyle == .accentPill) || button.state == .on
+            let isBold = focused || button.state == .on
             numberLabels[index].font = .monospacedDigitSystemFont(
                 ofSize: isBold ? 12 : 11,
                 weight: isBold ? .bold : .medium
@@ -2660,9 +2711,11 @@ final class DesktopTilesView: NSView {
             button.interactionBlocked = !enabled
             // Temporary work blocks input, not the tile's native appearance.
             button.isEnabled = true
-            button.canReorder = enabled
-                && !button.representsFullscreenSpace
-                && (snapshot?.desktopIDs.count ?? 0) > 1
+            // A full-screen app moves among its own display's tiles, like in
+            // Mission Control; a desktop needs another desktop beside it.
+            button.canReorder = enabled && (button.representsFullscreenSpace
+                ? ids.count > 1
+                : (snapshot?.desktopIDs.count ?? 0) > 1)
             // Keep the app inventory tooltip intact across status refreshes.
             if button.desktopToolTip == nil { button.desktopToolTip = "Desktop \(index + 1)" }
         }
@@ -3425,17 +3478,17 @@ final class DesktopTilesView: NSView {
         }
         numberLabels[index].textColor = textColor
         if let labelCell = numberLabels[index].cell as? DesktopLabelCell {
-            labelCell.isPillActive = isCurrentOnActiveDisplay && !representsFullscreenSpace
-            labelCell.activePillColor = activeColor
-            labelCell.indicatorStyle = DesktopNumberStylePreference.currentStyle
+            labelCell.isPillActive = isCurrentOnActiveDisplay
+            // The full-screen app you're on is highlighted like a current
+            // desktop, even while its box has a green outline.
+            labelCell.activePillColor = representsFullscreenSpace ? .systemBlue : activeColor
             labelCell.representsFullscreenSpace = representsFullscreenSpace
             labelCell.isKeyboardSelected = button.isKeyboardFocused
             labelCell.isDesktopHovered = button.isTileHovered
         }
         numberLabels[index].needsDisplay = true
         if let desktopNumber, !representsFullscreenSpace {
-            let isBold = (button.isKeyboardFocused && DesktopNumberStylePreference.currentStyle == .accentPill)
-                || button.state == .on
+            let isBold = button.isKeyboardFocused || button.state == .on
             numberLabels[index].font = .monospacedDigitSystemFont(
                 ofSize: isBold ? 12 : 11,
                 weight: isBold ? .bold : .medium
@@ -3481,7 +3534,9 @@ final class DesktopTilesView: NSView {
             dragGrabOffset = grabbed.x - convert(NSPoint(x: button.frame.midX, y: 0), to: nil).x
         }
         guard dragOriginalIDs == desktopIDs else { finishReorder(cancelled: true); return }
-        let externalTarget = crossDisplayTarget?(event.locationInWindow)
+        // A full-screen app stays on its display: Mission Control won't move
+        // one to another.
+        let externalTarget = button.representsFullscreenSpace ? nil : crossDisplayTarget?(event.locationInWindow)
         // The dragged desktop slides along a row of tiles, never up or down
         // off it nor past its ends, and moves to another row only when you
         // point at that row.

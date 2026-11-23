@@ -472,19 +472,60 @@ final class DesktopIndicatorSeparatorOptionsView: NSView {
         while let supermenu = menu?.supermenu {
             menu = supermenu
         }
-        menu?.cancelTracking()
+        // The prompt opens just after the menu closes, so the menu mustn't
+        // hand focus back to the previous app first.
+        StatusMenuFocus.keepsFocusForWindow = true
+        // DockAway never becomes the frontmost app, so this is still the app
+        // the menu was opened over; it gets focus back when the prompt closes.
+        let returnApplication = NSWorkspace.shared.frontmostApplication
+        menu?.cancelTrackingWithoutAnimation()
         let currentVal: String?
         if case .custom(let str) = selectedSeparator {
             currentVal = str
         } else {
             currentVal = UserDefaults.standard.string(forKey: Self.customSeparatorDefaultsKey)
         }
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.5
         DispatchQueue.main.async { [weak self] in
-            self?.presentCustomSeparatorPrompt(currentValue: currentVal)
+            guard let self else {
+                StatusMenuFocus.keepsFocusForWindow = false
+                return
+            }
+            self.presentCustomSeparatorPromptAfterMenuCloses(currentValue: currentVal,
+                                                             returnApplication: returnApplication,
+                                                             deadline: deadline)
         }
     }
 
-    private func presentCustomSeparatorPrompt(currentValue: String?) {
+    private func presentCustomSeparatorPromptAfterMenuCloses(currentValue: String?,
+                                                             returnApplication: NSRunningApplication?,
+                                                             deadline: TimeInterval) {
+        if StatusMenuFocus.hasVisibleMenuWindow(in: NSApp.windows),
+           ProcessInfo.processInfo.systemUptime < deadline {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                guard let self else {
+                    StatusMenuFocus.keepsFocusForWindow = false
+                    return
+                }
+                self.presentCustomSeparatorPromptAfterMenuCloses(currentValue: currentValue,
+                                                                 returnApplication: returnApplication,
+                                                                 deadline: deadline)
+            }
+            return
+        }
+        // Give WindowServer a beat to finish ReleaseKeyFocusWithID after menu
+        // windows order out so it never clears the alert's NSApp.keyWindow.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+            guard let self else {
+                StatusMenuFocus.keepsFocusForWindow = false
+                return
+            }
+            self.presentCustomSeparatorPrompt(currentValue: currentValue, returnApplication: returnApplication)
+        }
+    }
+
+    private func presentCustomSeparatorPrompt(currentValue: String?, returnApplication: NSRunningApplication?) {
+        defer { StatusMenuFocus.keepsFocusForWindow = false }
         let alert = NSAlert()
         alert.messageText = "Custom Desktop Number Separator"
         alert.informativeText = "Enter a custom symbol, text, or emoji to use between desktop numbers (e.g., “|”, “~”, “to”):"
@@ -492,18 +533,26 @@ final class DesktopIndicatorSeparatorOptionsView: NSView {
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
 
-        let inputField = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        let inputField = CustomSeparatorTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        inputField.isEditable = true
+        inputField.isSelectable = true
+        inputField.isBezeled = true
+        inputField.bezelStyle = .roundedBezel
         inputField.font = .systemFont(ofSize: 13)
         inputField.placeholderString = "e.g. | or to"
         if let currentValue, !currentValue.isEmpty {
             inputField.stringValue = currentValue
         }
         alert.accessoryView = inputField
+        alert.layout()
         alert.window.initialFirstResponder = inputField
+        alert.window.acceptsMouseMovedEvents = true
 
         NSApp.activate(ignoringOtherApps: true)
-        inputField.selectText(nil)
+        let session = CustomSeparatorPromptSession(field: inputField, window: alert.window)
         let response = alert.runModal()
+        session.stop()
+        StatusMenuFocus.returnFocus(to: returnApplication, closing: alert.window)
         if response == .alertFirstButtonReturn {
             let clean = inputField.stringValue
                 .replacingOccurrences(of: "\n", with: "")
@@ -808,62 +857,302 @@ final class DesktopIndicatorStyleOptionsView: NSView {
     }
 }
 
-final class DesktopNumberIndicatorMenu: NSMenu {
-    var onChange: (() -> Void)?
-    private var styleRows: [DesktopNumberIndicatorStyle: DockSettingPersistenceRowView] = [:]
+/// Decides which cursor should be shown for the pointer location relative to
+/// the custom separator alert window and its text field.
+enum CustomSeparatorCursorTarget: Equatable {
+    case iBeam
+    case arrow
+    case unchanged
 
-    init() {
-        super.init(title: "Desktop Manager Number Style")
-        autoenablesItems = false
+    static func target(
+        for pointer: NSPoint,
+        windowFrame: NSRect,
+        fieldFrame: NSRect,
+        pointerWasInField: Bool
+    ) -> Self {
+        if fieldFrame.contains(pointer) {
+            return .iBeam
+        }
+        if windowFrame.contains(pointer) || pointerWasInField {
+            return .arrow
+        }
+        return .unchanged
+    }
+}
 
-        let rowWidth: CGFloat = 240
-        for style in DesktopNumberIndicatorStyle.allCases {
-            let item = NSMenuItem()
-            let helpHeading = style.title
-            let helpText: String
-            switch style {
-            case .accentPill:
-                helpText = "Renders the desktop number inside a blue pill badge for high visibility.\n\n• Applies DockAway blue directly behind the desktop number.\n• Creates a prominent, rounded capsule around each individual digit.\n• Excellent readability across both bright and dark wallpapers."
-            case .subtleShadow:
-                helpText = "Renders the desktop number as bold typography with a subtle drop shadow.\n\n• Matches native macOS menu bar status item aesthetics.\n• Crisp drop shadow ensures high legibility against varied desktop backgrounds.\n• Sleek and non-intrusive."
-            }
-            let row = DockSettingPersistenceRowView(
-                title: style.title,
-                isOn: DesktopNumberStylePreference.currentStyle == style,
-                width: rowWidth,
-                leadingInset: 18,
-                titleLeadingAdjustment: 1,
-                font: .menuFont(ofSize: 13),
-                indicatorSize: 16,
-                multiline: false,
-                helpHeading: helpHeading,
-                helpTextProvider: { helpText }
-            ) { [weak self] _ in
-                self?.selectStyle(style)
-            }
-            item.view = row
-            styleRows[style] = row
-            addItem(item)
+/// Editable text field for the custom separator modal that declares explicit
+/// I-beam cursor tracking and handles standard editing key equivalents in
+/// accessory apps that do not provide a main Edit menu.
+final class CustomSeparatorTextField: NSTextField {
+    private var hoverTrackingArea: NSTrackingArea?
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .iBeam)
+    }
+
+    override func updateTrackingAreas() {
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        // Track exact bounds instead of `.inVisibleRect`: when `clipsToBounds`
+        // is false on modern macOS, `visibleRect` expands to the alert window.
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .cursorUpdate, .activeAlways],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
+        super.updateTrackingAreas()
+    }
+
+    func containsWindowPoint(_ windowPoint: NSPoint) -> Bool {
+        bounds.contains(convert(windowPoint, from: nil))
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        guard window?.isVisible == true, NSApp.isActive else { return }
+        if containsWindowPoint(event.locationInWindow) {
+            NSCursor.iBeam.set()
+        } else {
+            NSCursor.arrow.set()
         }
     }
 
-    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func selectStyle(_ style: DesktopNumberIndicatorStyle) {
-        DesktopNumberStylePreference.currentStyle = style
-        syncSelection()
-        onChange?()
+    override func mouseEntered(with event: NSEvent) {
+        guard window?.isVisible == true, NSApp.isActive,
+              containsWindowPoint(event.locationInWindow) else { return }
+        NSCursor.iBeam.set()
     }
 
-    override func update() {
-        super.update()
-        syncSelection()
+    override func mouseExited(with event: NSEvent) {
+        guard window?.isVisible == true, NSApp.isActive else { return }
+        NSCursor.arrow.set()
     }
 
-    func syncSelection() {
-        let current = DesktopNumberStylePreference.currentStyle
-        for (style, row) in styleRows {
-            row.setOn(style == current)
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let editor = currentEditor()
+        let isFocused = window?.firstResponder === self || (editor != nil && window?.firstResponder === editor)
+        guard isFocused else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers.contains(.command),
+              !modifiers.contains(.control),
+              !modifiers.contains(.option),
+              let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let action: Selector?
+        if modifiers == .command {
+            switch key {
+            case "x": action = #selector(NSText.cut(_:))
+            case "c": action = #selector(NSText.copy(_:))
+            case "v": action = #selector(NSText.paste(_:))
+            case "a": action = #selector(NSText.selectAll(_:))
+            case "z": action = Selector(("undo:"))
+            default: action = nil
+            }
+        } else if modifiers == [.command, .shift], key == "z" {
+            action = Selector(("redo:"))
+        } else {
+            action = nil
+        }
+        if let action,
+           NSApp.sendAction(action, to: nil, from: self)
+            || (editor.map { NSApp.sendAction(action, to: $0, from: self) } ?? false) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+/// Keeps the modal prompt window key, its text field focused, and the pointer's
+/// I-beam in sync while a closing status menu and WindowServer settle.
+@MainActor
+final class CustomSeparatorPromptSession {
+    private weak var field: NSTextField?
+    private weak var window: NSWindow?
+    private var observers: [NSObjectProtocol] = []
+    private var timers: [Timer] = []
+    private var eventMonitor: Any?
+    private var didSelectInitialText = false
+    private var pointerWasInField = false
+    private var isRetargetingKeyEvent = false
+
+    init(field: NSTextField, window: NSWindow) {
+        self.field = field
+        self.window = window
+        let center = NotificationCenter.default
+        for (name, object) in [(NSWindow.didBecomeKeyNotification, window as AnyObject?),
+                               (NSApplication.didBecomeActiveNotification, NSApp as AnyObject?)] {
+            observers.append(center.addObserver(forName: name, object: object, queue: nil) { [weak self] _ in
+                MainActor.assumeIsolated { self?.ensureKeyAndFocused() }
+            })
+        }
+        for delay in [0.0, 0.05, 0.25] {
+            let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.ensureKeyAndFocused() }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            timers.append(timer)
+        }
+        eventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .cursorUpdate, .mouseEntered, .mouseExited, .keyDown, .leftMouseDown]
+        ) { [weak self] event in
+            let consumed = MainActor.assumeIsolated { self?.handleMonitorEvent(event) ?? false }
+            return consumed ? nil : event
+        }
+    }
+
+    private func handleMonitorEvent(_ event: NSEvent) -> Bool {
+        switch event.type {
+        case .mouseMoved, .cursorUpdate, .mouseEntered, .mouseExited:
+            syncCursor()
+            return false
+        case .leftMouseDown:
+            if let window, NSApp.keyWindow !== window {
+                ensureKeyAndFocused()
+            }
+            return false
+        case .keyDown:
+            guard !isRetargetingKeyEvent, let window,
+                  event.window == nil || NSApp.keyWindow !== window else {
+                return false
+            }
+            ensureKeyAndFocused()
+            if event.window == nil,
+               let retargeted = NSEvent.keyEvent(
+                   with: event.type,
+                   location: event.locationInWindow,
+                   modifierFlags: event.modifierFlags,
+                   timestamp: event.timestamp,
+                   windowNumber: window.windowNumber,
+                   context: nil,
+                   characters: event.characters ?? "",
+                   charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? "",
+                   isARepeat: event.isARepeat,
+                   keyCode: event.keyCode
+               ) {
+                isRetargetingKeyEvent = true
+                defer { isRetargetingKeyEvent = false }
+                NSApp.sendEvent(retargeted)
+                return true
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
+    func ensureKeyAndFocused() {
+        guard let field, let window, window.isVisible else { return }
+        if !NSApp.isActive {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        if NSApp.keyWindow !== window {
+            // If WindowServer cleared NSApp.keyWindow while the panel still
+            // thought it was key, reset the stale flag before re-promoting.
+            if window.isKeyWindow { window.resignKey() }
+            window.makeKeyAndOrderFront(nil)
+        }
+        let editor = field.currentEditor()
+        if window.firstResponder !== field && (editor == nil || window.firstResponder !== editor) {
+            window.makeFirstResponder(field)
+        }
+        if !didSelectInitialText {
+            didSelectInitialText = true
+            field.selectText(nil)
+        }
+        window.invalidateCursorRects(for: field)
+        syncCursor(forceReset: true)
+    }
+
+    func syncCursor(forceReset: Bool = false) {
+        guard let field, let window, NSApp.isActive, window.isVisible else { return }
+        let fieldFrame = window.convertToScreen(field.convert(field.bounds, to: nil))
+        switch CustomSeparatorCursorTarget.target(
+            for: NSEvent.mouseLocation,
+            windowFrame: window.frame,
+            fieldFrame: fieldFrame,
+            pointerWasInField: pointerWasInField
+        ) {
+        case .iBeam:
+            if forceReset || !pointerWasInField {
+                NSCursor.arrow.set()
+            }
+            NSCursor.iBeam.set()
+            pointerWasInField = true
+        case .arrow:
+            pointerWasInField = false
+            NSCursor.arrow.set()
+        case .unchanged:
+            break
+        }
+    }
+
+    func stop() {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll()
+        timers.forEach { $0.invalidate() }
+        timers.removeAll()
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+            self.eventMonitor = nil
+        }
+        let resetToArrow = pointerWasInField || window?.frame.contains(NSEvent.mouseLocation) == true
+        pointerWasInField = false
+        if resetToArrow {
+            NSCursor.arrow.set()
+        }
+    }
+}
+
+/// When the status menu closes with no DockAway window key, it gives focus
+/// back to the app that was in front. A menu command whose window opens a
+/// moment after the menu closes sets this so DockAway keeps focus for it;
+/// macOS won't let DockAway take focus back afterward on its own.
+@MainActor
+enum StatusMenuFocus {
+    static var keepsFocusForWindow = false
+
+    nonisolated static func isMenuWindowClassName(_ className: String) -> Bool {
+        className.contains("MenuWindow")
+    }
+
+    static func hasVisibleMenuWindow(in windows: [NSWindow]) -> Bool {
+        windows.contains { $0.isVisible && isMenuWindowClassName(String(describing: type(of: $0))) }
+    }
+
+    /// Whether closing a prompt should hand focus back to the app it was
+    /// opened over: only while DockAway still has focus and no other DockAway
+    /// window has taken it.
+    static func shouldReturnFocus(to processIdentifier: pid_t?,
+                                  ownProcessIdentifier: pid_t,
+                                  appIsActive: Bool,
+                                  hasModalWindow: Bool,
+                                  keyWindowIsOther: Bool) -> Bool {
+        guard let processIdentifier, processIdentifier != ownProcessIdentifier else { return false }
+        return appIsActive && !hasModalWindow && !keyWindowIsOther
+    }
+
+    /// Gives focus back to the app a prompt was opened over once the prompt
+    /// has closed, as the status menu does when it closes.
+    static func returnFocus(to application: NSRunningApplication?, closing window: NSWindow) {
+        guard let application else { return }
+        let promptWindowNumber = window.windowNumber
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                let keyWindow = NSApp.keyWindow
+                guard !application.isTerminated,
+                      shouldReturnFocus(to: application.processIdentifier,
+                                        ownProcessIdentifier: getpid(),
+                                        appIsActive: NSApp.isActive,
+                                        hasModalWindow: NSApp.modalWindow != nil,
+                                        keyWindowIsOther: keyWindow.map { $0.windowNumber != promptWindowNumber } ?? false) else { return }
+                application.activate(options: [])
+            }
         }
     }
 }

@@ -23,6 +23,8 @@ struct ForceClickMiddleClickTracker {
         case pass
         /// Hold or drop the event.
         case swallow
+        /// Discard a stale held press without posting an orphaned mouse-down.
+        case discardHeld
         /// Send the held press, then let things carry on.
         case replayHeld
         /// Send the held press, then this event after it, keeping their order.
@@ -39,6 +41,9 @@ struct ForceClickMiddleClickTracker {
     static let settledPressure: Float = 0.25
     /// The longest a press waits to become a force click.
     static let forceWindow: TimeInterval = 0.6
+    /// How long after the force window a lifted button's release may still
+    /// be on its way before the held press is given up on.
+    static let releaseGrace: TimeInterval = 0.1
 
     private(set) var phase: Phase = .idle
     private var heldAt: TimeInterval = 0
@@ -47,7 +52,6 @@ struct ForceClickMiddleClickTracker {
 
     /// A left press. `fingersOnTrackpad` is nil when that isn't known.
     mutating func mouseDown(fingersOnTrackpad: Int?, now: TimeInterval) -> Action {
-        guard phase == .idle || phase == .passing else { return .pass }
         if fingersOnTrackpad == 0 {
             phase = .passing
             return .pass
@@ -114,9 +118,17 @@ struct ForceClickMiddleClickTracker {
     }
 
     /// A timed check while holding. Nil when nothing changes.
-    mutating func tick(now: TimeInterval) -> Action? {
+    mutating func tick(now: TimeInterval, isButtonStillDown: Bool = true) -> Action? {
         guard phase == .holding else { return nil }
         let held = now - heldAt
+        if !isButtonStillDown {
+            // The button reads up a moment before its release reaches the
+            // tap, so wait for the release to replay the click. Only a
+            // release that never arrives leaves the held press to discard.
+            guard held >= Self.forceWindow + Self.releaseGrace else { return nil }
+            phase = .idle
+            return .discardHeld
+        }
         let release = (!fromTrackpad && held >= Self.trackpadReportWait)
             || (held >= Self.settleCheck && latestPressure < Self.settledPressure)
             || held >= Self.forceWindow
@@ -125,10 +137,20 @@ struct ForceClickMiddleClickTracker {
         return .replayHeld
     }
 
-    /// Lets a held press go, such as when the tap stops or the feature turns off.
-    mutating func reset() -> Action? {
-        defer { phase = .idle }
-        return phase == .holding ? .replayHeld : nil
+    /// Lets a held press go only while the physical button is still down.
+    /// Otherwise discards it so an orphaned press can never stick down.
+    mutating func reset(isButtonStillDown: Bool = true) -> Action? {
+        let previous = phase
+        if previous == .holding && isButtonStillDown {
+            phase = .passing
+            return .replayHeld
+        }
+        phase = .idle
+        return nil
+    }
+
+    mutating func discard() {
+        phase = .idle
     }
 }
 
@@ -144,22 +166,31 @@ final class ForceClickMiddleClickController {
     private static let quickLookEventType: UInt32 = 33
 
     /// How long after a replayed press its release follows.
-    private static let releaseGap: TimeInterval = 0.05
+    private static let releaseGap: TimeInterval = 0.015
 
     private var eventTap: EventTap?
     private var tracker = ForceClickMiddleClickTracker()
     private var heldPress: CGEvent?
     private var checks: [DispatchWorkItem] = []
+    private var pendingRelease: (workItem: DispatchWorkItem, event: CGEvent)?
     /// How many fingers are on the trackpad, or nil when that isn't known.
     var fingersOnTrackpad: () -> Int? = { nil }
     var isSuppressed: () -> Bool = { false }
+    var isLeftMouseButtonDown: () -> Bool = {
+        CGEventSource.buttonState(.hidSystemState, button: .left)
+    }
+
+    isolated deinit {
+        stop()
+    }
 
     func setEnabled(_ enabled: Bool) {
         enabled ? start() : stop()
     }
 
     func stop() {
-        releaseHeldPress()
+        flushPendingRelease()
+        releaseHeldPress(stopping: true)
         eventTap?.invalidate()
         eventTap = nil
     }
@@ -175,7 +206,8 @@ final class ForceClickMiddleClickController {
 
     private func handle(type: CGEventType, event: CGEvent) -> Bool {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            releaseHeldPress()
+            flushPendingRelease()
+            releaseHeldPress(stopping: false)
             return false
         }
         // Only the trackpad's own events. Clicks DockAway or another tool
@@ -202,7 +234,13 @@ final class ForceClickMiddleClickController {
                 return false
             }
         case CGEventType.leftMouseDown.rawValue:
-            if isSuppressed() || Self.landsOnHostedUI(event) { return false }
+            // Deliver any delayed release from the previous click before a new press starts.
+            flushPendingRelease()
+            discardHeldPress()
+            if isSuppressed() || Self.landsOnHostedUI(event) {
+                tracker.discard()
+                return false
+            }
             action = tracker.mouseDown(fingersOnTrackpad: fingersOnTrackpad(),
                                        now: ProcessInfo.processInfo.systemUptime)
             if action == .swallow {
@@ -219,7 +257,7 @@ final class ForceClickMiddleClickController {
         return perform(action, current: event)
     }
 
-    /// Whether a press lands on System Settings, or on a window an
+    /// Whether a press lands on DockAway itself, System Settings, or on a window an
     /// out-of-process helper draws for an app, such as a settings page's
     /// pop-up menu or sheet, or an Open or Save dialog. Holding a press there
     /// and sending it on afterward could leave the helper's menu or sheet
@@ -229,8 +267,9 @@ final class ForceClickMiddleClickController {
         let windowID = CGWindowID(truncatingIfNeeded: event.getIntegerValueField(.mouseEventWindowUnderMousePointer))
         guard windowID != 0,
               let info = (CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]])?.first,
-              let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-              let app = NSRunningApplication(processIdentifier: pid) else { return false }
+              let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value else { return false }
+        if pid == getpid() { return true }
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         return app.bundleIdentifier == "com.apple.systempreferences" || app.activationPolicy == .prohibited
     }
 
@@ -240,22 +279,35 @@ final class ForceClickMiddleClickController {
             return false
         case .swallow:
             return true
+        case .discardHeld:
+            discardHeldPress()
+            return false
         case .replayHeld:
             replayHeldPress()
             return false
         case .replayHeldThenCurrent:
-            replayHeldPress()
-            guard let copy = current.copy() else { return true }
             if current.type == .leftMouseUp {
+                guard heldPress != nil else {
+                    cancelChecks()
+                    return false
+                }
+                guard let copy = current.copy() else {
+                    replayHeldPress()
+                    return false
+                }
+                replayHeldPress()
                 // A release right on the heels of its press reads to some
                 // apps as no click at all, so it follows a moment later.
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.releaseGap) { [weak self] in
-                    self?.post(copy)
+                let workItem = DispatchWorkItem { [weak self] in
+                    self?.flushPendingRelease()
                 }
+                pendingRelease = (workItem, copy)
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.releaseGap, execute: workItem)
+                return true
             } else {
-                post(copy)
+                replayHeldPress()
+                return false
             }
-            return true
         case .middleClick:
             postMiddleClick(at: heldPress?.location ?? current.location)
             heldPress = nil
@@ -270,10 +322,19 @@ final class ForceClickMiddleClickController {
         cancelChecks()
         for delay in [ForceClickMiddleClickTracker.trackpadReportWait,
                       ForceClickMiddleClickTracker.settleCheck,
-                      ForceClickMiddleClickTracker.forceWindow] {
+                      ForceClickMiddleClickTracker.forceWindow,
+                      ForceClickMiddleClickTracker.forceWindow + ForceClickMiddleClickTracker.releaseGrace] {
             let check = DispatchWorkItem { [weak self] in
-                guard let self, self.tracker.tick(now: ProcessInfo.processInfo.systemUptime) == .replayHeld else { return }
-                self.replayHeldPress()
+                guard let self else { return }
+                switch self.tracker.tick(now: ProcessInfo.processInfo.systemUptime,
+                                         isButtonStillDown: self.isLeftMouseButtonDown()) {
+                case .replayHeld:
+                    self.replayHeldPress()
+                case .discardHeld:
+                    self.discardHeldPress()
+                default:
+                    break
+                }
             }
             checks.append(check)
             DispatchQueue.main.asyncAfter(deadline: .now() + delay + 0.005, execute: check)
@@ -285,9 +346,26 @@ final class ForceClickMiddleClickController {
         checks.removeAll()
     }
 
-    private func releaseHeldPress() {
-        if tracker.reset() == .replayHeld { replayHeldPress() }
+    private func flushPendingRelease() {
+        guard let pending = pendingRelease else { return }
+        pendingRelease = nil
+        pending.workItem.cancel()
+        post(pending.event)
+    }
+
+    private func discardHeldPress() {
         cancelChecks()
+        heldPress = nil
+    }
+
+    private func releaseHeldPress(stopping: Bool) {
+        let stillDown = isLeftMouseButtonDown()
+        if tracker.reset(isButtonStillDown: stillDown) == .replayHeld {
+            if stopping { tracker.discard() }
+            replayHeldPress()
+        } else {
+            discardHeldPress()
+        }
     }
 
     private func replayHeldPress() {
@@ -297,9 +375,12 @@ final class ForceClickMiddleClickController {
         post(held)
     }
 
-    /// Sends a held event on from where it was held, so whatever saw it
-    /// before DockAway, such as Klack's click sounds, doesn't see it twice.
+    /// Sends a held event on. Sent while its original is being handled, it
+    /// goes on from where it was held, so whatever saw it before DockAway,
+    /// such as Klack's click sounds, doesn't see it twice. Sent later, as a
+    /// delayed release is, it enters at the session like any posted event.
     private func post(_ event: CGEvent) {
+        event.timestamp = DispatchTime.now().uptimeNanoseconds
         event.setIntegerValueField(.eventSourceUserData, value: EventTap.replayedClickMarker)
         if let eventTap {
             eventTap.post(event)
