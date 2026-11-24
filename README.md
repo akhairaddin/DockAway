@@ -14,7 +14,7 @@
   <a href="https://github.com/akhairaddin/DockAway/issues">Support</a>
 </p>
 
-A native macOS menu-bar utility that shows the Dock on empty desktops and hides it when an app occupies the active display. Keep it visible for selected apps with the Auto-Hide Blacklist, and manage your desktops without leaving the menu bar.
+<p align="center">A native macOS menu-bar app that manages your desktops and keeps the Dock out of the way.</p>
 
 <p align="center">
   <img src="DockAway/docs/desktop-manager-preview.png" alt="DockAway Desktop Manager showing app icons over each desktop's wallpaper, numbered desktops, and add buttons grouped across two displays" width="380">
