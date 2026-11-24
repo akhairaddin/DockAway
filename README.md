@@ -16,11 +16,11 @@ A native macOS menu-bar utility that shows the Dock on empty desktops and hides 
   <a href="https://github.com/akhairaddin/DockAway/issues">Support</a>
 </p>
 
-## A Whole Desktop Manager, In Your Menubar.
-
 <p align="center">
   <img src="DockAway/docs/desktop-manager-preview.png" alt="DockAway Desktop Manager showing app icons over each desktop's wallpaper, numbered desktops, and add buttons grouped across two displays" width="380">
 </p>
+
+## A Whole Desktop Manager, In Your Menubar.
 
 See your desktops and their app icons, grouped by display, with each box optionally showing that desktop's own wallpaper. Switch to, create, close, drag desktops to reorder them or even move them between monitors. Fullscreen apps get their own named tiles, and the layout adapts to the number of desktops and apps. Incredibly handy when you have 2+ Displays and you're juggling between desktops.
 
