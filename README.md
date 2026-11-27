@@ -17,7 +17,7 @@
 <p align="center">A native macOS menu-bar app that manages your desktops and keeps the Dock out of the way.</p>
 
 <p align="center">
-  <img src="DockAway/docs/desktop-manager-preview.png" alt="DockAway Desktop Manager showing app icons over each desktop's wallpaper, numbered desktops, and add buttons grouped across two displays" width="380">
+  <img src="DockAway/docs/desktop-manager.png" alt="DockAway Desktop Manager showing app icons over each desktop's wallpaper, numbered desktops, and add buttons grouped across two displays" width="380">
 </p>
 
 ## A Whole Desktop Manager, In Your Menubar.
